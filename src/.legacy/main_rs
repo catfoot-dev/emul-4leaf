@@ -1,0 +1,342 @@
+use anyhow::{Context, Result};
+use goblin::pe::PE;
+use std::{collections::HashMap, fs, sync::{Arc, Mutex}};
+use unicorn_engine::{RegisterX86, Unicorn, unicorn_const::{Arch, HookType, Mode, Prot}};
+
+const STACK_BASE: u64 = 0x50000000;
+const STACK_SIZE: u64 = 1024 * 1024;
+const STACK_TOP: u64 = STACK_BASE + STACK_SIZE as u64;
+
+const HEAP_BASE: u64 = 0x60000000;
+const IP_STRING_ADDR: u64 = 0x60000010;
+const SHARED_MEM_BASE: u64 = 0x70000000;
+const FUNCTION_NAME_BASE: u64 = 0x80000000;
+const TEB_BASE: u64 = 0x90000000;
+const FAKE_IMPORT_BASE: u64 = 0xF0000000;
+const EXIT_ADDRESS: u64 = 0xFFFFFFFF;
+
+
+struct ImportFunc {
+    dll_name: String,
+    func_name: String,
+}
+
+fn main() -> Result<()> {
+    let dll_path = "Resources/4Leaf.dll";
+    let buffer = fs::read(dll_path).context("'./Resources/4Leaf.dll' file not found.")?;
+    let pe = PE::parse(&buffer).context("PE format parsing failed.")?;
+    if pe.is_64 {
+        panic!("ERROR: This code is for 32-bit DLLs only. A 64-bit DLL has been detected.")
+    }
+
+    let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_32)?;
+
+    let image_base = pe.image_base as u64;
+    let image_size = pe.header.optional_header.unwrap().windows_fields.size_of_image as usize;
+    let aligned_size = ((image_size + 0xFFF) & !0xFFF) as u64;
+
+    unicorn.mem_map(image_base, aligned_size, Prot::ALL)?;
+    println!("[*] Loaded 4Leaf.dll at 0x{:x} (Size: 0x{:x})", image_base, aligned_size);
+
+    for section in pe.sections {
+        let start = image_base + section.virtual_address as u64;
+        let data_start = section.pointer_to_raw_data as usize;
+        let data_size = section.size_of_raw_data as usize;
+        println!("start: 0x{:x}, data_start: 0x{:x}, data_end: 0x{:x}", start, data_start, data_start + data_size);
+        if data_size > 0 {
+            let data = &buffer[data_start..data_start + data_size];
+            unicorn.mem_write(start, data)?;
+        }
+    }
+
+    // 스택 메모리 할당
+    unicorn.mem_map(STACK_BASE, STACK_SIZE, Prot::ALL)?;
+    // [FIX 1] 스택 오버플로우/경계 읽기 에러 방지 (스택 바로 뒤 4KB 추가 할당)
+    // 0x50100000 주소를 읽으려다 죽는 것을 방지함
+    unicorn.mem_map(STACK_TOP, 4 * 1024, Prot::ALL)?;
+    // 힙 & 공유 메모리
+    unicorn.mem_map(HEAP_BASE, 1024 * 1024, Prot::ALL)?;
+    unicorn.mem_map(SHARED_MEM_BASE, 4 * 1024, Prot::ALL)?;
+    // println!("[*] Mapping Low Memory (0x0 ~ 0x20000) to bypass NULL pointer access");
+    // NULL 포인터 접근 방지 (0 ~ 128KB)
+    unicorn.mem_map(0, 0x20000, Prot::ALL)?;
+    // TEB
+    unicorn.mem_map(TEB_BASE, 4 * 1024, Prot::ALL)?;
+    unicorn.mem_write(TEB_BASE + 0x18, &(TEB_BASE as u32).to_le_bytes())?;
+    unicorn.reg_write(RegisterX86::FS, TEB_BASE)?;
+    // IAT
+    unicorn.mem_map(FAKE_IMPORT_BASE, 1024 * 1024, Prot::ALL | Prot::EXEC)?;
+
+    // IAT Directory 정보 가져오기 (Data Directory의 12번째 항목)
+    let opt_header = pe.header.optional_header.unwrap();
+    let import_dir_info = opt_header.data_directories.get_import_address_table().unwrap();
+    
+    let import_rva = import_dir_info.virtual_address as usize;
+    let import_size = import_dir_info.size as usize;
+
+    let mut descriptor_addr = image_base + import_rva as u64;
+    let mut import_map: HashMap<u64, ImportFunc> = HashMap::new();
+    let mut current_fake_addr = FAKE_IMPORT_BASE;
+    
+
+    // loop {
+    //     let mut desc_buf = [0u8; 20];
+    //     unicorn.mem_read(descriptor_addr, &mut desc_buf)?;
+
+    //     let original_first_thunk = u32::from_le_bytes(desc_buf[0..4].try_into()?); // ILT (Names)
+    //     let name_rva = u32::from_le_bytes(desc_buf[12..16].try_into()?); // DLL Name
+    //     let first_thunk = u32::from_le_bytes(desc_buf[16..20].try_into()?); // IAT (Address Write Target!)
+        
+    //     println!("original_first_thunk: 0x{:x}, name_rva: 0x{:x}, first_thunk: 0x{:x}", original_first_thunk, name_rva, first_thunk);
+    //     if original_first_thunk == 0 && first_thunk == 0 {
+    //         break;
+    //     }
+
+    //     let dll_name = read_string_from_mem(&unicorn, image_base + name_rva as u64)?;
+    //     println!("    Processing DLL: {}", dll_name);
+
+    //     let mut thunk_rva = if original_first_thunk != 0 { original_first_thunk } else { first_thunk };
+    //     let mut iat_rva = first_thunk;
+
+    //     loop {
+    //         let mut thunk_data_buf = [0u8; 4];
+    //         unicorn.mem_read(image_base + thunk_rva as u64, &mut thunk_data_buf)?;
+
+    //         let thunk_data = u32::from_le_bytes(thunk_data_buf);
+    //         println!("        thunk_data: 0x{:x}", thunk_data);
+    //         if thunk_data == 0 {
+    //             break;
+    //         }
+
+    //         let func_name = if (thunk_data & FUNCTION_NAME_BASE as u32) != 0 {
+    //             println!("        Ordinal_{}", thunk_data & 0xFFFF);
+    //             format!("Ordinal_{}", thunk_data & 0xFFFF)
+    //         } else {
+    //             println!("        image_base: 0x{:x}, thunk_data: 0x{:x}", image_base, thunk_data);
+    //             println!("        address: 0x{:x}", image_base + thunk_data as u64 + 2);
+    //             read_string_from_mem(&unicorn, image_base + thunk_data as u64 + 2)?
+    //         };
+    //         println!("        func_name: {}", func_name);
+
+    //         let iat_address = image_base + iat_rva as u64;
+
+    //         let fake_addr = current_fake_addr;
+    //         current_fake_addr += 4;
+
+    //         unicorn.mem_write(iat_address, &(fake_addr as u32).to_le_bytes())?;
+
+    //         println!("    Hook {}!{} -> IAT: 0x{:x} (Val: 0x{:x})", dll_name, func_name, iat_address, fake_addr);
+
+    //         import_map.insert(fake_addr, ImportFunc {
+    //             dll_name: dll_name.clone(),
+    //             func_name: func_name,
+    //         });
+
+    //         thunk_rva += 4;
+    //         iat_rva += 4;
+    //     }
+
+    //     descriptor_addr += 20;
+    // }
+    
+    // // 유효한 IAT 정보가 있다면
+    // if iat_size > 0 {
+    //     let iat_start = image_base + iat_rva;
+    //     let iat_end = iat_start + iat_size;
+        
+    //     // println!("[*] header: 0x{:#?}", pe.header);
+    //     println!("[*] Brute-force Patching IAT: 0x{:x} ~ 0x{:x} (Size: 0x{:x})", iat_start, iat_end, iat_size);
+
+    //     // 4바이트 단위로 돌면서 모든 슬롯을 '범용 가짜 주소'로 채웁니다.
+    //     // FAKE_IMPORT_BASE (0xF0000000)를 사용합니다.
+    //     // 모든 API 호출이 0xF0000000 하나로 몰리게 됩니다.
+    //     let mut addr = iat_start;
+    //     while addr < iat_end {
+    //         let fake_addr = addr + 0xb000000;
+    //         println!("[*] Patching IAT: 0x{:x} -> 0x{:x}", addr, fake_addr);
+    //         unicorn.mem_write(addr, &(fake_addr as u32).to_le_bytes())?;
+    //         addr += 4;
+    //     }
+    // } else {
+    //     println!("[!] Warning: IAT Directory not found or size is 0.");
+    // }
+
+    let mut import_map = Arc::new(Mutex::new(import_map));
+
+    // let mut current_fake_addr = FAKE_IMPORT_BASE;
+
+    println!("[*] Patching Import Address Table (IAT)...");
+    for import in pe.imports {
+        let dll_name = import.dll.to_string();
+        let func_name = import.name.to_string();
+
+        let iat_addr = image_base + import.offset as u64;
+        // let fake_addr = iat_addr + 0xB0000000;
+        let addr_bytes = current_fake_addr.to_le_bytes();
+        let addr_bytes_32 = &addr_bytes[..4];
+
+        unicorn.mem_write(iat_addr, addr_bytes_32)?;
+
+        // unicorn.mem_write(iat_addr, &fake_addr.to_le_bytes())?;
+
+        import_map.lock().unwrap().insert(current_fake_addr, ImportFunc {
+            dll_name: dll_name.clone(),
+            func_name: func_name.clone(),
+        });
+
+        println!("    Hooked {}!{} 0x{:x} -> 0x{:x}", dll_name, func_name, iat_addr, current_fake_addr);
+        current_fake_addr += 1;
+    }
+
+    // let map_clone = import_map.clone();
+
+    // let map_mutex = Arc::new(Mutex::new(import_map));
+
+    unicorn.add_code_hook(FAKE_IMPORT_BASE, FAKE_IMPORT_BASE + 0xba000, move |uc, addr, _size| {
+        println!("\n[!] External Call Intercepted!");
+        println!("    Address: 0x{:x}", addr);
+
+        let map = import_map.lock().unwrap();
+        if let Some(info) = map.get(&addr) {
+            println!("    Target: {}!{}", info.dll_name, info.func_name);
+        } else {
+            println!("    Target: unknown");
+        }
+
+        // EAX(리턴값) = 1 (성공 가정)
+        uc.reg_write(RegisterX86::EAX, 0).unwrap();
+        
+        // 스택에서 리턴 주소 읽기
+        let esp = uc.reg_read(RegisterX86::ESP).unwrap();
+        let mut buf = [0u8; 4];
+        uc.mem_read(esp, &mut buf).unwrap();
+        let ret_addr = u32::from_le_bytes(buf) as u64;
+        
+        println!("    Returning to 0x{:x}\n", ret_addr);
+        
+        // [중요] 스택 정리 (stdcall 가정)
+        // 함수마다 인자 개수가 달라서 정확히 정리는 못하지만,
+        // 일단 리턴 주소만 Pop 하고 점프해봅니다. (운에 맡김)
+        uc.reg_write(RegisterX86::ESP, esp + 4).unwrap(); // RET 효과
+        uc.reg_write(RegisterX86::EIP, ret_addr).unwrap();
+    })?;
+
+    unicorn.add_mem_hook(
+        HookType::MEM_READ_UNMAPPED | HookType::MEM_WRITE_UNMAPPED | HookType::MEM_FETCH_UNMAPPED,
+        0,
+        0xFFFFFFFF,
+        |uc, access, addr, size, value| {
+            println!("\n[!!!!!!] MEMORY ERROR DETECTED: {:?} at 0x{:x} (Size: {})", access, addr, size);
+            
+            match access {
+                unicorn_engine::unicorn_const::MemType::READ_UNMAPPED => print!("    Type: READ_UNMAPPED"),
+                unicorn_engine::unicorn_const::MemType::WRITE_UNMAPPED => print!("    Type: WRITE_UNMAPPED"),
+                unicorn_engine::unicorn_const::MemType::FETCH_UNMAPPED => print!("    Type: FETCH_UNMAPPED"),
+                _ => print!("    Type: Unknown"),
+            }
+            
+            println!(" at 0x{:x} (Size: {})", addr, size);
+            println!("    Trying to write value: 0x{:x}", value); // 쓰기 시도한 값
+            if let Ok(eip) = uc.reg_read(RegisterX86::EIP) {
+                println!("    Code Address (EIP): 0x{:x}", eip);
+            }
+            println!("");
+
+            // 여기서 true를 리턴하면 에러를 무시하고 진행하지만, 
+            // 쓰기 에러는 무시하면 데이터가 증발하므로 false로 멈추는 게 좋습니다.
+            false 
+        }
+    )?;
+
+    // let entry_point = image_base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+
+    // let mut esp: u64 = STACK_TOP as u64;
+    // esp -= 4;
+    // unicorn.mem_write(esp, &0u32.to_le_bytes())?;
+    // esp -= 4;
+    // unicorn.mem_write(esp, &1u32.to_le_bytes())?;
+    // esp -= 4;
+    // unicorn.mem_write(esp, &(image_base as u32).to_le_bytes())?;
+    // esp -= 4;
+    // unicorn.mem_write(esp, &EXIT_ADDRESS.to_le_bytes())?;
+    // unicorn.reg_write(RegisterX86::ESP, esp)?;
+
+    // println!("[*] Function address: 0x{:x}", entry_point);
+    // println!("[*] Calling DllMain(0, 1, 0x{:x})...", image_base);
+
+    // if let Err(e) = unicorn.emu_start(entry_point, EXIT_ADDRESS, 0, 0) {
+    //     println!("\n[!] DllMain Failed: {:?}\n", e);
+    // } else {
+    //     println!("[*] DllMain finished.");
+    // }
+
+    let target_func_name = "Main";
+    let mut main_addr = 0;
+
+    for export in pe.exports {
+        if let Some(name) = export.name {
+            let addr = image_base + export.rva as u64;
+            // println!("    Function {}: RVA 0x{:x} -> Address 0x{:x}", name, export.rva, addr);
+            if name == target_func_name {
+                main_addr = addr;
+                println!("[*] Found export '{}'", target_func_name);
+                println!("    RVA 0x{:x} -> Address 0x{:x}", export.rva, addr);
+            }
+        }
+    }
+
+    if main_addr == 0 {
+        panic!("Can't found '{}' function from DLL.", target_func_name);
+    }
+
+    // ip address
+    let ip_string = b"127.0.0.1\0";
+    unicorn.mem_write(IP_STRING_ADDR, ip_string)?;
+
+    let mut esp: u64 = STACK_TOP as u64;
+
+    let handle: u32 = 0;
+    esp -= 4;
+    unicorn.mem_write(esp, &handle.to_le_bytes())?;
+    let a4leaf_dll_handle: u32 = 0;
+    esp -= 4;
+    unicorn.mem_write(esp, &a4leaf_dll_handle.to_le_bytes())?;
+    esp -= 4;
+    unicorn.mem_write(esp, &(SHARED_MEM_BASE as u32).to_le_bytes())?;
+    esp -= 4;
+    unicorn.mem_write(esp, &(IP_STRING_ADDR as u32).to_le_bytes())?;
+    let cmd_show: u32 = 1;
+    esp -= 4;
+    unicorn.mem_write(esp, &cmd_show.to_le_bytes())?;
+    esp -= 4;
+    unicorn.mem_write(esp, &EXIT_ADDRESS.to_le_bytes())?;
+    unicorn.reg_write(RegisterX86::ESP, esp)?;
+
+    println!("[*] Function address: 0x{:x}", main_addr);
+    println!("[*] Calling Main({}, {}, 0x{:x}, \"{}\", {})...", handle, a4leaf_dll_handle, SHARED_MEM_BASE, String::from_utf8(ip_string.to_vec()).unwrap(), cmd_show);
+
+    if let Err(e) = unicorn.emu_start(main_addr, EXIT_ADDRESS, 0, 0) {
+        println!("\n[!] Emulation stopped/failed: {:?}", e);
+        let pc = unicorn.reg_read(RegisterX86::EIP)?;
+        println!("    Stopped at EIP: 0x{:x}\n", pc);
+    } else {
+        println!("[*] Main finished successfully.");
+    }
+
+    Ok(())
+}
+
+fn read_string_from_mem(uc: &Unicorn<()>, addr: u64) -> Result<String> {
+    let mut ret = String::new();
+    let mut ptr = addr;
+    loop {
+        let mut buf = [0u8; 1];
+        uc.mem_read(ptr, &mut buf)?;
+        if buf[0] == 0 {
+            break;
+        }
+        ret.push(buf[0] as char);
+        ptr += 1;
+    }
+    Ok(ret)
+}
