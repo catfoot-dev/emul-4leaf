@@ -11,27 +11,31 @@ mod dll_user32;
 mod dll_winmm;
 mod dll_ws2_32;
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
+use std::{collections::HashMap, time::Instant, sync::{mpsc::Sender, Arc, Mutex, atomic::{AtomicU32, Ordering}}};
 
 use unicorn_engine::Unicorn;
 
 use crate::{
     helper::{FAKE_IMPORT_BASE, HEAP_BASE},
     packet_logger::PacketLogger,
+    debug::common::UiCommand,
     win32::{
         dll_advapi32::DllADVAPI32, dll_comctl32::DllCOMCTL32, dll_gdi32::DllGDI32,
         dll_imm32::DllIMM32, dll_kernel32::DllKERNEL32, dll_msvcp60::DllMSVCP60,
         dll_msvcrt::DllMSVCRT, dll_ole32::DllOle32, dll_shell32::DllSHELL32, dll_user32::DllUSER32,
         dll_winmm::DllWINMM, dll_ws2_32::DllWS2_32,
     },
+    browser::win_frame::WinFrame,
 };
 
+/// 함수 호출이 끝난 뒤 스택을 어떻게 되돌려 놓을 것인지 명시하는 열거형
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackCleanup {
     Caller,
     Callee(usize),
 }
 
+/// Fake API (Win32 API 후킹) 호출 결과값을 에뮬레이터 코어에 어떻게 돌려줄지 정의
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiHookResult {
     pub cleanup: StackCleanup,
@@ -68,6 +72,7 @@ pub fn caller_result(result: Option<(usize, Option<i32>)>) -> Option<ApiHookResu
     result.map(|(_, return_value)| ApiHookResult::caller(return_value))
 }
 
+/// 메모리에 로드되어 에뮬레이팅될 준비가 끝난 프록시 DLL의 메타데이터 구조체
 #[derive(Debug, Clone)]
 pub struct LoadedDll {
     pub name: String,
@@ -160,74 +165,73 @@ pub struct WindowState {
     pub user_data: u32,
 }
 
-// Unicorn 엔진이 품고 다닐 데이터 (User Data)
+/// Unicorn 엔진의 `User Data` 에 적재되어, 모든 Win32 가상 OS 환경의 전역 상태 트리를
+/// 관리하고 유지하는 핵심 컨텍스트 블록
 pub struct Win32Context {
-    // 힙 메모리 할당을 위한 포인터 (다음에 쓸 빈 공간의 주소)
-    pub heap_cursor: u64,
+    /// 힙(Heap) 메모리 할당을 위한 기준 포인터 (단순 증가형 메모리 할당 방식)
+    pub heap_cursor: AtomicU32,
     // import 카운터
-    pub import_address: u64,
+    pub import_address: AtomicU32,
 
-    pub dll_modules: Rc<RefCell<HashMap<String, LoadedDll>>>,
-    pub address_map: HashMap<u64, String>,
+    pub dll_modules: Arc<Mutex<HashMap<String, LoadedDll>>>,
+    pub address_map: Arc<Mutex<HashMap<u64, String>>>,
 
     // === 새로 추가된 상태 ===
     /// Win32 GetLastError / SetLastError
-    pub last_error: u32,
+    pub last_error: AtomicU32,
     /// 가상 핸들 카운터 (HWND, HDC, HFONT, SOCKET 등에 사용)
-    pub handle_counter: u32,
+    pub handle_counter: AtomicU32,
     /// 가상 소켓 맵 (핸들 → 상태)
-    pub sockets: HashMap<u32, SocketState>,
-    /// 가상 윈도우 맵 (HWND → 상태)
-    pub windows: HashMap<u32, WindowState>,
+    pub sockets: Arc<Mutex<HashMap<u32, SocketState>>>,
+    /// 윈도우 관리 프레임
+    pub win_frame: Arc<Mutex<WinFrame>>,
     /// 등록된 윈도우 클래스
-    pub window_classes: HashMap<String, WindowClass>,
+    pub window_classes: Arc<Mutex<HashMap<String, WindowClass>>>,
     /// 가상 GDI 오브젝트 맵 (핸들 → 오브젝트)
-    pub gdi_objects: HashMap<u32, GdiObject>,
+    pub gdi_objects: Arc<Mutex<HashMap<u32, GdiObject>>>,
     /// 가상 이벤트 맵 (핸들 → 상태)
-    pub events: HashMap<u32, EventState>,
+    pub events: Arc<Mutex<HashMap<u32, EventState>>>,
     /// TLS 슬롯 (인덱스 → 값)
-    pub tls_slots: HashMap<u32, u32>,
+    pub tls_slots: Arc<Mutex<HashMap<u32, u32>>>,
     /// TLS 슬롯 카운터
-    pub tls_counter: u32,
+    pub tls_counter: AtomicU32,
     /// 가상 레지스트리 (키 경로 → 값)
-    pub registry: HashMap<String, Vec<u8>>,
+    pub registry: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// GetTickCount 기준 시간
     pub start_time: Instant,
     /// rand() 시드 상태
-    pub rand_state: u32,
+    pub rand_state: AtomicU32,
     /// 패킷 로거 (프로토콜 분석용)
-    pub packet_logger: PacketLogger,
+    pub packet_logger: Arc<Mutex<PacketLogger>>,
 }
 
 impl Win32Context {
-    pub fn new() -> Self {
+    pub fn new(ui_tx: Option<Sender<UiCommand>>) -> Self {
         Win32Context {
-            heap_cursor: HEAP_BASE,
-            import_address: FAKE_IMPORT_BASE,
-            dll_modules: Rc::new(RefCell::new(HashMap::new())),
-            address_map: HashMap::new(),
+            heap_cursor: AtomicU32::new(HEAP_BASE as u32),
+            import_address: AtomicU32::new(FAKE_IMPORT_BASE as u32),
+            dll_modules: Arc::new(Mutex::new(HashMap::new())),
+            address_map: Arc::new(Mutex::new(HashMap::new())),
             // 새 상태
-            last_error: 0,
-            handle_counter: 0x1000, // 핸들은 0x1000부터 시작
-            sockets: HashMap::new(),
-            windows: HashMap::new(),
-            window_classes: HashMap::new(),
-            gdi_objects: HashMap::new(),
-            events: HashMap::new(),
-            tls_slots: HashMap::new(),
-            tls_counter: 0,
-            registry: HashMap::new(),
+            last_error: AtomicU32::new(0),
+            handle_counter: AtomicU32::new(0x1000), // 핸들은 0x1000부터 시작
+            sockets: Arc::new(Mutex::new(HashMap::new())),
+            win_frame: Arc::new(Mutex::new(WinFrame::new(ui_tx))),
+            window_classes: Arc::new(Mutex::new(HashMap::new())),
+            gdi_objects: Arc::new(Mutex::new(HashMap::new())),
+            events: Arc::new(Mutex::new(HashMap::new())),
+            tls_slots: Arc::new(Mutex::new(HashMap::new())),
+            tls_counter: AtomicU32::new(0),
+            registry: Arc::new(Mutex::new(HashMap::new())),
             start_time: Instant::now(),
-            rand_state: 12345,
-            packet_logger: PacketLogger::new(),
+            rand_state: AtomicU32::new(12345),
+            packet_logger: Arc::new(Mutex::new(PacketLogger::new())),
         }
     }
 
     /// 새 가상 핸들 발급
-    pub fn alloc_handle(&mut self) -> u32 {
-        let handle = self.handle_counter;
-        self.handle_counter += 1;
-        handle
+    pub fn alloc_handle(&self) -> u32 {
+        self.handle_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn handle(
@@ -249,7 +253,7 @@ impl Win32Context {
             "WINMM.dll" => DllWINMM::handle(uc, func_name),
             "WS2_32.dll" => DllWS2_32::handle(uc, func_name),
             _ => {
-                println!("Undefined DLL: {}", dll_name);
+                crate::emu_log!("Undefined DLL: {}", dll_name);
                 None
             }
         }

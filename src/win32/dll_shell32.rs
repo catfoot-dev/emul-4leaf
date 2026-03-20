@@ -2,17 +2,26 @@ use unicorn_engine::Unicorn;
 
 use crate::win32::{ApiHookResult, Win32Context, callee_result};
 
-pub struct DllSHELL32 {}
+/// `SHELL32.dll` 프록시 구현 모듈
+///
+/// 윈도우 쉘 환경에 접근하는 API(Drag & Drop, 바탕화면 실행 등)에 대한 가상 스텁을 제공
+pub struct DllSHELL32;
 
 impl DllSHELL32 {
+    /// 함수명 기준 `SHELL32.dll` API 구현체
+    ///
+    /// 처리를 성공했다면 스택 보정값과 리턴값을 포함한 `ApiHookResult`를 반환
     pub fn handle(_uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
         callee_result(match func_name {
+            // API: HINSTANCE ShellExecuteA(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile, LPCSTR lpParameters, LPCSTR lpDirectory, INT nShowCmd)
+            // 역할: 지정된 파일이나 응용 프로그램에 대한 작업을 수행
             "ShellExecuteA" => {
-                println!("[SHELL32] ShellExecuteA(...)");
+                crate::emu_log!("[SHELL32] ShellExecuteA(...)");
                 Some((6, Some(42))) // > 32 = 성공
             }
+
             _ => {
-                println!("[SHELL32] UNHANDLED: {}", func_name);
+                crate::emu_log!("[SHELL32] UNHANDLED: {}", func_name);
                 None
             }
         })
