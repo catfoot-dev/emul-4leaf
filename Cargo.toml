@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+encoding_rs = "0.8"
 hex = "0.4"
 
 unicorn-engine = "2.0.1"

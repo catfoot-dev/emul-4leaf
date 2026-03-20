@@ -1,21 +1,30 @@
-mod server;
 mod debug;
+mod server;
+#[macro_use]
 mod helper;
+mod packet_logger;
 mod win32;
 
 use helper::{SHARED_MEM_BASE, UnicornHelper};
-use std::{any::Any, sync::mpsc::{Receiver, Sender, channel}, thread};
-use unicorn_engine::{Unicorn, unicorn_const::{Arch, Mode}};
+use std::{
+    any::Any,
+    sync::mpsc::{Receiver, Sender, channel},
+    thread,
+};
+use unicorn_engine::{
+    Unicorn,
+    unicorn_const::{Arch, Mode},
+};
 use win32::Win32Context;
 
-use crate::debug::{Debug, create_debug_window};
 use crate::debug::common::{CpuContext, DebugCommand};
+use crate::debug::create_debug_window;
 
 fn main() {
     // 1. 통신 채널 생성
     let (cmd_tx, cmd_rx) = channel::<DebugCommand>();
     let (state_tx, state_rx) = channel::<CpuContext>();
-    
+
     thread::spawn(move || {
         if let Err(e) = emu_4leaf(state_tx, cmd_rx) {
             eprintln!("[4leaf Emulator Error] {:?}", e);
@@ -37,8 +46,8 @@ fn emu_4leaf(state_tx: Sender<CpuContext>, cmd_rx: Receiver<DebugCommand>) -> Re
         .expect("Failed to create the Unicorn");
 
     unicorn.setup(state_tx, cmd_rx).unwrap();
-    
-    let dll_list = vec![
+
+    let dll_list = [
         "Core.dll",
         "WinCore.dll",
         "DNet.dll",
@@ -50,14 +59,19 @@ fn emu_4leaf(state_tx: Sender<CpuContext>, cmd_rx: Receiver<DebugCommand>) -> Re
         let filename = format!("Resources/{}", dll_name);
         let target_base = (0x3000_0000 + i * 0x100_0000) as u64;
 
-        println!("\n[*] Loading address {:#x} from {}...", target_base, filename);
-        let loaded_dll = unicorn.load_dll_with_reloc(filename.as_str(), target_base).unwrap();
+        println!(
+            "\n[*] Loading address {:#x} from {}...",
+            target_base, filename
+        );
+        let loaded_dll = unicorn
+            .load_dll_with_reloc(filename.as_str(), target_base)
+            .unwrap();
 
         println!("[*] Resolving Imports for {}...", filename);
         unicorn.resolve_imports(&loaded_dll).unwrap();
 
         println!("\n[*] Initializing {}...", dll_name);
-        unicorn.run_dll_main(&loaded_dll).unwrap();
+        unicorn.run_dll_entry(&loaded_dll).unwrap();
     }
 
     run_4leaf_main(&mut unicorn);

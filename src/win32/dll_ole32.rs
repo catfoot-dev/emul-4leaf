@@ -1,25 +1,24 @@
 use unicorn_engine::Unicorn;
 
-use crate::win32::Win32Context;
+use crate::win32::{ApiHookResult, Win32Context, callee_result};
 
 pub struct DllOle32 {}
 
 impl DllOle32 {
-    pub fn co_create_instance() -> Option<(usize, Option<i32>)>{
-        println!("co_create_instance");
-        Some((0, None))
-    }
-
-    pub fn co_initialize() -> Option<(usize, Option<i32>)>{
-        println!("co_initialize");
-        Some((0, None))
-    }
-
-    pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<(usize, Option<i32>)> {
-        match func_name {
-            "CoCreateInstance" => DllOle32::co_create_instance(),
-            "CoInitialize" => DllOle32::co_initialize(),
-            _ => None
-        }
+    pub fn handle(_uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
+        callee_result(match func_name {
+            "CoCreateInstance" => {
+                println!("[OLE32] CoCreateInstance(...)");
+                Some((5, Some(-2147467259i32))) // E_NOINTERFACE (0x80004002)
+            }
+            "CoInitialize" => {
+                println!("[OLE32] CoInitialize(...)");
+                Some((1, Some(0))) // S_OK
+            }
+            _ => {
+                println!("[OLE32] UNHANDLED: {}", func_name);
+                None
+            }
+        })
     }
 }

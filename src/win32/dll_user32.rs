@@ -1,601 +1,300 @@
 use unicorn_engine::Unicorn;
 
-use crate::win32::Win32Context;
+use crate::helper::UnicornHelper;
+use crate::win32::{
+    ApiHookResult, Win32Context, WindowClass, WindowState, callee_result, caller_result,
+};
 
 pub struct DllUSER32 {}
 
 impl DllUSER32 {
-    pub fn message_box_a() -> Option<(usize, Option<i32>)>{
-        println!("message_box_a");
-        Some((0, None))
-    }
-
-    pub fn close_window() -> Option<(usize, Option<i32>)>{
-        println!("close_window");
-        Some((0, None))
-    }
-
-    pub fn enable_window() -> Option<(usize, Option<i32>)>{
-        println!("enable_window");
-        Some((0, None))
-    }
-
-    pub fn is_window_enabled() -> Option<(usize, Option<i32>)>{
-        println!("is_window_enabled");
-        Some((0, None))
-    }
-
-    pub fn move_window() -> Option<(usize, Option<i32>)>{
-        println!("move_window");
-        Some((0, None))
-    }
-
-    pub fn send_message_a() -> Option<(usize, Option<i32>)>{
-        println!("send_message_a");
-        Some((0, None))
-    }
-
-    pub fn load_cursor_a() -> Option<(usize, Option<i32>)>{
-        println!("load_cursor_a");
-        Some((0, None))
-    }
-
-    pub fn is_dialog_message_a() -> Option<(usize, Option<i32>)>{
-        println!("is_dialog_message_a");
-        Some((0, None))
-    }
-
-    pub fn post_quit_message() -> Option<(usize, Option<i32>)>{
-        println!("post_quit_message");
-        Some((0, None))
-    }
-
-    pub fn set_focus() -> Option<(usize, Option<i32>)>{
-        println!("set_focus");
-        Some((0, None))
-    }
-
-    pub fn dispatch_message_a() -> Option<(usize, Option<i32>)>{
-        println!("dispatch_message_a");
-        Some((0, None))
-    }
-
-    pub fn translate_message() -> Option<(usize, Option<i32>)>{
-        println!("translate_message");
-        Some((0, None))
-    }
-
-    pub fn peek_message_a() -> Option<(usize, Option<i32>)>{
-        println!("peek_message_a");
-        Some((0, None))
-    }
-
-    pub fn msg_wait_for_multiple_objects() -> Option<(usize, Option<i32>)>{
-        println!("msg_wait_for_multiple_objects");
-        Some((0, None))
-    }
-
-    pub fn update_window() -> Option<(usize, Option<i32>)>{
-        println!("update_window");
-        Some((0, None))
-    }
-
-    pub fn get_window() -> Option<(usize, Option<i32>)>{
-        println!("get_window");
-        Some((0, None))
-    }
-
-    pub fn get_menu_item_info_a() -> Option<(usize, Option<i32>)>{
-        println!("get_menu_item_info_a");
-        Some((0, None))
-    }
-
-    pub fn delete_menu() -> Option<(usize, Option<i32>)>{
-        println!("delete_menu");
-        Some((0, None))
-    }
-
-    pub fn get_system_menu() -> Option<(usize, Option<i32>)>{
-        println!("get_system_menu");
-        Some((0, None))
-    }
-
-    pub fn def_window_proc_a() -> Option<(usize, Option<i32>)>{
-        println!("def_window_proc_a");
-        Some((0, None))
-    }
-
-    pub fn create_window_ex_a() -> Option<(usize, Option<i32>)>{
-        println!("create_window_ex_a");
-        Some((0, None))
-    }
-
-    pub fn register_class_ex_a() -> Option<(usize, Option<i32>)>{
-        println!("register_class_ex_a");
-        Some((0, None))
-    }
-
-    pub fn get_class_info_ex_a() -> Option<(usize, Option<i32>)>{
-        println!("get_class_info_ex_a");
-        Some((0, None))
-    }
-
-    pub fn load_icon_a() -> Option<(usize, Option<i32>)>{
-        println!("load_icon_a");
-        Some((0, None))
-    }
-
-    pub fn def_m_d_i_child_proc_a() -> Option<(usize, Option<i32>)>{
-        println!("def_m_d_i_child_proc_a");
-        Some((0, None))
-    }
-
-    pub fn set_window_long_a() -> Option<(usize, Option<i32>)>{
-        println!("set_window_long_a");
-        Some((0, None))
-    }
-
-    pub fn call_window_proc_a() -> Option<(usize, Option<i32>)>{
-        println!("call_window_proc_a");
-        Some((0, None))
-    }
-
-    pub fn def_frame_proc_a() -> Option<(usize, Option<i32>)>{
-        println!("def_frame_proc_a");
-        Some((0, None))
-    }
-
-    pub fn get_message_a() -> Option<(usize, Option<i32>)>{
-        println!("get_message_a");
-        Some((0, None))
-    }
-
-    pub fn post_thread_message_a() -> Option<(usize, Option<i32>)>{
-        println!("post_thread_message_a");
-        Some((0, None))
-    }
-
-    pub fn begin_paint() -> Option<(usize, Option<i32>)>{
-        println!("begin_paint");
-        Some((0, None))
-    }
-
-    pub fn end_paint() -> Option<(usize, Option<i32>)>{
-        println!("end_paint");
-        Some((0, None))
-    }
-
-    pub fn scroll_window_ex() -> Option<(usize, Option<i32>)>{
-        println!("scroll_window_ex");
-        Some((0, None))
-    }
-
-    pub fn invalidate_rect() -> Option<(usize, Option<i32>)>{
-        println!("invalidate_rect");
-        Some((0, None))
-    }
-
-    pub fn set_scroll_info() -> Option<(usize, Option<i32>)>{
-        println!("set_scroll_info");
-        Some((0, None))
-    }
-
-    pub fn get_window_text_a() -> Option<(usize, Option<i32>)>{
-        println!("get_window_text_a");
-        Some((0, None))
-    }
-
-    pub fn get_d_c() -> Option<(usize, Option<i32>)>{
-        println!("get_d_c");
-        Some((0, None))
-    }
-
-    pub fn release_d_c() -> Option<(usize, Option<i32>)>{
-        println!("release_d_c");
-        Some((0, None))
-    }
-
-    pub fn kill_timer() -> Option<(usize, Option<i32>)>{
-        println!("kill_timer");
-        Some((0, None))
-    }
-
-    pub fn set_timer() -> Option<(usize, Option<i32>)>{
-        println!("set_timer");
-        Some((0, None))
-    }
-
-    pub fn remove_menu() -> Option<(usize, Option<i32>)>{
-        println!("remove_menu");
-        Some((0, None))
-    }
-
-    pub fn append_menu_a() -> Option<(usize, Option<i32>)>{
-        println!("append_menu_a");
-        Some((0, None))
-    }
-
-    pub fn create_menu() -> Option<(usize, Option<i32>)>{
-        println!("create_menu");
-        Some((0, None))
-    }
-
-    pub fn destroy_menu() -> Option<(usize, Option<i32>)>{
-        println!("destroy_menu");
-        Some((0, None))
-    }
-
-    pub fn get_desktop_window() -> Option<(usize, Option<i32>)>{
-        println!("get_desktop_window");
-        Some((0, None))
-    }
-
-    pub fn map_window_points() -> Option<(usize, Option<i32>)>{
-        println!("map_window_points");
-        Some((0, None))
-    }
-
-    pub fn system_parameters_info_a() -> Option<(usize, Option<i32>)>{
-        println!("system_parameters_info_a");
-        Some((0, None))
-    }
-
-    pub fn get_menu() -> Option<(usize, Option<i32>)>{
-        println!("get_menu");
-        Some((0, None))
-    }
-
-    pub fn adjust_window_rect_ex() -> Option<(usize, Option<i32>)>{
-        println!("adjust_window_rect_ex");
-        Some((0, None))
-    }
-
-    pub fn get_window_rect() -> Option<(usize, Option<i32>)>{
-        println!("get_window_rect");
-        Some((0, None))
-    }
-
-    pub fn get_client_rect() -> Option<(usize, Option<i32>)>{
-        println!("get_client_rect");
-        Some((0, None))
-    }
-
-    pub fn destroy_window() -> Option<(usize, Option<i32>)>{
-        println!("destroy_window");
-        Some((0, None))
-    }
-
-    pub fn get_parent() -> Option<(usize, Option<i32>)>{
-        println!("get_parent");
-        Some((0, None))
-    }
-
-    pub fn show_window() -> Option<(usize, Option<i32>)>{
-        println!("show_window");
-        Some((0, None))
-    }
-
-    pub fn get_window_long_a() -> Option<(usize, Option<i32>)>{
-        println!("get_window_long_a");
-        Some((0, None))
-    }
-
-    pub fn translate_m_d_i_sys_accel() -> Option<(usize, Option<i32>)>{
-        println!("translate_m_d_i_sys_accel");
-        Some((0, None))
-    }
-
-    pub fn draw_text_a() -> Option<(usize, Option<i32>)>{
-        println!("draw_text_a");
-        Some((0, None))
-    }
-
-    pub fn get_active_window() -> Option<(usize, Option<i32>)>{
-        println!("get_active_window");
-        Some((0, None))
-    }
-
-    pub fn set_window_pos() -> Option<(usize, Option<i32>)>{
-        println!("set_window_pos");
-        Some((0, None))
-    }
-
-    pub fn get_cursor_pos() -> Option<(usize, Option<i32>)>{
-        println!("get_cursor_pos");
-        Some((0, None))
-    }
-
-    pub fn is_window_visible() -> Option<(usize, Option<i32>)>{
-        println!("is_window_visible");
-        Some((0, None))
-    }
-
-    pub fn pt_in_rect() -> Option<(usize, Option<i32>)>{
-        println!("pt_in_rect");
-        Some((0, None))
-    }
-
-    pub fn set_rect() -> Option<(usize, Option<i32>)>{
-        println!("set_rect");
-        Some((0, None))
-    }
-
-    pub fn get_clipboard_data() -> Option<(usize, Option<i32>)>{
-        println!("get_clipboard_data");
-        Some((0, None))
-    }
-
-    pub fn get_focus() -> Option<(usize, Option<i32>)>{
-        println!("get_focus");
-        Some((0, None))
-    }
-
-    pub fn set_capture() -> Option<(usize, Option<i32>)>{
-        println!("set_capture");
-        Some((0, None))
-    }
-
-    pub fn get_capture() -> Option<(usize, Option<i32>)>{
-        println!("get_capture");
-        Some((0, None))
-    }
-
-    pub fn release_capture() -> Option<(usize, Option<i32>)>{
-        println!("release_capture");
-        Some((0, None))
-    }
-
-    pub fn screen_to_client() -> Option<(usize, Option<i32>)>{
-        println!("screen_to_client");
-        Some((0, None))
-    }
-
-    pub fn create_caret() -> Option<(usize, Option<i32>)>{
-        println!("create_caret");
-        Some((0, None))
-    }
-
-    pub fn destroy_caret() -> Option<(usize, Option<i32>)>{
-        println!("destroy_caret");
-        Some((0, None))
-    }
-
-    pub fn get_async_key_state() -> Option<(usize, Option<i32>)>{
-        println!("get_async_key_state");
-        Some((0, None))
-    }
-
-    pub fn show_caret() -> Option<(usize, Option<i32>)>{
-        println!("show_caret");
-        Some((0, None))
-    }
-
-    pub fn set_caret_pos() -> Option<(usize, Option<i32>)>{
-        println!("set_caret_pos");
-        Some((0, None))
-    }
-
-    pub fn hide_caret() -> Option<(usize, Option<i32>)>{
-        println!("hide_caret");
-        Some((0, None))
-    }
-
-    pub fn load_cursor_from_file_a() -> Option<(usize, Option<i32>)>{
-        println!("load_cursor_from_file_a");
-        Some((0, None))
-    }
-
-    pub fn get_sys_color() -> Option<(usize, Option<i32>)>{
-        println!("get_sys_color");
-        Some((0, None))
-    }
-
-    pub fn client_to_screen() -> Option<(usize, Option<i32>)>{
-        println!("client_to_screen");
-        Some((0, None))
-    }
-
-    pub fn close_clipboard() -> Option<(usize, Option<i32>)>{
-        println!("close_clipboard");
-        Some((0, None))
-    }
-
-    pub fn set_clipboard_data() -> Option<(usize, Option<i32>)>{
-        println!("set_clipboard_data");
-        Some((0, None))
-    }
-
-    pub fn empty_clipboard() -> Option<(usize, Option<i32>)>{
-        println!("empty_clipboard");
-        Some((0, None))
-    }
-
-    pub fn open_clipboard() -> Option<(usize, Option<i32>)>{
-        println!("open_clipboard");
-        Some((0, None))
-    }
-
-    pub fn get_window_d_c() -> Option<(usize, Option<i32>)>{
-        println!("get_window_d_c");
-        Some((0, None))
-    }
-
-    pub fn set_window_rgn() -> Option<(usize, Option<i32>)>{
-        println!("set_window_rgn");
-        Some((0, None))
-    }
-
-    pub fn equal_rect() -> Option<(usize, Option<i32>)>{
-        println!("equal_rect");
-        Some((0, None))
-    }
-
-    pub fn get_key_state() -> Option<(usize, Option<i32>)>{
-        println!("get_key_state");
-        Some((0, None))
-    }
-
-    pub fn is_clipboard_format_available() -> Option<(usize, Option<i32>)>{
-        println!("is_clipboard_format_available");
-        Some((0, None))
-    }
-
-    pub fn register_class_a() -> Option<(usize, Option<i32>)>{
-        println!("register_class_a");
-        Some((0, None))
-    }
-
-    pub fn post_message_a() -> Option<(usize, Option<i32>)>{
-        println!("post_message_a");
-        Some((0, None))
-    }
-
-    pub fn is_zoomed() -> Option<(usize, Option<i32>)>{
-        println!("is_zoomed");
-        Some((0, None))
-    }
-
-    pub fn is_iconic() -> Option<(usize, Option<i32>)>{
-        println!("is_iconic");
-        Some((0, None))
-    }
-
-    pub fn set_cursor() -> Option<(usize, Option<i32>)>{
-        println!("set_cursor");
-        Some((0, None))
-    }
-
-    pub fn wsprintf_a() -> Option<(usize, Option<i32>)>{
-        println!("wsprintf_a");
-        Some((0, None))
-    }
-
-    pub fn end_dialog() -> Option<(usize, Option<i32>)>{
-        println!("end_dialog");
-        Some((0, None))
-    }
-
-    pub fn get_last_active_popup() -> Option<(usize, Option<i32>)>{
-        println!("get_last_active_popup");
-        Some((0, None))
-    }
-
-    pub fn union_rect() -> Option<(usize, Option<i32>)>{
-        println!("union_rect");
-        Some((0, None))
-    }
-
-    pub fn destroy_cursor() -> Option<(usize, Option<i32>)>{
-        println!("destroy_cursor");
-        Some((0, None))
-    }
-
-    pub fn intersect_rect() -> Option<(usize, Option<i32>)>{
-        println!("intersect_rect");
-        Some((0, None))
-    }
-
-    pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<(usize, Option<i32>)> {
+    fn wrap_result(func_name: &str, result: Option<(usize, Option<i32>)>) -> Option<ApiHookResult> {
         match func_name {
-            "MessageBoxA" => DllUSER32::message_box_a(),
-            "CloseWindow" => DllUSER32::close_window(),
-            "EnableWindow" => DllUSER32::enable_window(),
-            "IsWindowEnabled" => DllUSER32::is_window_enabled(),
-            "MoveWindow" => DllUSER32::move_window(),
-            "SendMessageA" => DllUSER32::send_message_a(),
-            "LoadCursorA" => DllUSER32::load_cursor_a(),
-            "IsDialogMessageA" => DllUSER32::is_dialog_message_a(),
-            "PostQuitMessage" => DllUSER32::post_quit_message(),
-            "SetFocus" => DllUSER32::set_focus(),
-            "DispatchMessageA" => DllUSER32::dispatch_message_a(),
-            "TranslateMessage" => DllUSER32::translate_message(),
-            "PeekMessageA" => DllUSER32::peek_message_a(),
-            "MsgWaitForMultipleObjects" => DllUSER32::msg_wait_for_multiple_objects(),
-            "UpdateWindow" => DllUSER32::update_window(),
-            "GetWindow" => DllUSER32::get_window(),
-            "GetMenuItemInfoA" => DllUSER32::get_menu_item_info_a(),
-            "DeleteMenu" => DllUSER32::delete_menu(),
-            "GetSystemMenu" => DllUSER32::get_system_menu(),
-            "DefWindowProcA" => DllUSER32::def_window_proc_a(),
-            "CreateWindowExA" => DllUSER32::create_window_ex_a(),
-            "RegisterClassExA" => DllUSER32::register_class_ex_a(),
-            "GetClassInfoExA" => DllUSER32::get_class_info_ex_a(),
-            "LoadIconA" => DllUSER32::load_icon_a(),
-            "DefMDIChildProcA" => DllUSER32::def_m_d_i_child_proc_a(),
-            "SetWindowLongA" => DllUSER32::set_window_long_a(),
-            "CallWindowProcA" => DllUSER32::call_window_proc_a(),
-            "DefFrameProcA" => DllUSER32::def_frame_proc_a(),
-            "GetMessageA" => DllUSER32::get_message_a(),
-            "PostThreadMessageA" => DllUSER32::post_thread_message_a(),
-            "BeginPaint" => DllUSER32::begin_paint(),
-            "EndPaint" => DllUSER32::end_paint(),
-            "ScrollWindowEx" => DllUSER32::scroll_window_ex(),
-            "InvalidateRect" => DllUSER32::invalidate_rect(),
-            "SetScrollInfo" => DllUSER32::set_scroll_info(),
-            "GetWindowTextA" => DllUSER32::get_window_text_a(),
-            "GetDC" => DllUSER32::get_d_c(),
-            "ReleaseDC" => DllUSER32::release_d_c(),
-            "KillTimer" => DllUSER32::kill_timer(),
-            "SetTimer" => DllUSER32::set_timer(),
-            "RemoveMenu" => DllUSER32::remove_menu(),
-            "AppendMenuA" => DllUSER32::append_menu_a(),
-            "CreateMenu" => DllUSER32::create_menu(),
-            "DestroyMenu" => DllUSER32::destroy_menu(),
-            "GetDesktopWindow" => DllUSER32::get_desktop_window(),
-            "MapWindowPoints" => DllUSER32::map_window_points(),
-            "SystemParametersInfoA" => DllUSER32::system_parameters_info_a(),
-            "GetMenu" => DllUSER32::get_menu(),
-            "AdjustWindowRectEx" => DllUSER32::adjust_window_rect_ex(),
-            "GetWindowRect" => DllUSER32::get_window_rect(),
-            "GetClientRect" => DllUSER32::get_client_rect(),
-            "DestroyWindow" => DllUSER32::destroy_window(),
-            "GetParent" => DllUSER32::get_parent(),
-            "ShowWindow" => DllUSER32::show_window(),
-            "GetWindowLongA" => DllUSER32::get_window_long_a(),
-            "TranslateMDISysAccel" => DllUSER32::translate_m_d_i_sys_accel(),
-            "DrawTextA" => DllUSER32::draw_text_a(),
-            "GetActiveWindow" => DllUSER32::get_active_window(),
-            "SetWindowPos" => DllUSER32::set_window_pos(),
-            "GetCursorPos" => DllUSER32::get_cursor_pos(),
-            "IsWindowVisible" => DllUSER32::is_window_visible(),
-            "PtInRect" => DllUSER32::pt_in_rect(),
-            "SetRect" => DllUSER32::set_rect(),
-            "GetClipboardData" => DllUSER32::get_clipboard_data(),
-            "GetFocus" => DllUSER32::get_focus(),
-            "SetCapture" => DllUSER32::set_capture(),
-            "GetCapture" => DllUSER32::get_capture(),
-            "ReleaseCapture" => DllUSER32::release_capture(),
-            "ScreenToClient" => DllUSER32::screen_to_client(),
-            "CreateCaret" => DllUSER32::create_caret(),
-            "DestroyCaret" => DllUSER32::destroy_caret(),
-            "GetAsyncKeyState" => DllUSER32::get_async_key_state(),
-            "ShowCaret" => DllUSER32::show_caret(),
-            "SetCaretPos" => DllUSER32::set_caret_pos(),
-            "HideCaret" => DllUSER32::hide_caret(),
-            "LoadCursorFromFileA" => DllUSER32::load_cursor_from_file_a(),
-            "GetSysColor" => DllUSER32::get_sys_color(),
-            "ClientToScreen" => DllUSER32::client_to_screen(),
-            "CloseClipboard" => DllUSER32::close_clipboard(),
-            "SetClipboardData" => DllUSER32::set_clipboard_data(),
-            "EmptyClipboard" => DllUSER32::empty_clipboard(),
-            "OpenClipboard" => DllUSER32::open_clipboard(),
-            "GetWindowDC" => DllUSER32::get_window_d_c(),
-            "SetWindowRgn" => DllUSER32::set_window_rgn(),
-            "EqualRect" => DllUSER32::equal_rect(),
-            "GetKeyState" => DllUSER32::get_key_state(),
-            "IsClipboardFormatAvailable" => DllUSER32::is_clipboard_format_available(),
-            "RegisterClassA" => DllUSER32::register_class_a(),
-            "PostMessageA" => DllUSER32::post_message_a(),
-            "IsZoomed" => DllUSER32::is_zoomed(),
-            "IsIconic" => DllUSER32::is_iconic(),
-            "SetCursor" => DllUSER32::set_cursor(),
-            "wsprintfA" => DllUSER32::wsprintf_a(),
-            "EndDialog" => DllUSER32::end_dialog(),
-            "GetLastActivePopup" => DllUSER32::get_last_active_popup(),
-            "UnionRect" => DllUSER32::union_rect(),
-            "DestroyCursor" => DllUSER32::destroy_cursor(),
-            "IntersectRect" => DllUSER32::intersect_rect(),
-            _ => None
+            "wsprintfA" => caller_result(result),
+            _ => callee_result(result),
         }
+    }
+
+    pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
+        DllUSER32::wrap_result(
+            func_name,
+            match func_name {
+                "MessageBoxA" => {
+                    let _hwnd = uc.read_arg(0);
+                    let text_addr = uc.read_arg(1);
+                    let caption_addr = uc.read_arg(2);
+                    let text = uc.read_string(text_addr as u64);
+                    let caption = uc.read_string(caption_addr as u64);
+                    println!("[USER32] MessageBoxA(\"{}\", \"{}\")", caption, text);
+                    Some((4, Some(1))) // IDOK
+                }
+                "RegisterClassExA" => {
+                    // WNDCLASSEX는 48 bytes
+                    let class_addr = uc.read_arg(0);
+                    let wnd_proc = uc.read_u32(class_addr as u64 + 8);
+                    let class_name_ptr = uc.read_u32(class_addr as u64 + 40);
+                    let class_name = uc.read_string(class_name_ptr as u64);
+                    let ctx = uc.get_data_mut();
+                    let atom = ctx.alloc_handle();
+                    ctx.window_classes.insert(
+                        class_name.clone(),
+                        WindowClass {
+                            class_name: class_name.clone(),
+                            wnd_proc,
+                            style: 0,
+                            hinstance: 0,
+                        },
+                    );
+                    println!(
+                        "[USER32] RegisterClassExA(\"{}\") -> atom {:#x}",
+                        class_name, atom
+                    );
+                    Some((1, Some(atom as i32)))
+                }
+                "RegisterClassA" => {
+                    let class_addr = uc.read_arg(0);
+                    let wnd_proc = uc.read_u32(class_addr as u64 + 4);
+                    let class_name_ptr = uc.read_u32(class_addr as u64 + 36);
+                    let class_name = uc.read_string(class_name_ptr as u64);
+                    let ctx = uc.get_data_mut();
+                    let atom = ctx.alloc_handle();
+                    ctx.window_classes.insert(
+                        class_name.clone(),
+                        WindowClass {
+                            class_name: class_name.clone(),
+                            wnd_proc,
+                            style: 0,
+                            hinstance: 0,
+                        },
+                    );
+                    println!(
+                        "[USER32] RegisterClassA(\"{}\") -> atom {:#x}",
+                        class_name, atom
+                    );
+                    Some((1, Some(atom as i32)))
+                }
+                "CreateWindowExA" => {
+                    let _ex_style = uc.read_arg(0);
+                    let class_addr = uc.read_arg(1);
+                    let title_addr = uc.read_arg(2);
+                    let _style = uc.read_arg(3);
+                    let class_name = if class_addr < 0x10000 {
+                        format!("Atom_{}", class_addr)
+                    } else {
+                        uc.read_string(class_addr as u64)
+                    };
+                    let title = if title_addr != 0 {
+                        uc.read_string(title_addr as u64)
+                    } else {
+                        String::new()
+                    };
+                    let ctx = uc.get_data_mut();
+                    let hwnd = ctx.alloc_handle();
+                    ctx.windows.insert(
+                        hwnd,
+                        WindowState {
+                            class_name: class_name.clone(),
+                            title: title.clone(),
+                            x: 0,
+                            y: 0,
+                            width: 640,
+                            height: 480,
+                            style: _style,
+                            parent: 0,
+                            visible: false,
+                            wnd_proc: 0,
+                            user_data: 0,
+                        },
+                    );
+                    println!(
+                        "[USER32] CreateWindowExA(\"{}\", \"{}\") -> HWND {:#x}",
+                        class_name, title, hwnd
+                    );
+                    Some((12, Some(hwnd as i32)))
+                }
+                "ShowWindow" => Some((2, Some(0))),
+                "UpdateWindow" => Some((1, Some(1))),
+                "DestroyWindow" => Some((1, Some(1))),
+                "CloseWindow" => Some((1, Some(1))),
+                "EnableWindow" => Some((2, Some(0))),
+                "IsWindowEnabled" => Some((1, Some(1))),
+                "IsWindowVisible" => Some((1, Some(0))),
+                "MoveWindow" => Some((6, Some(1))),
+                "SetWindowPos" => Some((7, Some(1))),
+                "GetWindowRect" => {
+                    let _hwnd = uc.read_arg(0);
+                    let rect_addr = uc.read_arg(1);
+                    // RECT: left, top, right, bottom (4 x i32)
+                    uc.write_u32(rect_addr as u64, 0);
+                    uc.write_u32(rect_addr as u64 + 4, 0);
+                    uc.write_u32(rect_addr as u64 + 8, 640);
+                    uc.write_u32(rect_addr as u64 + 12, 480);
+                    Some((2, Some(1)))
+                }
+                "GetClientRect" => {
+                    let _hwnd = uc.read_arg(0);
+                    let rect_addr = uc.read_arg(1);
+                    uc.write_u32(rect_addr as u64, 0);
+                    uc.write_u32(rect_addr as u64 + 4, 0);
+                    uc.write_u32(rect_addr as u64 + 8, 640);
+                    uc.write_u32(rect_addr as u64 + 12, 480);
+                    Some((2, Some(1)))
+                }
+                "AdjustWindowRectEx" => Some((4, Some(1))),
+                "GetDC" => {
+                    let ctx = uc.get_data_mut();
+                    let hdc = ctx.alloc_handle();
+                    println!("[USER32] GetDC(...) -> HDC {:#x}", hdc);
+                    Some((1, Some(hdc as i32)))
+                }
+                "GetWindowDC" => {
+                    let ctx = uc.get_data_mut();
+                    let hdc = ctx.alloc_handle();
+                    Some((1, Some(hdc as i32)))
+                }
+                "ReleaseDC" => Some((2, Some(1))),
+                "SendMessageA" => Some((4, Some(0))),
+                "PostMessageA" => Some((4, Some(1))),
+                "LoadCursorA" => Some((2, Some(0x1001))),
+                "LoadCursorFromFileA" => Some((1, Some(0x1002))),
+                "LoadIconA" => Some((2, Some(0x1003))),
+                "SetCursor" => Some((1, Some(0))),
+                "DestroyCursor" => Some((1, Some(1))),
+                "IsDialogMessageA" => Some((2, Some(0))),
+                "PostQuitMessage" => Some((1, None)),
+                "SetFocus" => Some((1, Some(0))),
+                "GetFocus" => Some((0, Some(0))),
+                "DispatchMessageA" => Some((1, Some(0))),
+                "TranslateMessage" => Some((1, Some(0))),
+                "PeekMessageA" => Some((5, Some(0))), // WM_QUIT 없음
+                "GetMessageA" => Some((4, Some(0))),  // WM_QUIT (0 = 종료)
+                "MsgWaitForMultipleObjects" => Some((5, Some(0))),
+                "GetWindow" => Some((2, Some(0))),
+                "GetParent" => Some((1, Some(0))),
+                "GetDesktopWindow" => Some((0, Some(0x0001))),
+                "GetActiveWindow" => Some((0, Some(0))),
+                "GetLastActivePopup" => Some((1, Some(0))),
+                "GetMenuItemInfoA" => Some((4, Some(0))),
+                "DeleteMenu" => Some((3, Some(1))),
+                "RemoveMenu" => Some((3, Some(1))),
+                "GetSystemMenu" => Some((2, Some(0))),
+                "GetMenu" => Some((1, Some(0))),
+                "AppendMenuA" => Some((4, Some(1))),
+                "CreateMenu" => {
+                    let ctx = uc.get_data_mut();
+                    let hmenu = ctx.alloc_handle();
+                    Some((0, Some(hmenu as i32)))
+                }
+                "DestroyMenu" => Some((1, Some(1))),
+                "DefWindowProcA" => Some((4, Some(0))),
+                "DefMDIChildProcA" => Some((4, Some(0))),
+                "DefFrameProcA" => Some((5, Some(0))),
+                "SetWindowLongA" => Some((3, Some(0))),
+                "GetWindowLongA" => Some((2, Some(0))),
+                "CallWindowProcA" => Some((5, Some(0))),
+                "PostThreadMessageA" => Some((4, Some(1))),
+                "BeginPaint" => {
+                    let _hwnd = uc.read_arg(0);
+                    let ps_addr = uc.read_arg(1);
+                    let ctx = uc.get_data_mut();
+                    let hdc = ctx.alloc_handle();
+                    // PAINTSTRUCT: HDC at offset 0
+                    uc.write_u32(ps_addr as u64, hdc);
+                    Some((2, Some(hdc as i32)))
+                }
+                "EndPaint" => Some((2, Some(1))),
+                "ScrollWindowEx" => Some((8, Some(0))),
+                "InvalidateRect" => Some((3, Some(1))),
+                "SetScrollInfo" => Some((4, Some(0))),
+                "GetWindowTextA" => Some((3, Some(0))),
+                "KillTimer" => Some((2, Some(1))),
+                "SetTimer" => {
+                    let hwnd = uc.read_arg(0);
+                    let id = uc.read_arg(1);
+                    println!("[USER32] SetTimer({:#x}, {})", hwnd, id);
+                    Some((4, Some(id as i32)))
+                }
+                "MapWindowPoints" => Some((4, Some(0))),
+                "SystemParametersInfoA" => Some((4, Some(1))),
+                "TranslateMDISysAccel" => Some((2, Some(0))),
+                "DrawTextA" => Some((5, Some(0))),
+                "GetCursorPos" => {
+                    let pt_addr = uc.read_arg(0);
+                    uc.write_u32(pt_addr as u64, 320);
+                    uc.write_u32(pt_addr as u64 + 4, 240);
+                    Some((1, Some(1)))
+                }
+                "PtInRect" => Some((2, Some(0))),
+                "SetRect" => Some((5, Some(1))),
+                "EqualRect" => Some((2, Some(0))),
+                "UnionRect" => Some((3, Some(1))),
+                "IntersectRect" => Some((3, Some(0))),
+                "GetClipboardData" => Some((1, Some(0))),
+                "OpenClipboard" => Some((1, Some(1))),
+                "CloseClipboard" => Some((0, Some(1))),
+                "EmptyClipboard" => Some((0, Some(1))),
+                "SetClipboardData" => Some((2, Some(0))),
+                "IsClipboardFormatAvailable" => Some((1, Some(0))),
+                "SetCapture" => Some((1, Some(0))),
+                "GetCapture" => Some((0, Some(0))),
+                "ReleaseCapture" => Some((0, Some(1))),
+                "ScreenToClient" => Some((2, Some(1))),
+                "ClientToScreen" => Some((2, Some(1))),
+                "CreateCaret" => Some((4, Some(1))),
+                "DestroyCaret" => Some((0, Some(1))),
+                "ShowCaret" => Some((1, Some(1))),
+                "HideCaret" => Some((1, Some(1))),
+                "SetCaretPos" => Some((2, Some(1))),
+                "GetAsyncKeyState" => Some((1, Some(0))),
+                "GetKeyState" => Some((1, Some(0))),
+                "GetSysColor" => Some((1, Some(0x00C0C0C0u32 as i32))), // COLOR_BTNFACE
+                "SetWindowRgn" => Some((3, Some(1))),
+                "GetClassInfoExA" => Some((3, Some(0))),
+                "IsZoomed" => Some((1, Some(0))),
+                "IsIconic" => Some((1, Some(0))),
+                "wsprintfA" => {
+                    let buf_addr = uc.read_arg(0);
+                    let fmt_addr = uc.read_arg(1);
+                    if buf_addr == 0 || fmt_addr == 0 {
+                        let eip = uc
+                            .reg_read(unicorn_engine::RegisterX86::EIP as i32)
+                            .unwrap();
+                        let esp = uc
+                            .reg_read(unicorn_engine::RegisterX86::ESP as i32)
+                            .unwrap();
+                        println!(
+                            "[USER32] wsprintfA invalid args: buf={:#x}, fmt={:#x}, eip={:#x}, esp={:#x}",
+                            buf_addr, fmt_addr, eip, esp
+                        );
+                    } else {
+                        println!("[USER32] wsprintfA(...)");
+                    }
+                    Some((2, Some(0)))
+                }
+                "EndDialog" => Some((2, Some(1))),
+                _ => {
+                    println!("[USER32] UNHANDLED: {}", func_name);
+                    None
+                }
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::win32::StackCleanup;
+
+    #[test]
+    fn wsprintf_uses_caller_cleanup() {
+        let result = DllUSER32::wrap_result("wsprintfA", Some((2, Some(0)))).unwrap();
+        assert_eq!(result.cleanup, StackCleanup::Caller);
+    }
+
+    #[test]
+    fn message_box_keeps_callee_cleanup() {
+        let result = DllUSER32::wrap_result("MessageBoxA", Some((4, Some(1)))).unwrap();
+        assert_eq!(result.cleanup, StackCleanup::Callee(4));
     }
 }

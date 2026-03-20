@@ -1,7 +1,7 @@
+use std::io::{self, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use std::io::{self, Write};
 
 #[tokio::main]
 pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,7 +28,9 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
             // 입력을 기다립니다 (블로킹이지만 별도 스레드/태스크처럼 동작하므로 네트워크에 영향 없음)
             if stdin.read_line(&mut input).is_ok() {
                 let trimmed = input.trim();
-                if trimmed.is_empty() { continue; }
+                if trimmed.is_empty() {
+                    continue;
+                }
 
                 // Hex 문자열을 바이너리로 변환
                 match hex::decode(trimmed) {

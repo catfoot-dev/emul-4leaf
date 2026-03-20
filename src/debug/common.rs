@@ -10,5 +10,7 @@ pub struct CpuContext {
 
 pub enum DebugCommand {
     Step,
+    Run,   // 자동 실행 모드 (F10 없이 계속 진행)
+    Pause, // 스텝 모드로 복귀
     Stop,
 }
