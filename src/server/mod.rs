@@ -88,16 +88,11 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
 
         // 3-2. 송신 태스크 (Server Stdin Channel -> Client Socket)
         tokio::spawn(async move {
-            loop {
+            while let Ok(msg) = rx.recv().await {
                 // 채널에서 데이터가 오면 소켓으로 전송
-                match rx.recv().await {
-                    Ok(msg) => {
-                        if let Err(e) = writer.write_all(&msg).await {
-                            eprintln!("Failed to write to client: {}", e);
-                            break;
-                        }
-                    }
-                    Err(_) => break, // 채널이 닫히거나 지연됨
+                if let Err(e) = writer.write_all(&msg).await {
+                    eprintln!("Failed to write to client: {}", e);
+                    break;
                 }
             }
         });

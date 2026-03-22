@@ -67,7 +67,7 @@ impl PacketLogger {
         let ascii: String = data
             .iter()
             .map(|&b| {
-                if b >= 0x20 && b <= 0x7e {
+                if (0x20..=0x7e).contains(&b) {
                     b as char
                 } else {
                     '.'
@@ -83,7 +83,7 @@ impl PacketLogger {
             data.len(),
             hex
         );
-        if data.len() > 0 {
+        if !data.is_empty() {
             crate::emu_log!("[PACKET][{}] ASCII: {}", dir_str, ascii);
         }
 

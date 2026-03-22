@@ -25,8 +25,8 @@ pub static LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 /// # 인자
 /// - `msg`: 추가할 로그의 텍스트
 pub fn push_log(msg: String) {
-    if let Some(buf) = LOG_BUFFER.get() {
-        if let Ok(mut b) = buf.try_lock() {
+    if let Some(buf) = LOG_BUFFER.get()
+        && let Ok(mut b) = buf.try_lock() {
             // \n 이 포함되어 있으면 나눠서 push 함으로써 텍스트 겹침 방지
             for line in msg.lines() {
                 b.push_back(line.to_string());
@@ -36,7 +36,6 @@ pub fn push_log(msg: String) {
             }
             LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-    }
 }
 
 /// 어플리케이션 시작 시 전역 로그 버퍼를 빈 `VecDeque`로 초기화함

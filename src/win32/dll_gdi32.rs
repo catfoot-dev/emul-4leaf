@@ -43,8 +43,8 @@ impl DllGDI32 {
                 // BITMAPINFOHEADER: width at +4, height at +8
                 let width = uc.read_u32(bmi_addr as u64 + 4);
                 let height = uc.read_u32(bmi_addr as u64 + 8);
-                let bpp = uc.read_u32(bmi_addr as u64 + 14) as u32;
-                let row_size = ((width * bpp + 31) / 32) * 4;
+                let bpp = uc.read_u32(bmi_addr as u64 + 14);
+                let row_size = (width * bpp).div_ceil(32) * 4;
                 let bmp_size = row_size * height;
                 let bits_addr = uc.malloc(bmp_size as usize);
                 if bits_ptr_addr != 0 {

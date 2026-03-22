@@ -13,11 +13,7 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::{Receiver, Sender};
 
 // 그래픽 관련
-use embedded_graphics::{
-    pixelcolor::Rgb888,
-    prelude::*,
-    text::Text,
-};
+use embedded_graphics::{pixelcolor::Rgb888, prelude::*, text::Text};
 use embedded_ttf::FontTextStyleBuilder;
 use rusttype::Font as TtfFont;
 use softbuffer::{Context as SoftContext, Surface};
@@ -162,16 +158,53 @@ impl ApplicationHandler for Debug {
                             self.windows.remove(&id);
                         }
                     }
+                    UiCommand::ShowWindow { hwnd, visible } => {
+                        if let Some(id) = self.hwnd_to_id.get(&hwnd) {
+                            if let Some(window) = self.windows.get(id) {
+                                window.set_visible(visible);
+                            }
+                        }
+                    }
+                    UiCommand::MoveWindow {
+                        hwnd,
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        if let Some(id) = self.hwnd_to_id.get(&hwnd) {
+                            if let Some(window) = self.windows.get(id) {
+                                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                                let _ = window.request_inner_size(winit::dpi::LogicalSize::new(
+                                    width, height,
+                                ));
+                            }
+                        }
+                    }
+                    UiCommand::SetWindowText { hwnd, text } => {
+                        if let Some(id) = self.hwnd_to_id.get(&hwnd) {
+                            if let Some(window) = self.windows.get(id) {
+                                window.set_title(&text);
+                            }
+                        }
+                    }
+                    UiCommand::UpdateWindow { hwnd } => {
+                        if let Some(id) = self.hwnd_to_id.get(&hwnd) {
+                            if let Some(window) = self.windows.get(id) {
+                                window.request_redraw();
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        if let Some(rx) = self.state_rx.as_ref() {
-            if let Ok(new_state) = rx.try_recv() {
-                self.cpu_state = Some(new_state);
-                self.waiting_for_step = false;
-                needs_redraw = true;
-            }
+        if let Some(rx) = self.state_rx.as_ref()
+            && let Ok(new_state) = rx.try_recv()
+        {
+            self.cpu_state = Some(new_state);
+            self.waiting_for_step = false;
+            needs_redraw = true;
         }
 
         let current_log_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
@@ -252,7 +285,7 @@ impl ApplicationHandler for Debug {
                         let reg_names = [
                             "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP",
                         ];
-                        let mut y = 20;
+                        let mut y = 10;
 
                         Text::new("REGISTERS", Point::new(10, y), style_y.clone())
                             .draw(&mut display)
@@ -260,7 +293,11 @@ impl ApplicationHandler for Debug {
                         y += 15;
 
                         for (i, val) in state.regs.iter().enumerate() {
-                            let style = if i == 8 { style_c.clone() } else { style_w.clone() }; // EIP 강조
+                            let style = if i == 8 {
+                                style_c.clone()
+                            } else {
+                                style_w.clone()
+                            }; // EIP 강조
                             let text = format!("{}: 0x{:08x}", reg_names[i], val);
                             Text::new(&text, Point::new(10, y), style)
                                 .draw(&mut display)
@@ -280,10 +317,14 @@ impl ApplicationHandler for Debug {
 
                         // 스택 뷰 출력 (오른쪽)
                         let stack_x = 200;
-                        let mut stack_y = 20;
-                        Text::new("STACK (TOP 10)", Point::new(stack_x, stack_y), style_y.clone())
-                            .draw(&mut display)
-                            .ok();
+                        let mut stack_y = 10;
+                        Text::new(
+                            "STACK (TOP 10)",
+                            Point::new(stack_x, stack_y),
+                            style_y.clone(),
+                        )
+                        .draw(&mut display)
+                        .ok();
                         stack_y += 15;
 
                         for (addr, val) in &state.stack {
@@ -313,51 +354,55 @@ impl ApplicationHandler for Debug {
                                 "Mode: {}  |  F5: Run/Pause  |  F10: Step  |  ESC: Quit",
                                 mode_str
                             ),
-                            Point::new(10, 400),
+                            Point::new(10, 390),
                             mode_color,
                         )
                         .draw(&mut display)
                         .ok();
                     } else {
-                        Text::new("Waiting for CPU state...", Point::new(10, 20), style_w.clone())
-                            .draw(&mut display)
-                            .ok();
+                        Text::new(
+                            "Waiting for CPU state...",
+                            Point::new(10, 10),
+                            style_w.clone(),
+                        )
+                        .draw(&mut display)
+                        .ok();
                     }
 
                     // === GUI: Log Box ===
                     // Draw a separator line
                     for x in 10..width.saturating_sub(10) {
-                        Pixel(Point::new(x as i32, 415), Rgb888::new(100, 100, 100))
+                        Pixel(Point::new(x as i32, 405), Rgb888::new(100, 100, 100))
                             .draw(&mut display)
                             .ok();
                     }
 
-                    let mut log_y = 430;
-                    if let Some(buf) = crate::LOG_BUFFER.get() {
-                        if let Ok(b) = buf.try_lock() {
-                            let lines_to_show = 14;
-                            let total_logs = b.len();
+                    let mut log_y = 407;
+                    if let Some(buf) = crate::LOG_BUFFER.get()
+                        && let Ok(b) = buf.try_lock()
+                    {
+                        let lines_to_show = 14;
+                        let total_logs = b.len();
 
-                            // 스크롤 오프셋을 고려하여 보여줄 범위 계산
-                            let end_idx = total_logs.saturating_sub(self.log_scroll_offset);
-                            let start_idx = end_idx.saturating_sub(lines_to_show);
+                        // 스크롤 오프셋을 고려하여 보여줄 범위 계산
+                        let end_idx = total_logs.saturating_sub(self.log_scroll_offset);
+                        let start_idx = end_idx.saturating_sub(lines_to_show);
 
-                            for line in b.iter().skip(start_idx).take(end_idx - start_idx) {
-                                // Trim the line if it's too long
-                                let max_len = 130;
-                                let text = if line.len() > max_len {
-                                    format!("{}...", &line[0..max_len])
-                                } else {
-                                    line.clone()
-                                };
+                        for line in b.iter().skip(start_idx).take(end_idx - start_idx) {
+                            // Trim the line if it's too long
+                            let max_len = 130;
+                            let text = if line.len() > max_len {
+                                format!("{}...", &line[0..max_len])
+                            } else {
+                                line.clone()
+                            };
 
-                                // 한글을 위해 TTF 스타일 사용
-                                Text::new(&text, Point::new(10, log_y), style_w.clone())
-                                    .draw(&mut display)
-                                    .ok();
+                            // 한글을 위해 TTF 스타일 사용
+                            Text::new(&text, Point::new(10, log_y), style_w.clone())
+                                .draw(&mut display)
+                                .ok();
 
-                                log_y += 13;
-                            }
+                            log_y += 13;
                         }
                     }
                 } else {
@@ -376,7 +421,7 @@ impl ApplicationHandler for Debug {
                         .build();
 
                     let hwnd = self.id_to_hwnd.get(&id).cloned().unwrap_or(0);
-                    Text::new(&format!("HWND {:#x}", hwnd), Point::new(10, 20), style_w)
+                    Text::new(&format!("HWND {:#x}", hwnd), Point::new(10, 10), style_w)
                         .draw(&mut display)
                         .ok();
                 }
@@ -387,11 +432,12 @@ impl ApplicationHandler for Debug {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if PhysicalKey::Code(KeyCode::F10) == event.physical_key && !self.waiting_for_step {
-                    if let Some(tx) = self.cmd_tx.as_ref() {
-                        let _ = tx.send(DebugCommand::Step);
-                        self.waiting_for_step = true;
-                    }
+                if PhysicalKey::Code(KeyCode::F10) == event.physical_key
+                    && !self.waiting_for_step
+                    && let Some(tx) = self.cmd_tx.as_ref()
+                {
+                    let _ = tx.send(DebugCommand::Step);
+                    self.waiting_for_step = true;
                 }
                 if PhysicalKey::Code(KeyCode::F5) == event.physical_key {
                     if let Some(tx) = self.cmd_tx.as_ref() {
@@ -454,10 +500,10 @@ impl ApplicationHandler for Debug {
                     self.log_scroll_offset =
                         self.log_scroll_offset.saturating_sub((-lines) as usize);
                 }
-                if let Some(id) = self.debug_window_id {
-                    if let Some(window) = self.windows.get(&id) {
-                        window.request_redraw();
-                    }
+                if let Some(id) = self.debug_window_id
+                    && let Some(window) = self.windows.get(&id)
+                {
+                    window.request_redraw();
                 }
             }
             WindowEvent::CloseRequested => {

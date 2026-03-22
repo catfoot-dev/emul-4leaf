@@ -22,7 +22,7 @@ pub const HEAP_SIZE: u64 = 2 * 1024 * 1024;
 
 pub const STACK_BASE: u64 = 0x5000_0000;
 pub const STACK_SIZE: u64 = 1024 * 1024;
-pub const STACK_TOP: u64 = STACK_BASE + STACK_SIZE as u64;
+pub const STACK_TOP: u64 = STACK_BASE + STACK_SIZE;
 
 pub const SHARED_MEM_BASE: u64 = 0x7000_0000;
 
@@ -52,7 +52,7 @@ fn print_hexdump(uc: &Unicorn<Win32Context>, address: u64, size: usize) {
     let mut buffer = vec![0u8; size];
 
     // 메모리 읽기 시도
-    if let Err(_) = uc.mem_read(address, &mut buffer) {
+    if uc.mem_read(address, &mut buffer).is_err() {
         crate::emu_log!(
             "[DEBUG] Failed to read memory at 0x{:x} (Size: {})",
             address,
@@ -258,6 +258,13 @@ pub trait UnicornHelper {
     /// - `addr`: 문자열 처리가 시작될 메모리 주소
     fn read_string(&self, addr: u64) -> String;
 
+    /// 대상 메모리에서 페이지 경계를 고려하여 지정된 최대 길이까지 바이트 배열을 읽어옴
+    ///
+    /// # 인자
+    /// - `addr`: 문자열 처리가 시작될 메모리 주소
+    /// - `max_len`: 읽어올 최대 바이트 수
+    fn read_string_bytes(&self, addr: u64, max_len: usize) -> Vec<u8>;
+
     /// 대상 메모리에 C언어 스타일 널 종료 문자열(Null-Terminated String)을 기록
     ///
     /// # 인자
@@ -410,7 +417,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                         crate::emu_log!("[*] Function address: {func_address:#x}");
                         crate::emu_log!("[*] Calling {dll_name}!{func_name}(...args)...");
 
-                        if let Err(e) = uc.emu_start(func_address as u64, EXIT_ADDRESS, 0, 0) {
+                        if let Err(e) = uc.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
                             crate::emu_log!("\n[!] Emulation stopped/failed: {e:?}");
                             let pc = uc.reg_read(RegisterX86::EIP).unwrap();
                             crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
@@ -509,7 +516,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
             if is_auto {
                 // === 자동 실행 모드 ===
-                if inst_count % 10000 == 0 {
+                if inst_count.is_multiple_of(10000) {
                     send_state = true;
                 }
 
@@ -667,8 +674,8 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             let delta = target_base.wrapping_sub(original_base);
 
             // PE 헤더에서 재배치 정보 파싱
-            if let Some(opt) = pe.header.optional_header {
-                if let Some(reloc_dir) = opt.data_directories.get_base_relocation_table() {
+            if let Some(opt) = pe.header.optional_header
+                && let Some(reloc_dir) = opt.data_directories.get_base_relocation_table() {
                     let mut reloc_rva = reloc_dir.virtual_address as usize;
                     let reloc_end = reloc_rva + reloc_dir.size as usize;
 
@@ -712,7 +719,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                         reloc_rva += block_size as usize;
                     }
                 }
-            }
         }
 
         // 4. Export Table 파싱 (다른 DLL이 이 함수들을 찾을 수 있게)
@@ -746,12 +752,12 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         let buffer = fs::read(&target.name).unwrap();
         let pe = PE::parse(&buffer).unwrap();
         let image_base = target.base_addr; // 주의: 파일의 image_base가 아니라 로드된 base 사용
-        let dll_name = target.name.split('/').last().unwrap().to_string();
+        let dll_name = target.name.split('/').next_back().unwrap().to_string();
 
         // Fake Address Counter (스태틱처럼 사용하기 위해 고정값 + 오프셋 방식 권장)
 
-        if let Some(opt) = pe.header.optional_header {
-            if let Some(import_dir) = opt.data_directories.get_import_table() {
+        if let Some(opt) = pe.header.optional_header
+            && let Some(import_dir) = opt.data_directories.get_import_table() {
                 if import_dir.size == 0 {
                     // crate::emu_log!("[DEBUG] Import Directory size is 0!");
                     return Ok(());
@@ -814,13 +820,13 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                             .unwrap()
                             .iter()
                             .find(|(name, dll)| {
-                                if name.eq_ignore_ascii_case(&dll_name) == false {
+                                if !name.eq_ignore_ascii_case(&dll_name) {
                                     return false;
                                 }
                                 if let Some(real_addr) = dll.exports.get(&func_name) {
                                     final_addr = *real_addr;
                                 }
-                                return true;
+                                true
                             });
                         // if let Some(real_addr) = dll.exports.get(&func_name) {
                         //     final_addr = *real_addr;
@@ -861,7 +867,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                     desc_addr += 20;
                 }
             }
-        }
 
         {
             let context = self.get_data();
@@ -938,7 +943,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                     push_values.push(*v);
                     arg_strings.push(format!("{v}"));
                 } else if let Some(v) = arg.downcast_ref::<&str>() {
-                    let str_ptr = self.alloc_str(*v);
+                    let str_ptr = self.alloc_str(v);
                     push_values.push(str_ptr);
                     arg_strings.push(format!("\"{v}\""));
                 }
@@ -954,7 +959,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             crate::emu_log!("[*] Function address: {func_address:#x}");
             crate::emu_log!("[*] Calling {func_name}({arguments})...");
 
-            if let Err(e) = self.emu_start(func_address as u64, EXIT_ADDRESS, 0, 0) {
+            if let Err(e) = self.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
                 crate::emu_log!("\n[!] Emulation stopped/failed: {e:?}");
                 let pc = self.reg_read(RegisterX86::EIP).unwrap();
                 crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
@@ -987,23 +992,47 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         u32::from_le_bytes(val_bytes.try_into().unwrap())
     }
 
-    fn read_string(&self, addr: u64) -> String {
+    fn read_string_bytes(&self, addr: u64, max_len: usize) -> Vec<u8> {
         let mut chars = Vec::new();
         let mut curr = addr;
 
-        loop {
-            let byte = self.mem_read_as_vec(curr, 1).unwrap()[0];
-            if byte == 0 {
-                break;
-            } // NULL 문자 만나면 종료
-            chars.push(byte);
-            curr += 1;
+        'outer: loop {
+            // 페이지 경계를 넘지 않도록 읽을 수 있는 최대량 계산 (Unicorn 페이지는 4KB)
+            let bytes_to_page_end = 4096 - (curr % 4096);
+            let read_size = std::cmp::min(128, bytes_to_page_end) as usize;
 
-            // 안전장치: 너무 길면 끊기 (예: 1KB)
-            if chars.len() > 1024 {
-                break;
+            if let Ok(chunk) = self.mem_read_as_vec(curr, read_size) {
+                for &byte in chunk.iter() {
+                    if byte == 0 {
+                        break 'outer;
+                    }
+                    chars.push(byte);
+                    if chars.len() >= max_len {
+                        break 'outer;
+                    }
+                }
+                curr += read_size as u64;
+            } else {
+                // 안전장치: 청크 읽기 실패 시 1바이트씩 읽기 시도
+                if let Ok(chunk) = self.mem_read_as_vec(curr, 1) {
+                    if chunk[0] == 0 {
+                        break;
+                    }
+                    chars.push(chunk[0]);
+                    if chars.len() >= max_len {
+                        break;
+                    }
+                    curr += 1;
+                } else {
+                    break;
+                }
             }
         }
+        chars
+    }
+
+    fn read_string(&self, addr: u64) -> String {
+        let chars = self.read_string_bytes(addr, 1024);
         String::from_utf8_lossy(&chars).to_string()
     }
 
@@ -1013,22 +1042,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
     }
 
     fn read_euc_kr(&self, addr: u64) -> String {
-        let mut chars = Vec::new();
-        let mut curr = addr;
-
-        loop {
-            let byte = self.mem_read_as_vec(curr, 1).unwrap()[0];
-            if byte == 0 {
-                break;
-            } // NULL 문자 만나면 종료
-            chars.push(byte);
-            curr += 1;
-
-            // 안전장치: 너무 길면 끊기 (예: 1KB)
-            if chars.len() > 1024 {
-                break;
-            }
-        }
+        let chars = self.read_string_bytes(addr, 1024);
         let (res, _, _) = EUC_KR.decode(&chars);
         res.to_string()
     }

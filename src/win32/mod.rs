@@ -83,6 +83,7 @@ pub struct LoadedDll {
 }
 
 /// 가상 GDI 오브젝트 종류
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum GdiObject {
     Font {
@@ -116,6 +117,7 @@ pub enum GdiObject {
 }
 
 /// 가상 소켓 상태
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum SocketState {
     Created {
@@ -134,6 +136,7 @@ pub enum SocketState {
 }
 
 /// 가상 이벤트 상태
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EventState {
     pub signaled: bool,
@@ -141,6 +144,7 @@ pub struct EventState {
 }
 
 /// 가상 WNDCLASS 정보
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WindowClass {
     pub class_name: String,
@@ -150,6 +154,7 @@ pub struct WindowClass {
 }
 
 /// 가상 윈도우 상태
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WindowState {
     pub class_name: String,
@@ -196,6 +201,7 @@ pub struct Win32Context {
     /// TLS 슬롯 카운터
     pub tls_counter: AtomicU32,
     /// 가상 레지스트리 (키 경로 → 값)
+    #[allow(dead_code)]
     pub registry: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// GetTickCount 기준 시간
     pub start_time: Instant,

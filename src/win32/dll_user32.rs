@@ -131,8 +131,8 @@ impl DllUSER32 {
                         y: y as i32,
                         width: width as i32,
                         height: height as i32,
-                        style: style,
-                        parent: parent,
+                        style,
+                        parent,
                         visible: false,
                         wnd_proc: 0,
                         user_data: 0,
@@ -156,11 +156,26 @@ impl DllUSER32 {
 
                 // API: BOOL ShowWindow(HWND hWnd, int nCmdShow)
                 // 역할: 창의 표시 상태를 설정
-                "ShowWindow" => Some((2, Some(0))),
+                "ShowWindow" => {
+                    let hwnd = uc.read_arg(0);
+                    let n_cmd_show = uc.read_arg(1);
+                    // SW_HIDE = 0, 그 외는 대부분 표시
+                    let visible = n_cmd_show != 0;
+                    uc.get_data()
+                        .win_frame
+                        .lock()
+                        .unwrap()
+                        .show_window(hwnd, visible);
+                    Some((2, Some(1)))
+                }
 
                 // API: BOOL UpdateWindow(HWND hWnd)
                 // 역할: 창의 클라이언트 영역을 강제로 업데이트
-                "UpdateWindow" => Some((1, Some(1))),
+                "UpdateWindow" => {
+                    let hwnd = uc.read_arg(0);
+                    uc.get_data().win_frame.lock().unwrap().update_window(hwnd);
+                    Some((1, Some(1)))
+                }
 
                 // API: BOOL DestroyWindow(HWND hWnd)
                 // 역할: 지정된 창을 파괴
@@ -209,17 +224,12 @@ impl DllUSER32 {
                     let hwnd = uc.read_arg(0);
                     let x = uc.read_arg(1) as i32;
                     let y = uc.read_arg(2) as i32;
-                    let width = uc.read_arg(3) as i32;
-                    let height = uc.read_arg(4) as i32;
+                    let width = uc.read_arg(3) as u32;
+                    let height = uc.read_arg(4) as u32;
 
                     let ctx = uc.get_data();
                     let mut win_frame = ctx.win_frame.lock().unwrap();
-                    if let Some(win) = win_frame.get_window_mut(hwnd) {
-                        win.x = x;
-                        win.y = y;
-                        win.width = width;
-                        win.height = height;
-                    }
+                    win_frame.move_window(hwnd, x, y, width, height);
                     Some((6, Some(1)))
                 }
 
@@ -229,18 +239,13 @@ impl DllUSER32 {
                     let hwnd = uc.read_arg(0);
                     let x = uc.read_arg(2) as i32;
                     let y = uc.read_arg(3) as i32;
-                    let cx = uc.read_arg(4) as i32;
-                    let cy = uc.read_arg(5) as i32;
+                    let cx = uc.read_arg(4) as u32;
+                    let cy = uc.read_arg(5) as u32;
                     let _u_flags = uc.read_arg(6);
 
                     let ctx = uc.get_data();
                     let mut win_frame = ctx.win_frame.lock().unwrap();
-                    if let Some(win) = win_frame.get_window_mut(hwnd) {
-                        win.x = x;
-                        win.y = y;
-                        win.width = cx;
-                        win.height = cy;
-                    }
+                    win_frame.move_window(hwnd, x, y, cx, cy);
                     Some((7, Some(1)))
                 }
 
@@ -488,6 +493,21 @@ impl DllUSER32 {
                 // API: int SetScrollInfo(HWND hWnd, int nBar, LPCSCROLLINFO lpsi, BOOL redraw)
                 // 역할: 스크롤 바의 매개변수를 설정
                 "SetScrollInfo" => Some((4, Some(0))),
+
+                // API: BOOL SetWindowTextA(HWND hWnd, LPCSTR lpString)
+                // 역할: 창의 제목 표시줄 텍스트 또는 컨트롤의 텍스트를 변경
+                "SetWindowTextA" => {
+                    let hwnd = uc.read_arg(0);
+                    let text_addr = uc.read_arg(1);
+                    let text = uc.read_euc_kr(text_addr as u64);
+                    uc.get_data()
+                        .win_frame
+                        .lock()
+                        .unwrap()
+                        .set_window_text(hwnd, text.clone());
+                    crate::emu_log!("[USER32] SetWindowTextA(HWND {:#x}, \"{}\")", hwnd, text);
+                    Some((2, Some(1)))
+                }
 
                 // API: int GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount)
                 // 역할: 창의 제목 표시줄 텍스트 또는 컨트롤의 텍스트를 가져옴

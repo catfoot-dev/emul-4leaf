@@ -43,4 +43,26 @@ pub enum UiCommand {
         /// 가상 HWND 핸들
         hwnd: u32,
     },
+    /// 윈도우 표시 상태 변경 요청
+    ShowWindow {
+        hwnd: u32,
+        visible: bool,
+    },
+    /// 윈도우 위치/크기 변경 요청
+    MoveWindow {
+        hwnd: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    /// 윈도우 제목 변경 요청
+    SetWindowText {
+        hwnd: u32,
+        text: String,
+    },
+    /// 윈도우 강제 렌더링(업데이트) 요청
+    UpdateWindow {
+        hwnd: u32,
+    },
 }

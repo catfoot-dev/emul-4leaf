@@ -193,7 +193,7 @@ impl DllMSVCRT {
         let _endptr = uc.read_arg(1);
         let base = uc.read_arg(2);
         let s = uc.read_euc_kr(s_addr as u64);
-        let result = u32::from_str_radix(s.trim(), base as u32).unwrap_or(0);
+        let result = u32::from_str_radix(s.trim(), base).unwrap_or(0);
         crate::emu_log!("[MSVCRT] strtoul(\"{}\", ..., {}) -> {}", s, base, result);
         Some((3, Some(result as i32)))
     }
@@ -522,7 +522,7 @@ impl DllMSVCRT {
                         if chars.peek() == Some(&']') {
                             chars.next();
                         }
-                        while let Some(c) = chars.next() {
+                        for c in chars.by_ref() {
                             if c == ']' {
                                 break;
                             }
@@ -901,7 +901,7 @@ impl DllMSVCRT {
         let stream_handle = uc.read_arg(0);
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if files.remove(&(stream_handle as u32)).is_some() {
+        if files.remove(&{ stream_handle }).is_some() {
             crate::emu_log!("[MSVCRT] fclose(handle {:#x})", stream_handle);
             Some((1, Some(0)))
         } else {
@@ -927,7 +927,7 @@ impl DllMSVCRT {
         let bytes_read = {
             let context = uc.get_data();
             let mut files = context.files.lock().unwrap();
-            if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+            if let Some(file) = files.get_mut(&{ stream_handle }) {
                 file.read(&mut data).unwrap_or(0)
             } else {
                 0
@@ -939,7 +939,7 @@ impl DllMSVCRT {
                 .unwrap();
         }
 
-        let actual_count = (bytes_read as u32 / size as u32) as i32;
+        let actual_count = (bytes_read as u32 / size) as i32;
         crate::emu_log!(
             "[MSVCRT] fread(handle {:#x}, size={}, count={}) -> {}",
             stream_handle,
@@ -967,14 +967,14 @@ impl DllMSVCRT {
         let bytes_written = {
             let context = uc.get_data();
             let mut files = context.files.lock().unwrap();
-            if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+            if let Some(file) = files.get_mut(&{ stream_handle }) {
                 file.write(&data).unwrap_or(0)
             } else {
                 0
             }
         };
 
-        let actual_count = (bytes_written as u32 / size as u32) as i32;
+        let actual_count = (bytes_written as u32 / size) as i32;
         crate::emu_log!(
             "[MSVCRT] fwrite(handle {:#x}, size={}, count={}) -> {}",
             stream_handle,
@@ -1001,7 +1001,7 @@ impl DllMSVCRT {
 
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+        if let Some(file) = files.get_mut(&{ stream_handle }) {
             match file.seek(pos) {
                 Ok(new_pos) => {
                     crate::emu_log!(
@@ -1037,8 +1037,8 @@ impl DllMSVCRT {
         let stream_handle = uc.read_arg(0);
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&(stream_handle as u32)) {
-            match file.seek(SeekFrom::Current(0)) {
+        if let Some(file) = files.get_mut(&{ stream_handle }) {
+            match file.stream_position() {
                 Ok(pos) => {
                     crate::emu_log!("[MSVCRT] ftell(handle {:#x}) -> {}", stream_handle, pos);
                     Some((1, Some(pos as i32)))
@@ -1060,7 +1060,7 @@ impl DllMSVCRT {
         let stream_handle = uc.read_arg(0);
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+        if let Some(file) = files.get_mut(&{ stream_handle }) {
             file.flush().unwrap();
             Some((1, Some(0)))
         } else {
@@ -1130,7 +1130,7 @@ impl DllMSVCRT {
     // API: int _close(int fd)
     // 역할: 파일 기술자를 닫음
     pub fn _close(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let fd = uc.read_arg(0) as u32;
+        let fd = uc.read_arg(0);
         let context = uc.get_data();
         if context.files.lock().unwrap().remove(&fd).is_some() {
             crate::emu_log!("[MSVCRT] _close(fd {:#x})", fd);
@@ -1144,7 +1144,7 @@ impl DllMSVCRT {
     // API: int _read(int fd, void* buffer, unsigned int count)
     // 역할: 파일 기술자에서 데이터를 읽음
     pub fn _read(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let fd = uc.read_arg(0) as u32;
+        let fd = uc.read_arg(0);
         let buffer_addr = uc.read_arg(1);
         let count = uc.read_arg(2);
 
@@ -1176,7 +1176,7 @@ impl DllMSVCRT {
     // API: int _write(int fd, const void* buffer, unsigned int count)
     // 역할: 파일 기술자에 데이터를 씀
     pub fn _write(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let fd = uc.read_arg(0) as u32;
+        let fd = uc.read_arg(0);
         let buffer_addr = uc.read_arg(1);
         let count = uc.read_arg(2);
 
@@ -1205,7 +1205,7 @@ impl DllMSVCRT {
     // API: long _lseek(int fd, long offset, int origin)
     // 역할: 파일 기술자의 읽기/쓰기 위치를 이동
     pub fn _lseek(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let fd = uc.read_arg(0) as u32;
+        let fd = uc.read_arg(0);
         let offset = uc.read_arg(1) as i32 as i64;
         let origin = uc.read_arg(2);
 

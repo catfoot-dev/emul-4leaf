@@ -51,4 +51,50 @@ impl WinFrame {
     pub fn get_window_mut(&mut self, hwnd: u32) -> Option<&mut WindowState> {
         self.windows.get_mut(&hwnd)
     }
+
+    /// 윈도우 표시 상태 변경 및 UI 알림
+    pub fn show_window(&mut self, hwnd: u32, visible: bool) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.visible = visible;
+        }
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(UiCommand::ShowWindow { hwnd, visible });
+        }
+    }
+
+    /// 윈도우 위치 및 크기 변경, UI 알림
+    pub fn move_window(&mut self, hwnd: u32, x: i32, y: i32, width: u32, height: u32) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.x = x;
+            state.y = y;
+            state.width = width as i32;
+            state.height = height as i32;
+        }
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(UiCommand::MoveWindow {
+                hwnd,
+                x,
+                y,
+                width,
+                height,
+            });
+        }
+    }
+
+    /// 윈도우 제목 변경 및 UI 알림
+    pub fn set_window_text(&mut self, hwnd: u32, text: String) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.title = text.clone();
+        }
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(UiCommand::SetWindowText { hwnd, text });
+        }
+    }
+
+    /// 윈도우 강제 다시 그리기 (UpdateWindow) 알림
+    pub fn update_window(&self, hwnd: u32) {
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(UiCommand::UpdateWindow { hwnd });
+        }
+    }
 }
