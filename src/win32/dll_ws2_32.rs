@@ -1,7 +1,7 @@
 use unicorn_engine::Unicorn;
 
 use crate::helper::UnicornHelper;
-use crate::packet_logger::PacketDirection;
+use crate::server::packet_logger::PacketDirection;
 use crate::win32::{ApiHookResult, SocketState, Win32Context, callee_result};
 use std::sync::atomic::Ordering;
 

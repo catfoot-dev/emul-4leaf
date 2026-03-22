@@ -25,7 +25,7 @@ use unicorn_engine::Unicorn;
 
 use crate::{
     helper::{FAKE_IMPORT_BASE, HEAP_BASE},
-    packet_logger::PacketLogger,
+    server::packet_logger::PacketLogger,
     ui::{UiCommand, win_event::WinEvent},
     win32::{
         dll_advapi32::DllADVAPI32, dll_comctl32::DllCOMCTL32, dll_gdi32::DllGDI32,

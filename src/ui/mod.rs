@@ -13,6 +13,10 @@ pub enum UiCommand {
         width: u32,
         /// 높이
         height: u32,
+        /// 윈도우 스타일 (WS_*)
+        style: u32,
+        /// 확장 스타일 (WS_EX_*)
+        ex_style: u32,
     },
     /// 특정 윈도우 창 파괴 요청
     DestroyWindow {
@@ -33,6 +37,13 @@ pub enum UiCommand {
     SetWindowText { hwnd: u32, text: String },
     /// 윈도우 강제 렌더링(업데이트) 요청
     UpdateWindow { hwnd: u32 },
+    /// 메시지 박스 표시 요청 (동기 응답 채널 포함)
+    MessageBox {
+        caption: String,
+        text: String,
+        u_type: u32,
+        response_tx: std::sync::mpsc::Sender<i32>,
+    },
 }
 
 /// 윈도우 콘텐츠를 그리는 인터페이스
@@ -42,6 +53,9 @@ pub trait Painter: std::any::Any {
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> winit::window::Window;
     fn quit_on_close(&self) -> bool;
+    fn should_close(&self) -> bool {
+        false
+    }
     fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32);
     fn handle_event(
         &mut self,

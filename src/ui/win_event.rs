@@ -25,6 +25,8 @@ impl WinEvent {
         let title = state.title.clone();
         let width = state.width as u32;
         let height = state.height as u32;
+        let style = state.style;
+        let ex_style = state.ex_style;
 
         self.windows.insert(hwnd, state);
 
@@ -34,6 +36,8 @@ impl WinEvent {
                 title,
                 width,
                 height,
+                style,
+                ex_style,
             });
         }
     }
@@ -96,5 +100,21 @@ impl WinEvent {
         if let Some(tx) = &self.ui_tx {
             let _ = tx.send(UiCommand::UpdateWindow { hwnd });
         }
+    }
+
+    /// 메시지 박스 표시 및 응답 대기 (동기)
+    pub fn message_box(&mut self, caption: String, text: String, u_type: u32) -> i32 {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Some(ui_tx) = &self.ui_tx {
+            let _ = ui_tx.send(UiCommand::MessageBox {
+                caption,
+                text,
+                u_type,
+                response_tx: tx,
+            });
+        }
+
+        // UI 스레드로부터 응답이 올 때까지 대기
+        rx.recv().unwrap_or(1) // 기본값 IDOK(1)
     }
 }

@@ -2,7 +2,6 @@ mod debug;
 mod server;
 #[macro_use]
 mod helper;
-mod packet_logger;
 mod ui;
 mod win32;
 

@@ -1,3 +1,5 @@
+pub mod packet_logger;
+
 use std::io::{self, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;

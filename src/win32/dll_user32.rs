@@ -34,15 +34,23 @@ impl DllUSER32 {
                     let u_type = uc.read_arg(3);
                     let text = uc.read_euc_kr(text_addr as u64);
                     let caption = uc.read_euc_kr(caption_addr as u64);
+
+                    let result = uc
+                        .get_data()
+                        .win_event
+                        .lock()
+                        .unwrap()
+                        .message_box(caption.clone(), text.clone(), u_type);
+
                     crate::emu_log!(
                         "[USER32] MessageBoxA({:#x}, \"{}\", \"{}\", {:#x}) -> {:#x}",
                         hwnd,
                         caption,
                         text,
                         u_type,
-                        1
+                        result
                     );
-                    Some((4, Some(1))) // IDOK
+                    Some((4, Some(result)))
                 }
 
                 // API: ATOM RegisterClassExA(const WNDCLASSEXA* lpwcx)

@@ -10,7 +10,7 @@ use rusttype::Font as TtfFont;
 static FONT_DATA: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
 static TTF_FONT: std::sync::OnceLock<TtfFont<'static>> = std::sync::OnceLock::new();
 
-const LOG_SCROLL_MAX: usize = 980;
+const LOG_SCROLL_MAX: usize = 1500;
 
 use crate::debug::common::{CpuContext, DebugCommand};
 use crate::ui::Painter;
@@ -177,6 +177,14 @@ impl Painter for Debug {
                         self.log_scroll_offset = 0;
                         redraw = true;
                     }
+                    PhysicalKey::Code(KeyCode::ArrowUp) => {
+                        self.log_scroll_offset = (self.log_scroll_offset + 1).min(LOG_SCROLL_MAX);
+                        redraw = true;
+                    }
+                    PhysicalKey::Code(KeyCode::ArrowDown) => {
+                        self.log_scroll_offset = self.log_scroll_offset.saturating_sub(1);
+                        redraw = true;
+                    }
                     _ => {}
                 }
                 redraw
@@ -327,7 +335,9 @@ impl Painter for Debug {
                 .ok();
         }
 
-        let mut log_y = 407;
+        const LOG_Y_START: i32 = 407;
+        const LOG_X_MAX: usize = 145;
+
         if let Some(buf) = crate::LOG_BUFFER.get()
             && let Ok(b) = buf.try_lock()
         {
@@ -338,14 +348,21 @@ impl Painter for Debug {
             let total_logs = b.len();
 
             // 스크롤 오프셋을 고려하여 보여줄 범위 계산
+            if total_logs < lines_to_show {
+                self.log_scroll_offset = 0;
+            } else if self.log_scroll_offset > total_logs.saturating_sub(lines_to_show) {
+                self.log_scroll_offset = total_logs.saturating_sub(lines_to_show);
+            }
             let end_idx = total_logs.saturating_sub(self.log_scroll_offset);
             let start_idx = end_idx.saturating_sub(lines_to_show);
+            let row_count = end_idx - start_idx;
 
-            for line in b.iter().skip(start_idx).take(end_idx - start_idx) {
+            let mut log_y = LOG_Y_START
+                + lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13;
+            for line in b.iter().skip(start_idx).take(row_count) {
                 // Trim the line if it's too long
-                let max_len = 130;
-                let text = if line.len() > max_len {
-                    format!("{}...", &line[0..max_len])
+                let text = if line.len() > LOG_X_MAX {
+                    format!("{}...", &line[0..LOG_X_MAX])
                 } else {
                     line.clone()
                 };

@@ -9,8 +9,17 @@ use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle};
 use winit::window::{Window, WindowId};
 
 use softbuffer::{Context as SoftContext, Surface};
+use rfd::{MessageButtons, MessageDialog, MessageLevel, MessageDialogResult};
 
 use crate::ui::{Painter, UiCommand};
+
+// Windows 스타일 -> winit 속성 매핑
+const WS_POPUP: u32 = 0x80000000;
+const WS_CAPTION: u32 = 0x00C00000;
+const WS_THICKFRAME: u32 = 0x00040000; // WS_SIZEBOX
+const WS_MINIMIZEBOX: u32 = 0x00020000;
+const WS_MAXIMIZEBOX: u32 = 0x00010000;
+const WS_EX_TOPMOST: u32 = 0x00000008;
 
 /// 윈도우 애플리케이션 핸들러
 /// 모든 winit 윈도우와 Painter를 관리함
@@ -79,19 +88,43 @@ impl ApplicationHandler for WinFrame {
                     title,
                     width,
                     height,
+                    style,
+                    ex_style,
                 } => {
-                    let window = event_loop
-                        .create_window(
-                            Window::default_attributes()
-                                .with_title(title)
-                                .with_inner_size(winit::dpi::LogicalSize::new(width, height)),
-                        )
-                        .unwrap();
+                    let mut attributes = Window::default_attributes()
+                        .with_title(title)
+                        .with_inner_size(winit::dpi::LogicalSize::new(width, height));
+
+                    // 테두리 및 캡션 제어
+                    if (style & WS_POPUP) != 0 {
+                        attributes = attributes.with_decorations(false);
+                    } else if (style & WS_CAPTION) == 0 {
+                        attributes = attributes.with_decorations(false);
+                    }
+
+                    // 크기 조절 가능 여부
+                    if (style & WS_THICKFRAME) != 0 {
+                        attributes = attributes.with_resizable(true);
+                    } else {
+                        attributes = attributes.with_resizable(false);
+                    }
+
+                    // 최소/최대화 버튼 (winit에서는 개별 제어가 제한적일 수 있음)
+                    let _has_min = (style & WS_MINIMIZEBOX) != 0;
+                    let _has_max = (style & WS_MAXIMIZEBOX) != 0;
+
+                    // 항상 위에 표시
+                    if (ex_style & WS_EX_TOPMOST) != 0 {
+                        attributes =
+                            attributes.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
+                    }
+
+                    let window = event_loop.create_window(attributes).unwrap();
                     let id = window.id();
                     self.hwnd_to_id.insert(hwnd, id);
                     self.id_to_hwnd.insert(id, hwnd);
 
-                    // 에뮬레이션 윈도우용 기본 Painter (현재는 HWND 표시 수준)
+                    // 에뮬레이션 윈도우용 기본 Painter
                     let painter = DefaultEmulatorPainter { hwnd };
                     self.painters.insert(id, Box::new(painter));
                     self.windows.insert(id, window);
@@ -145,15 +178,68 @@ impl ApplicationHandler for WinFrame {
                         }
                     }
                 }
+
+                UiCommand::MessageBox {
+                    caption,
+                    text,
+                    u_type,
+                    response_tx,
+                } => {
+                    let mut dialog = MessageDialog::new()
+                        .set_title(&caption)
+                        .set_description(&text);
+
+                    // 아이콘 설정 (MB_ICON*)
+                    if (u_type & 0x10) != 0 {
+                        dialog = dialog.set_level(MessageLevel::Error);
+                    } else if (u_type & 0x30) == 0x30 {
+                        dialog = dialog.set_level(MessageLevel::Warning);
+                    } else if (u_type & 0x40) != 0 {
+                        dialog = dialog.set_level(MessageLevel::Info);
+                    }
+
+                    // 버튼 설정 (MB_*)
+                    let buttons = match u_type & 0xF {
+                        1 => MessageButtons::OkCancel,
+                        3 => MessageButtons::YesNoCancel,
+                        4 => MessageButtons::YesNo,
+                        _ => MessageButtons::Ok,
+                    };
+                    dialog = dialog.set_buttons(buttons);
+
+                    let result = dialog.show();
+
+                    // 결과 매핑 (IDOK = 1, IDCANCEL = 2, IDYES = 6, IDNO = 7)
+                    let win_result = match result {
+                        MessageDialogResult::Ok => 1,
+                        MessageDialogResult::Cancel => 2,
+                        MessageDialogResult::Yes => 6,
+                        MessageDialogResult::No => 7,
+                        _ => 1,
+                    };
+                    let _ = response_tx.send(win_result);
+                }
             }
         }
 
-        // 모든 Painter에게 백그라운드 상태 변경 알림
+        // 모든 Painter에게 백그라운드 상태 변경 알림 및 종료 체크
+        let mut windows_to_remove = Vec::new();
         for (id, painter) in self.painters.iter_mut() {
             if painter.tick() {
                 if let Some(window) = self.windows.get(id) {
                     window.request_redraw();
                 }
+            }
+            if painter.should_close() {
+                windows_to_remove.push(*id);
+            }
+        }
+
+        for id in windows_to_remove {
+            self.windows.remove(&id);
+            self.painters.remove(&id);
+            if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
+                self.hwnd_to_id.remove(&hwnd);
             }
         }
 

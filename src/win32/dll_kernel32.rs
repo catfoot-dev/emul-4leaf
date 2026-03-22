@@ -64,10 +64,9 @@ impl DllKERNEL32 {
     // 역할: 지정된 밀리초 동안 스레드의 실행을 일시 중단
     pub fn sleep(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         // sleep은 단일 스레드 에뮬이므로 no-op
-        // crate::emu_log!("[KERNEL32] Sleep(...)");
         let dw_milliseconds = uc.read_arg(0);
         thread::sleep(time::Duration::from_millis(dw_milliseconds as u64));
-        crate::emu_log!("[KERNEL32] Sleep({}) -> VOID", dw_milliseconds);
+        // crate::emu_log!("[KERNEL32] Sleep({}) -> VOID", dw_milliseconds);
         Some((1, None))
     }
 
