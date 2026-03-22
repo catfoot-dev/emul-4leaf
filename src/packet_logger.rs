@@ -119,7 +119,7 @@ impl PacketLogger {
             .filter(|p| p.direction == PacketDirection::Recv)
             .count();
         let total_bytes: usize = self.packets.iter().map(|p| p.data.len()).sum();
-        crate::emu_log!("\n=== Packet Summary ===");
+        crate::emu_log!("=== Packet Summary ===");
         crate::emu_log!(
             "Total packets: {} (Send: {}, Recv: {})",
             self.packets.len(),

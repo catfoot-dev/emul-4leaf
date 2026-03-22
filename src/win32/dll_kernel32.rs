@@ -2,9 +2,9 @@ use std::{thread, time};
 
 use unicorn_engine::Unicorn;
 
-use std::sync::atomic::Ordering;
 use crate::helper::UnicornHelper;
 use crate::win32::{ApiHookResult, EventState, Win32Context, callee_result};
+use std::sync::atomic::Ordering;
 
 /// `KERNEL32.dll` 프록시 구현 모듈
 ///
@@ -21,7 +21,7 @@ impl DllKERNEL32 {
         let ctx = uc.get_data();
         let index = ctx.tls_counter.fetch_add(1, Ordering::SeqCst);
         ctx.tls_slots.lock().unwrap().insert(index, 0);
-        crate::emu_log!("[KERNEL32] TlsAlloc() -> {}", index);
+        crate::emu_log!("[KERNEL32] TlsAlloc() -> DWORD {}", index);
         Some((0, Some(index as i32)))
     }
 
@@ -31,7 +31,7 @@ impl DllKERNEL32 {
         let index = uc.read_arg(0);
         let ctx = uc.get_data();
         ctx.tls_slots.lock().unwrap().remove(&index);
-        crate::emu_log!("[KERNEL32] TlsFree({})", index);
+        crate::emu_log!("[KERNEL32] TlsFree({}) -> BOOL 1", index);
         Some((1, Some(1))) // TRUE
     }
 
@@ -42,7 +42,7 @@ impl DllKERNEL32 {
         let ctx = uc.get_data();
         let slots = ctx.tls_slots.lock().unwrap();
         let value = *slots.get(&index).unwrap_or(&0);
-        crate::emu_log!("[KERNEL32] TlsGetValue({}) -> {:#x}", index, value);
+        crate::emu_log!("[KERNEL32] TlsGetValue({}) -> LPVOID {:#x}", index, value);
         Some((1, Some(value as i32)))
     }
 
@@ -53,7 +53,7 @@ impl DllKERNEL32 {
         let value = uc.read_arg(1);
         let ctx = uc.get_data();
         ctx.tls_slots.lock().unwrap().insert(index, value);
-        crate::emu_log!("[KERNEL32] TlsSetValue({}, {:#x})", index, value);
+        crate::emu_log!("[KERNEL32] TlsSetValue({}, {:#x}) -> BOOL 1", index, value);
         Some((2, Some(1))) // TRUE
     }
 
@@ -67,6 +67,7 @@ impl DllKERNEL32 {
         // crate::emu_log!("[KERNEL32] Sleep(...)");
         let dw_milliseconds = uc.read_arg(0);
         thread::sleep(time::Duration::from_millis(dw_milliseconds as u64));
+        crate::emu_log!("[KERNEL32] Sleep({}) -> VOID", dw_milliseconds);
         Some((1, None))
     }
 
@@ -94,7 +95,13 @@ impl DllKERNEL32 {
     // API: DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
     // 역할: 저정된 객체가 신호 상태가 되거나 시간제한이 초과될 때까지 대기
     pub fn wait_for_single_object(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] WaitForSingleObject(...)");
+        let h_handle = _uc.read_arg(0);
+        let dw_milliseconds = _uc.read_arg(1);
+        crate::emu_log!(
+            "[KERNEL32] WaitForSingleObject({:#x}, {}) -> DWORD 0",
+            h_handle,
+            dw_milliseconds
+        );
         Some((2, Some(0))) // WAIT_OBJECT_0
     }
 
@@ -103,21 +110,43 @@ impl DllKERNEL32 {
     pub fn wait_for_multiple_objects(
         _uc: &mut Unicorn<Win32Context>,
     ) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] WaitForMultipleObjects(...)");
+        let n_count = _uc.read_arg(0);
+        let lp_handles = _uc.read_arg(1);
+        let b_wait_all = _uc.read_arg(2);
+        let dw_milliseconds = _uc.read_arg(3);
+        crate::emu_log!(
+            "[KERNEL32] WaitForMultipleObjects({}, {:#x}, {}, {}) -> DWORD 0",
+            n_count,
+            lp_handles,
+            b_wait_all,
+            dw_milliseconds
+        );
         Some((4, Some(0))) // WAIT_OBJECT_0
     }
 
     // API: BOOL TerminateThread(HANDLE hThread, DWORD dwExitCode)
     // 역할: 스레드를 강제 종료
     pub fn terminate_thread(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] TerminateThread(...)");
+        let h_thread = _uc.read_arg(0);
+        let dw_exit_code = _uc.read_arg(1);
+        crate::emu_log!(
+            "[KERNEL32] TerminateThread({:#x}, {}) -> BOOL 1",
+            h_thread,
+            dw_exit_code
+        );
         Some((2, Some(1)))
     }
 
     // API: BOOL SetThreadPriority(HANDLE hThread, int nPriority)
     // 역할: 지정된 스레드의 우선 순위 값을 설정
     pub fn set_thread_priority(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] SetThreadPriority(...)");
+        let h_thread = _uc.read_arg(0);
+        let n_priority = _uc.read_arg(1);
+        crate::emu_log!(
+            "[KERNEL32] SetThreadPriority({:#x}, {}) -> BOOL 1",
+            h_thread,
+            n_priority
+        );
         Some((2, Some(1)))
     }
 
@@ -126,14 +155,40 @@ impl DllKERNEL32 {
     pub fn disable_thread_library_calls(
         _uc: &mut Unicorn<Win32Context>,
     ) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] DisableThreadLibraryCalls(...)");
+        let h_lib_module = _uc.read_arg(0);
+        crate::emu_log!(
+            "[KERNEL32] DisableThreadLibraryCalls({:#x}) -> BOOL 1",
+            h_lib_module
+        );
         Some((1, Some(1))) // TRUE
     }
 
     // API: BOOL CreateProcessA(LPCSTR lpApplicationName, LPSTR lpCommandLine, ...)
     // 역할: 새로운 프로세스와 그 기본 스레드를 생성
-    pub fn create_process_a(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] CreateProcessA(...)");
+    pub fn create_process_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let lp_application_name = uc.read_arg(0);
+        let lp_command_line = uc.read_arg(1);
+        let lp_process_attributes = uc.read_arg(2);
+        let lp_thread_attributes = uc.read_arg(3);
+        let b_inherit_handles = uc.read_arg(4);
+        let dw_creation_flags = uc.read_arg(5);
+        let lp_environment = uc.read_arg(6);
+        let lp_current_directory = uc.read_arg(7);
+        let lp_startup_info = uc.read_arg(8);
+        let lp_process_information = uc.read_arg(9);
+        crate::emu_log!(
+            "[KERNEL32] CreateProcessA({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 0",
+            lp_application_name,
+            lp_command_line,
+            lp_process_attributes,
+            lp_thread_attributes,
+            b_inherit_handles,
+            dw_creation_flags,
+            lp_environment,
+            lp_current_directory,
+            lp_startup_info,
+            lp_process_information
+        );
         Some((10, Some(0))) // FALSE
     }
 
@@ -143,14 +198,31 @@ impl DllKERNEL32 {
     // API: BOOL CloseHandle(HANDLE hObject)
     // 역할: 열려있는 개체 핸들을 닫음
     pub fn close_handle(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] CloseHandle(...)");
+        let h_handle = _uc.read_arg(0);
+        crate::emu_log!("[KERNEL32] CloseHandle({:#x}) -> BOOL 1", h_handle);
         Some((1, Some(1))) // TRUE
     }
 
     /// API: BOOL DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle, ...)
     /// 역할: 객체 핸들을 복제합니다.
     pub fn duplicate_handle(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] DuplicateHandle(...)");
+        let h_source_process_handle = _uc.read_arg(0);
+        let h_source_handle = _uc.read_arg(1);
+        let h_target_process_handle = _uc.read_arg(2);
+        let lp_target_handle = _uc.read_arg(3);
+        let dw_desired_access = _uc.read_arg(4);
+        let b_inherit_handles = _uc.read_arg(5);
+        let dw_options = _uc.read_arg(6);
+        crate::emu_log!(
+            "[KERNEL32] DuplicateHandle({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
+            h_source_process_handle,
+            h_source_handle,
+            h_target_process_handle,
+            lp_target_handle,
+            dw_desired_access,
+            b_inherit_handles,
+            dw_options
+        );
         Some((7, Some(1))) // TRUE
     }
 
@@ -161,7 +233,7 @@ impl DllKERNEL32 {
     // 역할: 호출하는 스레드의 가장 최근 오류 코드를 검색
     pub fn get_last_error(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let err = uc.get_data().last_error.load(Ordering::SeqCst);
-        crate::emu_log!("[KERNEL32] GetLastError() -> {}", err);
+        crate::emu_log!("[KERNEL32] GetLastError() -> DWORD {:#x}", err);
         Some((0, Some(err as i32)))
     }
 
@@ -170,14 +242,30 @@ impl DllKERNEL32 {
     pub fn set_last_error(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let code = uc.read_arg(0);
         uc.get_data().last_error.store(code, Ordering::SeqCst);
-        crate::emu_log!("[KERNEL32] SetLastError({})", code);
+        crate::emu_log!("[KERNEL32] SetLastError({:#x}) -> VOID", code);
         Some((1, None))
     }
 
     // API: DWORD FormatMessageA(DWORD dwFlags, LPCVOID lpSource, ...)
     // 역할: 메시지 문자열을 포맷
-    pub fn format_message_a(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] FormatMessageA(...)");
+    pub fn format_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let dw_flags = uc.read_arg(0);
+        let lp_source = uc.read_arg(1);
+        let dw_message_id = uc.read_arg(2);
+        let dw_language_id = uc.read_arg(3);
+        let lp_buffer = uc.read_arg(4);
+        let n_size = uc.read_arg(5);
+        let arguments = uc.read_arg(6);
+        crate::emu_log!(
+            "[KERNEL32] FormatMessageA({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> DWORD 0",
+            dw_flags,
+            lp_source,
+            dw_message_id,
+            dw_language_id,
+            lp_buffer,
+            n_size,
+            arguments
+        );
         Some((7, Some(0)))
     }
 
@@ -187,8 +275,15 @@ impl DllKERNEL32 {
     // API: HANDLE CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName)
     // 역할: 이벤트 개체를 생성하거나 오픈
     pub fn create_event_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let lp_event_attributes = uc.read_arg(0);
         let manual_reset = uc.read_arg(1);
         let initial_state = uc.read_arg(2);
+        let lp_name = uc.read_arg(3);
+        let name = if lp_name != 0 {
+            uc.read_euc_kr(lp_name as u64)
+        } else {
+            String::new()
+        };
         let ctx = uc.get_data();
         let handle = ctx.alloc_handle();
         ctx.events.lock().unwrap().insert(
@@ -198,7 +293,15 @@ impl DllKERNEL32 {
                 manual_reset: manual_reset != 0,
             },
         );
-        crate::emu_log!("[KERNEL32] CreateEventA(...) -> handle {:#x}", handle);
+        crate::emu_log!(
+            "[KERNEL32] CreateEventA({:#x}, {}, {}, {:#x}=\"{}\") -> HANDLE {:#x}",
+            lp_event_attributes,
+            manual_reset,
+            initial_state,
+            lp_name,
+            name,
+            handle
+        );
         Some((4, Some(handle as i32)))
     }
 
@@ -211,7 +314,7 @@ impl DllKERNEL32 {
         if let Some(evt) = events.get_mut(&handle) {
             evt.signaled = true;
         }
-        crate::emu_log!("[KERNEL32] SetEvent({:#x})", handle);
+        crate::emu_log!("[KERNEL32] SetEvent({:#x}) -> BOOL 1", handle);
         Some((1, Some(1)))
     }
 
@@ -219,7 +322,7 @@ impl DllKERNEL32 {
     // 역할: 이벤트 개체의 상태를 signaled로 설정한 후 다시 nonsignaled 상태로 재설정
     pub fn pulse_event(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let handle = uc.read_arg(0);
-        crate::emu_log!("[KERNEL32] PulseEvent({:#x})", handle);
+        crate::emu_log!("[KERNEL32] PulseEvent({:#x}) -> BOOL 1", handle);
         Some((1, Some(1)))
     }
 
@@ -232,7 +335,7 @@ impl DllKERNEL32 {
         if let Some(evt) = events.get_mut(&handle) {
             evt.signaled = false;
         }
-        crate::emu_log!("[KERNEL32] ResetEvent({:#x})", handle);
+        crate::emu_log!("[KERNEL32] ResetEvent({:#x}) -> BOOL 1", handle);
         Some((1, Some(1)))
     }
 
@@ -240,32 +343,46 @@ impl DllKERNEL32 {
     // API: void InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
     // 역할: 크리티컬 섹션 개체를 초기화
     pub fn initialize_critical_section(
-        _uc: &mut Unicorn<Win32Context>,
+        uc: &mut Unicorn<Win32Context>,
     ) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] InitializeCriticalSection(...)");
+        let lp_critical_section = uc.read_arg(0);
+        crate::emu_log!(
+            "[KERNEL32] InitializeCriticalSection({:#x}) -> VOID",
+            lp_critical_section
+        );
         Some((1, None))
     }
 
     // API: void DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
     // 역할: 가상 크리티컬 섹션 객체를 삭제
-    pub fn delete_critical_section(
-        _uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] DeleteCriticalSection(...)");
+    pub fn delete_critical_section(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let lp_critical_section = uc.read_arg(0);
+        crate::emu_log!(
+            "[KERNEL32] DeleteCriticalSection({:#x}) -> VOID",
+            lp_critical_section
+        );
         Some((1, None))
     }
 
     // API: void EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
     // 역할: 크리티컬 섹션에 진입
-    pub fn enter_critical_section(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] EnterCriticalSection(...)");
+    pub fn enter_critical_section(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let lp_critical_section = uc.read_arg(0);
+        crate::emu_log!(
+            "[KERNEL32] EnterCriticalSection({:#x}) -> VOID",
+            lp_critical_section
+        );
         Some((1, None))
     }
 
     // API: void LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
     // 역할: 크리티컬 섹션을 떠남
-    pub fn leave_critical_section(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] LeaveCriticalSection(...)");
+    pub fn leave_critical_section(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let lp_critical_section = uc.read_arg(0);
+        crate::emu_log!(
+            "[KERNEL32] LeaveCriticalSection({:#x}) -> VOID",
+            lp_critical_section
+        );
         Some((1, None))
     }
 
@@ -273,16 +390,32 @@ impl DllKERNEL32 {
     // API: HANDLE CreateMutexA(LPSECURITY_ATTRIBUTES lpMutexAttributes, BOOL bInitialOwner, LPCSTR lpName)
     // 역할: 뮤텍스 개체를 생성하거나 오픈
     pub fn create_mutex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let lp_mutex_attributes = uc.read_arg(0);
+        let b_initial_owner = uc.read_arg(1);
+        let lp_name = uc.read_arg(2);
+        let name = if lp_name != 0 {
+            uc.read_euc_kr(lp_name as u64)
+        } else {
+            String::new()
+        };
         let ctx = uc.get_data();
         let handle = ctx.alloc_handle();
-        crate::emu_log!("[KERNEL32] CreateMutexA(...) -> {:#x}", handle);
+        crate::emu_log!(
+            "[KERNEL32] CreateMutexA({:#x}, {}, {:#x}=\"{}\") -> HANDLE {:#x}",
+            lp_mutex_attributes,
+            b_initial_owner,
+            lp_name,
+            name,
+            handle
+        );
         Some((3, Some(handle as i32)))
     }
 
     // API: BOOL ReleaseMutex(HANDLE hMutex)
     // 역할: 단일 뮤텍스 객체의 소유권을 해제
-    pub fn release_mutex(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] ReleaseMutex(...)");
+    pub fn release_mutex(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let h_mutex = uc.read_arg(0);
+        crate::emu_log!("[KERNEL32] ReleaseMutex({:#x}) -> BOOL 1", h_mutex);
         Some((1, Some(1)))
     }
 
@@ -293,8 +426,12 @@ impl DllKERNEL32 {
     // 역할: 문자열을 디버거로 보내 화면에 출력
     pub fn output_debug_string_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let addr = uc.read_arg(0);
-        let s = uc.read_string(addr as u64);
-        crate::emu_log!("[KERNEL32] OutputDebugStringA(\"{s}\")");
+        let s = if addr != 0 {
+            uc.read_euc_kr(addr as u64)
+        } else {
+            String::new()
+        };
+        crate::emu_log!("[KERNEL32] OutputDebugStringA(\"{s}\") -> VOID");
         Some((1, None))
     }
 
@@ -305,9 +442,13 @@ impl DllKERNEL32 {
     // 역할: 지정된 문자열의 길이를 바이트 단위로 반환
     pub fn lstrlen_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let addr = uc.read_arg(0);
-        let s = uc.read_string(addr as u64);
+        let s = if addr != 0 {
+            uc.read_euc_kr(addr as u64)
+        } else {
+            String::new()
+        };
         let len = s.len() as i32;
-        crate::emu_log!("[KERNEL32] lstrlenA(\"{}\") -> {}", s, len);
+        crate::emu_log!("[KERNEL32] lstrlenA(\"{}\") -> int {}", s, len);
         Some((1, Some(len)))
     }
 
@@ -315,12 +456,21 @@ impl DllKERNEL32 {
     // 역할: 문자열을 한 버퍼에서 다른 버퍼로 복사
     pub fn lstrcpy_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let dst = uc.read_arg(0);
+        let dst_str = if dst != 0 {
+            uc.read_euc_kr(dst as u64)
+        } else {
+            String::new()
+        };
         let src = uc.read_arg(1);
-        let s = uc.read_string(src as u64);
-        let mut bytes = s.as_bytes().to_vec();
+        let src_str = if src != 0 {
+            uc.read_euc_kr(src as u64)
+        } else {
+            String::new()
+        };
+        let mut bytes = src_str.as_bytes().to_vec();
         bytes.push(0);
         uc.mem_write(dst as u64, &bytes).unwrap();
-        crate::emu_log!("[KERNEL32] lstrcpyA({:#x}, \"{}\")", dst, s);
+        crate::emu_log!("[KERNEL32] lstrcpyA(\"{dst_str}\", \"{src_str}\") -> LPSTR {dst:#x}",);
         Some((2, Some(dst as i32)))
     }
 
@@ -328,14 +478,25 @@ impl DllKERNEL32 {
     // 역할: 지정된 수의 문자를 복사
     pub fn lstrcpyn_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let dst = uc.read_arg(0);
+        let dst_str = if dst != 0 {
+            uc.read_euc_kr(dst as u64)
+        } else {
+            String::new()
+        };
         let src = uc.read_arg(1);
+        let src_str = if src != 0 {
+            uc.read_euc_kr(src as u64)
+        } else {
+            String::new()
+        };
         let max_count = uc.read_arg(2) as usize;
-        let s = uc.read_string(src as u64);
-        let copy_len = s.len().min(max_count.saturating_sub(1));
-        let mut bytes = s.as_bytes()[..copy_len].to_vec();
+        let copy_len = src_str.len().min(max_count.saturating_sub(1));
+        let mut bytes = src_str.as_bytes()[..copy_len].to_vec();
         bytes.push(0);
         uc.mem_write(dst as u64, &bytes).unwrap();
-        crate::emu_log!("[KERNEL32] lstrcpynA({:#x}, \"{}\", {})", dst, s, max_count);
+        crate::emu_log!(
+            "[KERNEL32] lstrcpynA(\"{dst_str}\", \"{src_str}\", {max_count}) -> LPSTR {dst:#x}",
+        );
         Some((3, Some(dst as i32)))
     }
 
@@ -350,7 +511,12 @@ impl DllKERNEL32 {
         bytes.push(0);
         uc.mem_write(dst as u64 + dst_str.len() as u64, &bytes)
             .unwrap();
-        crate::emu_log!("[KERNEL32] lstrcatA(\"{}\", \"{}\")", dst_str, src_str);
+        crate::emu_log!(
+            "[KERNEL32] lstrcatA(\"{}\", \"{}\") -> LPSTR {:#x}",
+            dst_str,
+            src_str,
+            dst
+        );
         Some((2, Some(dst as i32)))
     }
 
@@ -362,7 +528,12 @@ impl DllKERNEL32 {
         let s1 = uc.read_string(s1_addr as u64);
         let s2 = uc.read_string(s2_addr as u64);
         let result = s1.cmp(&s2) as i32;
-        crate::emu_log!("[KERNEL32] lstrcmpA(\"{}\", \"{}\") -> {}", s1, s2, result);
+        crate::emu_log!(
+            "[KERNEL32] lstrcmpA(\"{}\", \"{}\") -> int {}",
+            s1,
+            s2,
+            result
+        );
         Some((2, Some(result)))
     }
 
@@ -375,11 +546,10 @@ impl DllKERNEL32 {
         let name_addr = uc.read_arg(0);
         if name_addr == 0 {
             // NULL = 현재 실행 모듈 (4Leaf.dll의 베이스)
-            crate::emu_log!("[KERNEL32] GetModuleHandleA(NULL) -> 0x35000000");
+            crate::emu_log!("[KERNEL32] GetModuleHandleA(NULL) -> HMODULE 0x35000000");
             Some((1, Some(0x3500_0000u32 as i32)))
         } else {
-            let name = uc.read_string(name_addr as u64);
-            crate::emu_log!("[KERNEL32] GetModuleHandleA(\"{}\") -> 0", name);
+            let name = uc.read_euc_kr(name_addr as u64);
             // 로드된 DLL에서 찾기
             let ctx = uc.get_data();
             let mut found_base: u32 = 0;
@@ -390,6 +560,11 @@ impl DllKERNEL32 {
                     break;
                 }
             }
+            crate::emu_log!(
+                "[KERNEL32] GetModuleHandleA(\"{}\") -> HMODULE {:#x}",
+                name,
+                found_base
+            );
             Some((1, Some(found_base as i32)))
         }
     }
@@ -397,15 +572,18 @@ impl DllKERNEL32 {
     // API: DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize)
     // 역할: 모듈이 포함된 실행 파일의 절대 경로를 조회
     pub fn get_module_file_name_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let _module = uc.read_arg(0);
+        let module = uc.read_arg(0);
         let buf_addr = uc.read_arg(1);
         let buf_size = uc.read_arg(2);
-        let path = "C:\\4Leaf\\4Leaf.exe\0";
+        let path = ".\\Resources\\4Leaf.exe\0";
         let bytes = path.as_bytes();
         let copy_len = bytes.len().min(buf_size as usize);
         uc.mem_write(buf_addr as u64, &bytes[..copy_len]).unwrap();
         crate::emu_log!(
-            "[KERNEL32] GetModuleFileNameA(...) -> \"{}\"",
+            "[KERNEL32] GetModuleFileNameA({:#x}, {:#x}, {}) -> DWORD \"{}\"",
+            module,
+            buf_addr,
+            buf_size,
             &path[..path.len() - 1]
         );
         Some((3, Some((copy_len - 1) as i32)))
@@ -415,8 +593,11 @@ impl DllKERNEL32 {
     // 역할: 지정된 모듈을 호출 컨텍스트의 주소 공간으로 매핑
     pub fn load_library_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
-        crate::emu_log!("[KERNEL32] LoadLibraryA(\"{}\") -> 0", name);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
         // 이미 로드된 DLL이면 핸들 반환
         let ctx = uc.get_data();
         let mut found_base: u32 = 0;
@@ -427,23 +608,37 @@ impl DllKERNEL32 {
                 break;
             }
         }
+        crate::emu_log!(
+            "[KERNEL32] LoadLibraryA(\"{}\") -> HMODULE {:#x}",
+            name,
+            found_base
+        );
         Some((1, Some(found_base as i32)))
     }
 
     // API: BOOL FreeLibrary(HMODULE hLibModule)
     // 역할: 로드된 DLL 모듈을 해제
-    pub fn free_library(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] FreeLibrary(...)");
+    pub fn free_library(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let module = uc.read_arg(0);
+        crate::emu_log!("[KERNEL32] FreeLibrary({:#x}) -> BOOL 1", module);
         Some((1, Some(1)))
     }
 
     // API: FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
     // 역할: DLL에서 지정된 익스포트 함수의 주소를 조회
     pub fn get_proc_address(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let _module = uc.read_arg(0);
+        let module = uc.read_arg(0);
         let name_addr = uc.read_arg(1);
-        let name = uc.read_string(name_addr as u64);
-        crate::emu_log!("[KERNEL32] GetProcAddress(..., \"{}\") -> 0", name);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        crate::emu_log!(
+            "[KERNEL32] GetProcAddress({:#x}, \"{}\") -> FARPROC 0",
+            module,
+            name
+        );
         Some((2, Some(0)))
     }
 
@@ -453,15 +648,21 @@ impl DllKERNEL32 {
     // API: int MulDiv(int nNumber, int nNumerator, int nDenominator)
     // 역할: 두 개의 32비트 값을 곱한 후 세 번째 32비트 값으로 나누고 결과를 32비트 값으로 돌려줌
     pub fn mul_div(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let a = uc.read_arg(0) as i32;
-        let b = uc.read_arg(1) as i32;
-        let c = uc.read_arg(2) as i32;
-        let result = if c == 0 {
+        let number = uc.read_arg(0) as i32;
+        let numerator = uc.read_arg(1) as i32;
+        let denominator = uc.read_arg(2) as i32;
+        let result = if denominator == 0 {
             -1
         } else {
-            ((a as i64 * b as i64) / c as i64) as i32
+            ((number as i64 * numerator as i64) / denominator as i64) as i32
         };
-        crate::emu_log!("[KERNEL32] MulDiv({}, {}, {}) -> {}", a, b, c, result);
+        crate::emu_log!(
+            "[KERNEL32] MulDiv({}, {}, {}) -> int {}",
+            number,
+            numerator,
+            denominator,
+            result
+        );
         Some((3, Some(result)))
     }
 
@@ -469,7 +670,7 @@ impl DllKERNEL32 {
     // 역할: 시스템이 시작된 후 지난 밀리초 시간을 검색
     pub fn get_tick_count(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let elapsed = uc.get_data().start_time.elapsed().as_millis() as u32;
-        crate::emu_log!("[KERNEL32] GetTickCount() -> {}", elapsed);
+        crate::emu_log!("[KERNEL32] GetTickCount() -> DWORD {}", elapsed);
         Some((0, Some(elapsed as i32)))
     }
 
@@ -480,16 +681,22 @@ impl DllKERNEL32 {
         // SYSTEMTIME: 8 WORDs = 16 bytes, 0으로 채움
         let zeros = [0u8; 16];
         uc.mem_write(buf_addr as u64, &zeros).unwrap();
-        crate::emu_log!("[KERNEL32] GetLocalTime(...)");
+        crate::emu_log!("[KERNEL32] GetLocalTime({:#x}) -> VOID", buf_addr);
         Some((1, None))
     }
 
     // API: BOOL SystemTimeToFileTime(const SYSTEMTIME *lpSystemTime, LPFILETIME lpFileTime)
     // 역할: 시스템 시간을 파일 시간 형식으로 변환
     pub fn system_time_to_file_time(
-        _uc: &mut Unicorn<Win32Context>,
+        uc: &mut Unicorn<Win32Context>,
     ) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] SystemTimeToFileTime(...)");
+        let system_time_addr = uc.read_arg(0);
+        let file_time_addr = uc.read_arg(1);
+        crate::emu_log!(
+            "[KERNEL32] SystemTimeToFileTime({:#x}, {:#x}) -> BOOL 1",
+            system_time_addr,
+            file_time_addr
+        );
         Some((2, Some(1)))
     }
 
@@ -504,7 +711,7 @@ impl DllKERNEL32 {
         let old_value = uc.read_u32(target_addr as u64);
         uc.write_u32(target_addr as u64, new_value);
         crate::emu_log!(
-            "[KERNEL32] InterlockedExchange({:#x}, {}) -> {}",
+            "[KERNEL32] InterlockedExchange({:#x}, {}) -> LONG {}",
             target_addr,
             new_value,
             old_value
@@ -518,15 +725,15 @@ impl DllKERNEL32 {
     // API: HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
     // 역할: 힙에서 지정된 바이트의 메모리를 할당
     pub fn global_alloc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let _flags = uc.read_arg(0);
+        let flags = uc.read_arg(0);
         let size = uc.read_arg(1);
         let addr = uc.malloc(size as usize);
         // GMEM_ZEROINIT (0x0040) 일 수 있으므로 0으로 초기화
         let zeros = vec![0u8; size as usize];
         uc.mem_write(addr, &zeros).unwrap();
         crate::emu_log!(
-            "[KERNEL32] GlobalAlloc({}, {}) -> {:#x}",
-            _flags,
+            "[KERNEL32] GlobalAlloc({:#x}, {}) -> HGLOBAL {:#x}",
+            flags,
             size,
             addr
         );
@@ -538,21 +745,27 @@ impl DllKERNEL32 {
     pub fn global_lock(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let handle = uc.read_arg(0);
         // 핸들 = 메모리 포인터로 취급
-        crate::emu_log!("[KERNEL32] GlobalLock({:#x}) -> {:#x}", handle, handle);
+        crate::emu_log!(
+            "[KERNEL32] GlobalLock({:#x}) -> LPVOID {:#x}",
+            handle,
+            handle
+        );
         Some((1, Some(handle as i32)))
     }
 
     // API: BOOL GlobalUnlock(HGLOBAL hMem)
     // 역할: GlobalLock에 의해 잠긴 메모리를 해제
-    pub fn global_unlock(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] GlobalUnlock(...)");
+    pub fn global_unlock(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let handle = uc.read_arg(0);
+        crate::emu_log!("[KERNEL32] GlobalUnlock({:#x}) -> BOOL 1", handle);
         Some((1, Some(1)))
     }
 
     // API: HGLOBAL GlobalFree(HGLOBAL hMem)
     // 역할: 지정된 전역 메모리 개체를 해제
-    pub fn global_free(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] GlobalFree(...)");
+    pub fn global_free(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let handle = uc.read_arg(0);
+        crate::emu_log!("[KERNEL32] GlobalFree({:#x}) -> HGLOBAL 0", handle);
         Some((1, Some(0))) // 성공 시 NULL
     }
 
@@ -563,10 +776,28 @@ impl DllKERNEL32 {
     // 역할: 파일 또는 입출력 디바이스 개체를 생성하거나 오픈
     pub fn create_file_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        let access = uc.read_arg(1);
+        let share_mode = uc.read_arg(2);
+        let security_attributes = uc.read_arg(3);
+        let creation_disposition = uc.read_arg(4);
+        let template_file = uc.read_arg(5);
         let ctx = uc.get_data();
         let handle = ctx.alloc_handle();
-        crate::emu_log!("[KERNEL32] CreateFileA(\"{}\") -> {:#x}", name, handle);
+        crate::emu_log!(
+            "[KERNEL32] CreateFileA(\"{}\", {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> HANDLE {:#x}",
+            name,
+            access,
+            share_mode,
+            security_attributes,
+            creation_disposition,
+            template_file,
+            handle
+        );
         Some((7, Some(handle as i32)))
     }
 
@@ -574,25 +805,38 @@ impl DllKERNEL32 {
     // 역할: 지정된 이름과 일치하는 파일용 핸들을 검색/생성
     pub fn find_first_file_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        let find_file_data_addr = uc.read_arg(1);
         crate::emu_log!(
-            "[KERNEL32] FindFirstFileA(\"{}\") -> INVALID_HANDLE_VALUE",
-            name
+            "[KERNEL32] FindFirstFileA(\"{}\", {:#x}) -> INVALID_HANDLE_VALUE",
+            name,
+            find_file_data_addr
         );
         Some((2, Some(-1i32))) // INVALID_HANDLE_VALUE
     }
 
     // API: BOOL FindNextFileA(HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData)
     // 역할: FindFirstFileA의 추가 파일 찾기를 실행
-    pub fn find_next_file_a(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] FindNextFileA(...) -> FALSE");
+    pub fn find_next_file_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let hfindfile = uc.read_arg(0);
+        let find_file_data_addr = uc.read_arg(1);
+        crate::emu_log!(
+            "[KERNEL32] FindNextFileA({:#x}, {:#x}) -> FALSE",
+            hfindfile,
+            find_file_data_addr
+        );
         Some((2, Some(0)))
     }
 
     // API: BOOL FindClose(HANDLE hFindFile)
     // 역할: FindFirstFileA에 의해 띄워진 파일 탐색 핸들을 닫음
-    pub fn find_close(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] FindClose(...)");
+    pub fn find_close(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let hfindfile = uc.read_arg(0);
+        crate::emu_log!("[KERNEL32] FindClose({:#x}) -> BOOL 1", hfindfile);
         Some((1, Some(1)))
     }
 
@@ -600,8 +844,15 @@ impl DllKERNEL32 {
     // 역할: 지정된 파일 또는 디렉토리의 파일 시스템 속성을 검색
     pub fn get_file_attributes_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
-        crate::emu_log!("[KERNEL32] GetFileAttributesA(\"{}\") -> INVALID", name);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        crate::emu_log!(
+            "[KERNEL32] GetFileAttributesA(\"{}\") -> INVALID_FILE_ATTRIBUTES",
+            name
+        );
         Some((1, Some(-1i32))) // INVALID_FILE_ATTRIBUTES
     }
 
@@ -609,8 +860,17 @@ impl DllKERNEL32 {
     // 역할: 지정된 파일 또는 디렉토리의 속성을 설정
     pub fn set_file_attributes_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
-        crate::emu_log!("[KERNEL32] SetFileAttributesA(\"{}\")", name);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        let attributes = uc.read_arg(1);
+        crate::emu_log!(
+            "[KERNEL32] SetFileAttributesA(\"{}\", {:#x}) -> BOOL 1",
+            name,
+            attributes
+        );
         Some((2, Some(1)))
     }
 
@@ -618,8 +878,12 @@ impl DllKERNEL32 {
     // 역할: 기존의 빈 디렉터리를 삭제
     pub fn remove_directory_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
-        crate::emu_log!("[KERNEL32] RemoveDirectoryA(\"{}\")", name);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        crate::emu_log!("[KERNEL32] RemoveDirectoryA(\"{}\") -> BOOL 1", name);
         Some((1, Some(1)))
     }
 
@@ -627,8 +891,17 @@ impl DllKERNEL32 {
     // 역할: 새 디렉토리를 생성
     pub fn create_directory_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
-        crate::emu_log!("[KERNEL32] CreateDirectoryA(\"{}\")", name);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        let security_attributes = uc.read_arg(1);
+        crate::emu_log!(
+            "[KERNEL32] CreateDirectoryA(\"{}\", {:#x}) -> BOOL 1",
+            name,
+            security_attributes
+        );
         Some((2, Some(1)))
     }
 
@@ -636,8 +909,12 @@ impl DllKERNEL32 {
     // 역할: 기존 파일을 삭제
     pub fn delete_file_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let name = uc.read_string(name_addr as u64);
-        crate::emu_log!("[KERNEL32] DeleteFileA(\"{}\")", name);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        crate::emu_log!("[KERNEL32] DeleteFileA(\"{}\") -> BOOL 1", name);
         Some((1, Some(1)))
     }
 
@@ -645,19 +922,40 @@ impl DllKERNEL32 {
     // 역할: 기존 파일을 새 파일로 복사
     pub fn copy_file_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let src_addr = uc.read_arg(0);
-        let src = uc.read_string(src_addr as u64);
-        crate::emu_log!("[KERNEL32] CopyFileA(\"{}\")", src);
+        let src = if src_addr != 0 {
+            uc.read_euc_kr(src_addr as u64)
+        } else {
+            String::new()
+        };
+        let dst_addr = uc.read_arg(1);
+        let dst = if dst_addr != 0 {
+            uc.read_euc_kr(dst_addr as u64)
+        } else {
+            String::new()
+        };
+        let fail_if_exists = uc.read_arg(2);
+        crate::emu_log!(
+            "[KERNEL32] CopyFileA(\"{}\", \"{}\", {}) -> BOOL 1",
+            src,
+            dst,
+            fail_if_exists
+        );
         Some((3, Some(1)))
     }
 
     // API: DWORD GetTempPathA(DWORD nBufferLength, LPSTR lpBuffer)
     // 역할: 임시 파일용 디렉토리 경로를 지정
     pub fn get_temp_path_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let _buf_size = uc.read_arg(0);
+        let buf_size = uc.read_arg(0);
         let buf_addr = uc.read_arg(1);
-        let path = "C:\\Temp\\\0";
+        let path = ".\\Temp\\\0";
         uc.mem_write(buf_addr as u64, path.as_bytes()).unwrap();
-        crate::emu_log!("[KERNEL32] GetTempPathA(...) -> \"C:\\\\Temp\\\\\"");
+        crate::emu_log!(
+            "[KERNEL32] GetTempPathA({:#x}, {:#x}) -> \"{}\"",
+            buf_size,
+            buf_addr,
+            path
+        );
         Some((2, Some((path.len() - 1) as i32)))
     }
 
@@ -665,15 +963,25 @@ impl DllKERNEL32 {
     // 역할: 지정된 경로의 짧은 경로(8.3 폼) 형태를 가져옴
     pub fn get_short_path_name_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let long_addr = uc.read_arg(0);
+        let long_name = if long_addr != 0 {
+            uc.read_euc_kr(long_addr as u64)
+        } else {
+            String::new()
+        };
         let short_addr = uc.read_arg(1);
-        let _buf_size = uc.read_arg(2);
-        let long_name = uc.read_string(long_addr as u64);
+        let buf_size = uc.read_arg(2);
         let mut bytes = long_name.as_bytes().to_vec();
         bytes.push(0);
         if short_addr != 0 {
             uc.mem_write(short_addr as u64, &bytes).unwrap();
         }
-        crate::emu_log!("[KERNEL32] GetShortPathNameA(\"{}\")", long_name);
+        crate::emu_log!(
+            "[KERNEL32] GetShortPathNameA(\"{}\", {:#x}, {}) -> {:#x}",
+            long_name,
+            short_addr,
+            buf_size,
+            short_addr
+        );
         Some((3, Some((bytes.len() - 1) as i32)))
     }
 
@@ -681,12 +989,27 @@ impl DllKERNEL32 {
     // 역할: 지정된 파일의 전체 경로와 파일 이름을 구함
     pub fn get_full_path_name_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
-        let _buf_size = uc.read_arg(1);
+        let name = if name_addr != 0 {
+            uc.read_euc_kr(name_addr as u64)
+        } else {
+            String::new()
+        };
+        let buf_size = uc.read_arg(1);
         let buf_addr = uc.read_arg(2);
-        let name = uc.read_string(name_addr as u64);
+        let file_part_addr = uc.read_arg(3);
         let full = format!("C:\\4Leaf\\{}\0", name);
         uc.mem_write(buf_addr as u64, full.as_bytes()).unwrap();
-        crate::emu_log!("[KERNEL32] GetFullPathNameA(\"{}\")", name);
+        if file_part_addr != 0 {
+            uc.write_u32(file_part_addr as u64, buf_addr as u32);
+        }
+        crate::emu_log!(
+            "[KERNEL32] GetFullPathNameA(\"{}\", {}, {:#x}, {:#x}) -> {:#x}",
+            name,
+            buf_size,
+            buf_addr,
+            file_part_addr,
+            buf_addr
+        );
         Some((4, Some((full.len() - 1) as i32)))
     }
 
@@ -694,22 +1017,42 @@ impl DllKERNEL32 {
     // 역할: 지정된 경로의 원래 긴 경로 형태를 가져옴
     pub fn get_long_path_name_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let short_addr = uc.read_arg(0);
+        let short_name = if short_addr != 0 {
+            uc.read_euc_kr(short_addr as u64)
+        } else {
+            String::new()
+        };
         let long_addr = uc.read_arg(1);
-        let _buf_size = uc.read_arg(2);
-        let short_name = uc.read_string(short_addr as u64);
+        let buf_size = uc.read_arg(2);
         let mut bytes = short_name.as_bytes().to_vec();
         bytes.push(0);
         if long_addr != 0 {
             uc.mem_write(long_addr as u64, &bytes).unwrap();
         }
-        crate::emu_log!("[KERNEL32] GetLongPathNameA(\"{}\")", short_name);
+        crate::emu_log!(
+            "[KERNEL32] GetLongPathNameA(\"{}\", {:#x}, {}) -> {:#x}",
+            short_name,
+            long_addr,
+            buf_size,
+            long_addr
+        );
         Some((3, Some((bytes.len() - 1) as i32)))
     }
 
     // API: BOOL SetFileTime(HANDLE hFile, const FILETIME *lpCreationTime, const FILETIME *lpLastAccessTime, const FILETIME *lpLastWriteTime)
     // 역할: 지정된 파일의 날짜 및 시간 정보를 지정
-    pub fn set_file_time(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[KERNEL32] SetFileTime(...)");
+    pub fn set_file_time(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let hfile = uc.read_arg(0);
+        let creation_time = uc.read_arg(1);
+        let last_access_time = uc.read_arg(2);
+        let last_write_time = uc.read_arg(3);
+        crate::emu_log!(
+            "[KERNEL32] SetFileTime({:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
+            hfile,
+            creation_time,
+            last_access_time,
+            last_write_time
+        );
         Some((4, Some(1)))
     }
 

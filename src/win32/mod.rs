@@ -11,21 +11,28 @@ mod dll_user32;
 mod dll_winmm;
 mod dll_ws2_32;
 
-use std::{collections::HashMap, time::Instant, sync::{mpsc::Sender, Arc, Mutex, atomic::{AtomicU32, Ordering}}};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+        mpsc::Sender,
+    },
+    time::Instant,
+};
 
 use unicorn_engine::Unicorn;
 
 use crate::{
     helper::{FAKE_IMPORT_BASE, HEAP_BASE},
     packet_logger::PacketLogger,
-    debug::common::UiCommand,
+    ui::{UiCommand, win_event::WinEvent},
     win32::{
         dll_advapi32::DllADVAPI32, dll_comctl32::DllCOMCTL32, dll_gdi32::DllGDI32,
         dll_imm32::DllIMM32, dll_kernel32::DllKERNEL32, dll_msvcp60::DllMSVCP60,
         dll_msvcrt::DllMSVCRT, dll_ole32::DllOle32, dll_shell32::DllSHELL32, dll_user32::DllUSER32,
         dll_winmm::DllWINMM, dll_ws2_32::DllWS2_32,
     },
-    browser::win_frame::WinFrame,
 };
 
 /// 함수 호출이 끝난 뒤 스택을 어떻게 되돌려 놓을 것인지 명시하는 열거형
@@ -105,6 +112,18 @@ pub enum GdiObject {
     },
     Dc {
         associated_window: u32,
+        selected_bitmap: u32,
+        selected_font: u32,
+        selected_brush: u32,
+        selected_pen: u32,
+        selected_region: u32,
+        selected_palette: u32,
+        bk_mode: i32,
+        bk_color: u32,
+        text_color: u32,
+        rop2_mode: i32,
+        current_x: i32,
+        current_y: i32,
     },
     Region {
         left: i32,
@@ -164,8 +183,13 @@ pub struct WindowState {
     pub width: i32,
     pub height: i32,
     pub style: u32,
+    pub ex_style: u32,
     pub parent: u32,
+    pub id: u32,
     pub visible: bool,
+    pub enabled: bool,
+    pub zoomed: bool,
+    pub iconic: bool,
     pub wnd_proc: u32,
     pub user_data: u32,
 }
@@ -189,7 +213,7 @@ pub struct Win32Context {
     /// 가상 소켓 맵 (핸들 → 상태)
     pub sockets: Arc<Mutex<HashMap<u32, SocketState>>>,
     /// 윈도우 관리 프레임
-    pub win_frame: Arc<Mutex<WinFrame>>,
+    pub win_event: Arc<Mutex<WinEvent>>,
     /// 등록된 윈도우 클래스
     pub window_classes: Arc<Mutex<HashMap<String, WindowClass>>>,
     /// 가상 GDI 오브젝트 맵 (핸들 → 오브젝트)
@@ -211,6 +235,22 @@ pub struct Win32Context {
     pub packet_logger: Arc<Mutex<PacketLogger>>,
     /// 가상 파일 맵 (핸들 -> 호스트 파일)
     pub files: Arc<Mutex<HashMap<u32, std::fs::File>>>,
+    /// 포커스를 가진 윈도우 핸들
+    pub focus_hwnd: AtomicU32,
+    /// 마우스 캡처를 가진 윈도우 핸들
+    pub capture_hwnd: AtomicU32,
+    /// 애플리케이션 가상 메시지 큐 (hwnd, message, wParam, lParam, time, pt.x, pt.y)
+    pub message_queue: Arc<Mutex<std::collections::VecDeque<[u32; 7]>>>,
+    /// 활성화된 타이머 (ID -> elapse)
+    pub timers: Arc<Mutex<HashMap<u32, u32>>>,
+    /// 키보드 가상 키 상태 (기본 256키)
+    pub key_states: Arc<Mutex<[bool; 256]>>,
+    /// 가상 클립보드 데이터 버퍼
+    pub clipboard_data: Arc<Mutex<Vec<u8>>>,
+    /// 클립보드 점유 상태 확인용
+    pub clipboard_open: AtomicU32,
+    /// localtime() 등을 위한 정적 tm 구조체 주소
+    pub tm_struct_ptr: AtomicU32,
 }
 
 impl Win32Context {
@@ -224,7 +264,7 @@ impl Win32Context {
             last_error: AtomicU32::new(0),
             handle_counter: AtomicU32::new(0x1000), // 핸들은 0x1000부터 시작
             sockets: Arc::new(Mutex::new(HashMap::new())),
-            win_frame: Arc::new(Mutex::new(WinFrame::new(ui_tx))),
+            win_event: Arc::new(Mutex::new(WinEvent::new(ui_tx))),
             window_classes: Arc::new(Mutex::new(HashMap::new())),
             gdi_objects: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(HashMap::new())),
@@ -235,6 +275,14 @@ impl Win32Context {
             rand_state: AtomicU32::new(12345),
             packet_logger: Arc::new(Mutex::new(PacketLogger::new())),
             files: Arc::new(Mutex::new(HashMap::new())),
+            focus_hwnd: AtomicU32::new(0),
+            capture_hwnd: AtomicU32::new(0),
+            message_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            timers: Arc::new(Mutex::new(HashMap::new())),
+            key_states: Arc::new(Mutex::new([false; 256])),
+            clipboard_data: Arc::new(Mutex::new(Vec::new())),
+            clipboard_open: AtomicU32::new(0),
+            tm_struct_ptr: AtomicU32::new(0),
         }
     }
 
@@ -265,6 +313,39 @@ impl Win32Context {
                 crate::emu_log!("Undefined DLL: {}", dll_name);
                 None
             }
+        }
+    }
+}
+
+impl Clone for Win32Context {
+    fn clone(&self) -> Self {
+        Self {
+            heap_cursor: AtomicU32::new(self.heap_cursor.load(Ordering::SeqCst)),
+            import_address: AtomicU32::new(self.import_address.load(Ordering::SeqCst)),
+            dll_modules: self.dll_modules.clone(),
+            address_map: self.address_map.clone(),
+            last_error: AtomicU32::new(self.last_error.load(Ordering::SeqCst)),
+            handle_counter: AtomicU32::new(self.handle_counter.load(Ordering::SeqCst)),
+            sockets: self.sockets.clone(),
+            win_event: self.win_event.clone(),
+            window_classes: self.window_classes.clone(),
+            gdi_objects: self.gdi_objects.clone(),
+            events: self.events.clone(),
+            tls_slots: self.tls_slots.clone(),
+            tls_counter: AtomicU32::new(self.tls_counter.load(Ordering::SeqCst)),
+            registry: self.registry.clone(),
+            start_time: self.start_time.clone(),
+            rand_state: AtomicU32::new(self.rand_state.load(Ordering::SeqCst)),
+            packet_logger: self.packet_logger.clone(),
+            files: self.files.clone(),
+            focus_hwnd: AtomicU32::new(self.focus_hwnd.load(Ordering::SeqCst)),
+            capture_hwnd: AtomicU32::new(self.capture_hwnd.load(Ordering::SeqCst)),
+            message_queue: self.message_queue.clone(),
+            timers: self.timers.clone(),
+            key_states: self.key_states.clone(),
+            clipboard_data: self.clipboard_data.clone(),
+            clipboard_open: AtomicU32::new(self.clipboard_open.load(Ordering::SeqCst)),
+            tm_struct_ptr: AtomicU32::new(self.tm_struct_ptr.load(Ordering::SeqCst)),
         }
     }
 }

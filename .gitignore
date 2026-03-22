@@ -24,4 +24,5 @@ target/*
 objdump/*
 Resources/*
 
+.vscode/*
 .DS_Store

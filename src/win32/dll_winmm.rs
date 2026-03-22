@@ -17,6 +17,7 @@ impl DllWINMM {
             // 역할: 시스템 시간이 시작된 후 경과된 시간을 밀리초 단위로 검색
             "timeGetTime" => {
                 let elapsed = uc.get_data().start_time.elapsed().as_millis() as u32;
+                crate::emu_log!("[WINMM] timeGetTime() -> DWORD {}", elapsed);
                 Some((0, Some(elapsed as i32)))
             }
 

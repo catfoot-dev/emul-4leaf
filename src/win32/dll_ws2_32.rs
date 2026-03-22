@@ -22,16 +22,30 @@ impl DllWS2_32 {
             // API: SOCKET accept(SOCKET s, struct sockaddr* addr, int* addrlen)
             // 역할: 들어오는 연결 요청을 수락
             "Ordinal_1" => {
-                // accept(SOCKET, sockaddr*, int*)
-                crate::emu_log!("[WS2_32] accept(...)");
+                let sock = uc.read_arg(0);
+                let addr_ptr = uc.read_arg(1);
+                let addrlen_ptr = uc.read_arg(2);
+                crate::emu_log!(
+                    "[WS2_32] accept({}, {:#x}, {:#x}) -> SOCKET -1i32",
+                    sock,
+                    addr_ptr,
+                    addrlen_ptr
+                );
                 Some((3, Some(-1i32))) // INVALID_SOCKET
             }
 
             // API: int bind(SOCKET s, const struct sockaddr* name, int namelen)
             // 역할: 로컬 주소를 소켓에 연결
             "Ordinal_2" => {
-                // bind(SOCKET, sockaddr*, int)
-                crate::emu_log!("[WS2_32] bind(...)");
+                let sock = uc.read_arg(0);
+                let addr_ptr = uc.read_arg(1);
+                let addrlen_ptr = uc.read_arg(2);
+                crate::emu_log!(
+                    "[WS2_32] bind({}, {:#x}, {:#x}) -> int 0",
+                    sock,
+                    addr_ptr,
+                    addrlen_ptr
+                );
                 Some((3, Some(0)))
             }
 
@@ -40,11 +54,11 @@ impl DllWS2_32 {
             "Ordinal_3" => {
                 // closesocket(SOCKET)
                 let sock = uc.read_arg(0);
-                crate::emu_log!("[WS2_32] closesocket({})", sock);
                 let ctx = uc.get_data();
                 if let Some(s) = ctx.sockets.lock().unwrap().get_mut(&sock) {
                     *s = SocketState::Closed;
                 }
+                crate::emu_log!("[WS2_32] closesocket({}) -> int 0", sock);
                 Some((1, Some(0)))
             }
 
@@ -62,7 +76,7 @@ impl DllWS2_32 {
                     "{}.{}.{}.{}",
                     ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]
                 );
-                crate::emu_log!("[WS2_32] connect(sock={}, {}:{}) [PACKET]", sock, ip, port);
+                let address = format!("{}:{}\0", ip, port);
                 let ctx = uc.get_data();
                 ctx.sockets.lock().unwrap().insert(
                     sock,
@@ -71,22 +85,41 @@ impl DllWS2_32 {
                         remote_port: port,
                     },
                 );
+                crate::emu_log!(
+                    "[WS2_32] connect({}, \"{}\", {}) -> int 0",
+                    sock,
+                    address,
+                    address.len() + 1,
+                );
                 Some((3, Some(0))) // 성공
             }
 
             // API: int getpeername(SOCKET s, struct sockaddr* name, int* namelen)
             // 역할: 연결된 상대방의 주소 정보를 가져옴
             "Ordinal_5" => {
+                let sock = uc.read_arg(0);
+                let addr_ptr = uc.read_arg(1);
+                let addrlen_ptr = uc.read_arg(2);
                 // getpeername(SOCKET, sockaddr*, int*)
-                crate::emu_log!("[WS2_32] getpeername(...)");
+                crate::emu_log!(
+                    "[WS2_32] getpeername({}, {}, {}) -> int 0",
+                    sock,
+                    addr_ptr,
+                    addrlen_ptr
+                );
                 Some((3, Some(0)))
             }
 
             // API: struct protoent* getprotobyname(const char* name)
             // 역할: 프로토콜 이름에 해당하는 정보를 가져옴
             "Ordinal_7" => {
+                let name_addr = uc.read_arg(0);
+                let name = uc.read_euc_kr(name_addr as u64);
                 // getprotobyname(const char*)
-                crate::emu_log!("[WS2_32] getprotobyname(...)");
+                crate::emu_log!(
+                    "[WS2_32] getprotobyname(\"{}\") -> struct protoent* 0",
+                    name
+                );
                 Some((1, Some(0)))
             }
 
@@ -96,10 +129,6 @@ impl DllWS2_32 {
                 // gethostbyname(const char*)
                 let name_addr = uc.read_arg(0);
                 let name = uc.read_euc_kr(name_addr as u64);
-                crate::emu_log!(
-                    "[WS2_32] gethostbyname(\"{}\") -> returning localhost",
-                    name
-                );
                 // hostent 구조체를 에뮬 메모리에 할당
                 // 간략화: 127.0.0.1로 반환
                 let hostent_addr = uc.malloc(32);
@@ -116,14 +145,31 @@ impl DllWS2_32 {
                 uc.write_u32(hostent_addr + 8, 2); // h_addrtype (AF_INET)
                 uc.write_u32(hostent_addr + 12, 4); // h_length
                 uc.write_u32(hostent_addr + 16, ip_ptr as u32); // h_addr_list
+                crate::emu_log!(
+                    "[WS2_32] gethostbyname(\"{}\") -> struct hostent* {:#x}",
+                    name,
+                    hostent_addr
+                );
                 Some((1, Some(hostent_addr as i32)))
             }
 
             // API: int getsockopt(SOCKET s, int level, int optname, char* optval, int* optlen)
             // 역할: 소켓 옵션 값을 가져옴
             "Ordinal_9" => {
+                let sock = uc.read_arg(0);
+                let level = uc.read_arg(1);
+                let optname = uc.read_arg(2);
+                let optval = uc.read_arg(3);
+                let optlen = uc.read_arg(4);
                 // getsockopt(SOCKET, int, int, char*, int*)
-                crate::emu_log!("[WS2_32] getsockopt(...)");
+                crate::emu_log!(
+                    "[WS2_32] getsockopt({}, {}, {}, {}, {}) -> int 0",
+                    sock,
+                    level,
+                    optname,
+                    optval,
+                    optlen
+                );
                 Some((5, Some(0)))
             }
 
@@ -133,6 +179,7 @@ impl DllWS2_32 {
                 // htonl(u32)
                 let val = uc.read_arg(0);
                 let result = val.to_be();
+                crate::emu_log!("[WS2_32] htonl({}) -> u_long {}", val, result);
                 Some((1, Some(result as i32)))
             }
 
@@ -142,6 +189,7 @@ impl DllWS2_32 {
                 // htons(u16)
                 let val = uc.read_arg(0) as u16;
                 let result = val.to_be();
+                crate::emu_log!("[WS2_32] htons({}) -> u_short {}", val, result);
                 Some((1, Some(result as i32)))
             }
 
@@ -151,13 +199,17 @@ impl DllWS2_32 {
                 // inet_addr(const char*)
                 let addr_str_ptr = uc.read_arg(0);
                 let addr_str = uc.read_euc_kr(addr_str_ptr as u64);
-                crate::emu_log!("[WS2_32] inet_addr(\"{}\") [PACKET]", addr_str);
                 let parts: Vec<u8> = addr_str.split('.').filter_map(|p| p.parse().ok()).collect();
                 let result = if parts.len() == 4 {
                     u32::from_le_bytes([parts[0], parts[1], parts[2], parts[3]])
                 } else {
                     0xFFFFFFFF // INADDR_NONE
                 };
+                crate::emu_log!(
+                    "[WS2_32] inet_addr(\"{}\") -> u_long {:#x}",
+                    addr_str,
+                    result
+                );
                 Some((1, Some(result as i32)))
             }
 
@@ -169,6 +221,12 @@ impl DllWS2_32 {
                 let bytes = addr.to_le_bytes();
                 let ip_str = format!("{}.{}.{}.{}\0", bytes[0], bytes[1], bytes[2], bytes[3]);
                 let ptr = uc.alloc_str(&ip_str[..ip_str.len() - 1]);
+                crate::emu_log!(
+                    "[WS2_32] inet_ntoa({:#x}) -> char* {:#x}=\"{}\"",
+                    addr,
+                    ptr,
+                    ip_str
+                );
                 Some((1, Some(ptr as i32)))
             }
 
@@ -178,6 +236,7 @@ impl DllWS2_32 {
                 // ntohs(u16)
                 let val = uc.read_arg(0) as u16;
                 let result = u16::from_be(val);
+                crate::emu_log!("[WS2_32] ntohs({}) -> u_short {}", val, result);
                 Some((1, Some(result as i32)))
             }
 
@@ -188,14 +247,15 @@ impl DllWS2_32 {
                 let sock = uc.read_arg(0);
                 let _buf = uc.read_arg(1);
                 let _len = uc.read_arg(2);
-                crate::emu_log!(
-                    "[WS2_32] recv(sock={}, buf={:#x}, len={})",
-                    sock,
-                    _buf,
-                    _len
-                );
                 // 현재는 WSAEWOULDBLOCK 반환 (비동기 모기 시뮬레이션)
                 uc.get_data().last_error.store(10035, Ordering::SeqCst); // WSAEWOULDBLOCK
+                crate::emu_log!(
+                    "[WS2_32] recv({}, {:#x}, {}, 0) -> int {}",
+                    sock,
+                    _buf,
+                    _len,
+                    -1i32
+                );
                 Some((4, Some(-1i32))) // SOCKET_ERROR
             }
 
@@ -206,6 +266,7 @@ impl DllWS2_32 {
                 let sock = uc.read_arg(0);
                 let buf_addr = uc.read_arg(1);
                 let len = uc.read_arg(2);
+                let flags = uc.read_arg(3);
                 if len > 0 {
                     let data = uc
                         .mem_read_as_vec(buf_addr as u64, len as usize)
@@ -216,6 +277,14 @@ impl DllWS2_32 {
                         .unwrap()
                         .log(PacketDirection::Send, sock, &data);
                 }
+                crate::emu_log!(
+                    "[WS2_32] send({}, {:#x}, {}, {}) -> int {}",
+                    sock,
+                    buf_addr,
+                    len,
+                    flags,
+                    len
+                );
                 Some((4, Some(len as i32)))
             }
 
@@ -223,7 +292,20 @@ impl DllWS2_32 {
             // 역할: 소켓 옵션을 설정
             "Ordinal_19" => {
                 // setsockopt(SOCKET, int, int, const char*, int)
-                crate::emu_log!("[WS2_32] setsockopt(...)");
+                let sock = uc.read_arg(0);
+                let level = uc.read_arg(1);
+                let optname = uc.read_arg(2);
+                let optval = uc.read_arg(3);
+                let optlen = uc.read_arg(4);
+                crate::emu_log!(
+                    "[WS2_32] setsockopt({}, {}, {}, {:#x}, {}) -> int {}",
+                    sock,
+                    level,
+                    optname,
+                    optval,
+                    optlen,
+                    0
+                );
                 Some((5, Some(0)))
             }
 
@@ -232,7 +314,8 @@ impl DllWS2_32 {
             "Ordinal_21" => {
                 // shutdown(SOCKET, int)
                 let sock = uc.read_arg(0);
-                crate::emu_log!("[WS2_32] shutdown(sock={})", sock);
+                let how = uc.read_arg(1);
+                crate::emu_log!("[WS2_32] shutdown({}, {}) -> int {}", sock, how, 0);
                 Some((2, Some(0)))
             }
 
@@ -254,7 +337,7 @@ impl DllWS2_32 {
                     },
                 );
                 crate::emu_log!(
-                    "[WS2_32] socket({}, {}, {}) -> sock {} [PACKET]",
+                    "[WS2_32] socket({}, {}, {}) -> sock {}",
                     af,
                     sock_type,
                     protocol,
@@ -277,7 +360,11 @@ impl DllWS2_32 {
                     uc.mem_write(wsa_data_addr as u64, &[2, 2]).unwrap();
                     uc.mem_write(wsa_data_addr as u64 + 2, &[2, 2]).unwrap();
                 }
-                crate::emu_log!("[WS2_32] WSAStartup(...) -> 0");
+                crate::emu_log!(
+                    "[WS2_32] WSAStartup({:#x}, {:#x}) -> 0",
+                    _version,
+                    wsa_data_addr
+                );
                 Some((2, Some(0)))
             }
 
@@ -288,8 +375,13 @@ impl DllWS2_32 {
                 let buf_addr = uc.read_arg(0);
                 let hostname = "4Leaf-EMU\0";
                 uc.mem_write(buf_addr as u64, hostname.as_bytes()).unwrap();
-                crate::emu_log!("[WS2_32] gethostname(...) -> \"4Leaf-EMU\"");
-                Some((2, Some(0)))
+                crate::emu_log!(
+                    "[WS2_32] gethostname({:#x}, {}) -> int {}",
+                    buf_addr,
+                    hostname.len(),
+                    hostname.len()
+                );
+                Some((2, Some(hostname.len() as i32)))
             }
 
             // API: int WSAGetLastError(void)
@@ -304,7 +396,13 @@ impl DllWS2_32 {
 
             "Ordinal_115" => {
                 // WSAStartup (또 다른 ordinal mapping)
-                crate::emu_log!("[WS2_32] WSAStartup(ordinal 115) -> 0");
+                let version = uc.read_arg(0);
+                let wsa_data_addr = uc.read_arg(1);
+                crate::emu_log!(
+                    "[WS2_32] WSAStartup({:#x}, {:#x}) -> 0",
+                    version,
+                    wsa_data_addr
+                );
                 Some((2, Some(0)))
             }
 
@@ -320,7 +418,9 @@ impl DllWS2_32 {
             // 역할: 소켓이 파일 기술자 집합에 포함되어 있는지 확인
             "Ordinal_151" => {
                 // __WSAFDIsSet(SOCKET, fd_set*)
-                crate::emu_log!("[WS2_32] __WSAFDIsSet(...)");
+                let sock = uc.read_arg(0);
+                let set = uc.read_arg(1);
+                crate::emu_log!("[WS2_32] __WSAFDIsSet({:#x}, {:#x}) -> 0", sock, set);
                 Some((2, Some(0)))
             }
 
@@ -328,12 +428,22 @@ impl DllWS2_32 {
             // 역할: 중첩된(Overlapped) 입출력을 사용하여 데이터를 전송
             "WSASend" => {
                 let sock = uc.read_arg(0);
-                let _bufs = uc.read_arg(1);
+                let bufs = uc.read_arg(1);
                 let buf_count = uc.read_arg(2);
+                let bytes_sent = uc.read_arg(3);
+                let flags = uc.read_arg(4);
+                let overlapped = uc.read_arg(5);
+                let completion_routine = uc.read_arg(6);
                 crate::emu_log!(
-                    "[WS2_32] WSASend(sock={}, bufs={}) [PACKET]",
+                    "[WS2_32] WSASend({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> int {}",
                     sock,
-                    buf_count
+                    bufs,
+                    buf_count,
+                    bytes_sent,
+                    flags,
+                    overlapped,
+                    completion_routine,
+                    0
                 );
                 Some((7, Some(0)))
             }
@@ -344,6 +454,9 @@ impl DllWS2_32 {
                 let af = uc.read_arg(0);
                 let sock_type = uc.read_arg(1);
                 let protocol = uc.read_arg(2);
+                let protocol_info = uc.read_arg(3);
+                let group = uc.read_arg(4);
+                let flags = uc.read_arg(5);
                 let ctx = uc.get_data();
                 let sock = ctx.alloc_handle();
                 ctx.sockets.lock().unwrap().insert(
@@ -355,10 +468,13 @@ impl DllWS2_32 {
                     },
                 );
                 crate::emu_log!(
-                    "[WS2_32] WSASocketA({}, {}, {}) -> sock {}",
+                    "[WS2_32] WSASocketA({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> sock {:#x}",
                     af,
                     sock_type,
                     protocol,
+                    protocol_info,
+                    group,
+                    flags,
                     sock
                 );
                 Some((6, Some(sock as i32)))
@@ -376,28 +492,43 @@ impl DllWS2_32 {
             // API: int WSAEventSelect(SOCKET s, WSAEVENT hEventObject, long lNetworkEvents)
             // 역할: 소켓 이벤트를 이벤트 개체와 연결
             "WSAEventSelect" => {
-                crate::emu_log!("[WS2_32] WSAEventSelect(...)");
+                let sock = uc.read_arg(0);
+                let event = uc.read_arg(1);
+                let network_events = uc.read_arg(2);
+                crate::emu_log!(
+                    "[WS2_32] WSAEventSelect({:#x}, {:#x}, {:#x}) -> 0",
+                    sock,
+                    event,
+                    network_events
+                );
                 Some((3, Some(0)))
             }
 
             // API: BOOL WSACloseEvent(WSAEVENT hEvent)
             // 역할: 이벤트 개체를 닫음
             "WSACloseEvent" => {
-                crate::emu_log!("[WS2_32] WSACloseEvent(...)");
+                let event = uc.read_arg(0);
+                crate::emu_log!("[WS2_32] WSACloseEvent({:#x}) -> 1", event);
                 Some((1, Some(1))) // TRUE
             }
 
             // API: int WSAEnumNetworkEvents(SOCKET s, WSAEVENT hEventObject, LPWSANETWORKEVENTS lpNetworkEvents)
             // 역할: 특정 소켓에서 발생한 네트워크 이벤트를 확인
             "WSAEnumNetworkEvents" => {
-                let _sock = uc.read_arg(0);
-                let _event = uc.read_arg(1);
+                let sock = uc.read_arg(0);
+                let event = uc.read_arg(1);
                 let net_events_addr = uc.read_arg(2);
                 // WSANETWORKEVENTS: lNetworkEvents(4) + iErrorCode[10](40) = 44 bytes
                 if net_events_addr != 0 {
                     let zeros = [0u8; 44];
                     uc.mem_write(net_events_addr as u64, &zeros).unwrap();
                 }
+                crate::emu_log!(
+                    "[WS2_32] WSAEnumNetworkEvents({:#x}, {:#x}, {:#x}) -> int 0",
+                    sock,
+                    event,
+                    net_events_addr
+                );
                 Some((3, Some(0)))
             }
 

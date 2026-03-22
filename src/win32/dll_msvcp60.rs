@@ -27,6 +27,7 @@ impl DllMSVCP60 {
             {
                 // 기본 생성자: this->_Ptr = static empty string, this->_Len = 0, this->_Res = 0
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let allocator = uc.read_arg(0);
                 if this_ptr != 0 {
                     // basic_string layout: _Allocator(4), _Ptr(4), _Len(4), _Res(4)
                     let empty_str = uc.alloc_str("");
@@ -35,24 +36,40 @@ impl DllMSVCP60 {
                     uc.write_u32(this_ptr as u64 + 12, 0); // _Res
                 }
                 crate::emu_log!(
-                    "[MSVCP60] basic_string::basic_string(alloc) this={:#x}",
+                    "[MSVCP60] (this={:#x}) basic_string::basic_string({:#x}) -> (this={:#x})",
+                    this_ptr,
+                    allocator,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some((1, Some(this_ptr as i32)))
             }
 
             // API: std::basic_string<char>::_Tidy(bool)
             // 역할: 문자열 버퍼를 해제하고 초기 상태로 되돌림
             "?_Tidy@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEX_N@Z" => {
-                crate::emu_log!("[MSVCP60] basic_string::_Tidy(...)");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let b = uc.read_arg(0);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_string::_Tidy({}) -> VOID",
+                    this_ptr,
+                    b
+                );
+                Some((1, None))
             }
 
             // API: std::basic_string<char>::_Grow(size_t, bool)
             // 역할: 문자열 버퍼 크기를 확장
             "?_Grow@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAE_NI_N@Z" => {
-                crate::emu_log!("[MSVCP60] basic_string::_Grow(...)");
-                Some((0, Some(1))) // TRUE = 성공
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let n = uc.read_arg(0);
+                let b = uc.read_arg(1);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_string::_Grow({}, {}) -> BOOL 1",
+                    this_ptr,
+                    n,
+                    b
+                );
+                Some((2, Some(1))) // TRUE = 성공
             }
 
             // API: std::basic_string<char>::assign(const char*, size_t)
@@ -60,11 +77,16 @@ impl DllMSVCP60 {
             "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z" =>
             {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let ptr = uc.read_arg(0);
+                let len = uc.read_arg(1);
                 crate::emu_log!(
-                    "[MSVCP60] basic_string::assign(ptr, len) this={:#x}",
+                    "[MSVCP60] (this={:#x}) basic_string::assign({:#x}, {}) -> (this={:#x})",
+                    this_ptr,
+                    ptr,
+                    len,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some((2, Some(this_ptr as i32)))
             }
 
             // API: std::basic_string<char>::assign(const basic_string&, size_t, size_t)
@@ -72,44 +94,70 @@ impl DllMSVCP60 {
             "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z" =>
             {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let other_ptr = uc.read_arg(0);
+                let offset = uc.read_arg(1);
+                let count = uc.read_arg(2);
                 crate::emu_log!(
-                    "[MSVCP60] basic_string::assign(str&, off, count) this={:#x}",
+                    "[MSVCP60] (this={:#x}) basic_string::assign({:#x}, {:#x}, {:#x}) -> (this={:#x})",
+                    this_ptr,
+                    other_ptr,
+                    offset,
+                    count,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some((3, Some(this_ptr as i32)))
             }
 
             // API: std::basic_string<char>::erase(size_t, size_t)
             // 역할: 문자열의 일부를 삭제
             "?erase@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@II@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let offset = uc.read_arg(0);
+                let count = uc.read_arg(1);
                 crate::emu_log!(
-                    "[MSVCP60] basic_string::erase(off, count) this={:#x}",
+                    "[MSVCP60] (this={:#x}) basic_string::erase({:#x}, {:#x}) -> (this={:#x})",
+                    this_ptr,
+                    offset,
+                    count,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some((2, Some(this_ptr as i32)))
             }
 
             // 정적 npos
             "?npos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@2IB" => {
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 // npos = static const size_t = 0xFFFFFFFF
                 let addr = uc.malloc(4);
                 uc.write_u32(addr, 0xFFFFFFFF);
-                crate::emu_log!("[MSVCP60] basic_string::npos -> {:#x}", addr);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_string::npos -> {:#x}",
+                    this_ptr,
+                    addr
+                );
                 Some((0, Some(addr as i32)))
             }
 
             // _Nullstr
             "?_C@?1??_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ@4DB" =>
             {
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 let addr = uc.alloc_str("");
-                crate::emu_log!("[MSVCP60] basic_string::_Nullstr -> {:#x}", addr);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_string::_Nullstr -> {:#x}",
+                    this_ptr,
+                    addr
+                );
                 Some((0, Some(addr as i32)))
             }
 
             // _Xlen
             "?_Xlen@std@@YAXXZ" => {
-                crate::emu_log!("[MSVCP60] std::_Xlen() [throw length_error]");
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) std::_Xlen() [throw length_error]",
+                    this_ptr
+                );
                 Some((0, None))
             }
 
@@ -121,27 +169,53 @@ impl DllMSVCP60 {
             // 역할: 정수 값을 출력 스트림에 삽입
             "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                crate::emu_log!("[MSVCP60] basic_ostream::operator<<(int)");
-                Some((0, Some(this_ptr as i32)))
+                let val = uc.read_arg(0);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ostream::operator<<({}) -> (this={:#x})",
+                    this_ptr,
+                    val,
+                    this_ptr
+                );
+                Some((1, Some(this_ptr as i32)))
             }
 
             // API: std::basic_ios<char>::clear(iostate, bool)
             // 역할: 스트림의 오류 상태를 설정
             "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z" => {
-                crate::emu_log!("[MSVCP60] basic_ios::clear(...)");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let state = uc.read_arg(0);
+                let b = uc.read_arg(1);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ios::clear({}, {}) -> VOID",
+                    this_ptr,
+                    state,
+                    b
+                );
+                Some((2, None))
             }
 
             // basic_ios::init(streambuf*, bool)
             "?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IAEXPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z" =>
             {
-                crate::emu_log!("[MSVCP60] basic_ios::init(...)");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let buf = uc.read_arg(0);
+                let b = uc.read_arg(1);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ios::init({:#x}, {}) -> VOID",
+                    this_ptr,
+                    buf,
+                    b
+                );
+                Some((2, None))
             }
 
             // basic_fstream destructor sequence
             "??_D?$basic_fstream@DU?$char_traits@D@std@@@std@@QAEXXZ" => {
-                crate::emu_log!("[MSVCP60] basic_fstream::~basic_fstream()");
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_fstream::~basic_fstream() -> VOID",
+                    this_ptr
+                );
                 Some((0, None))
             }
 
@@ -150,14 +224,19 @@ impl DllMSVCP60 {
             "??0?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 crate::emu_log!(
-                    "[MSVCP60] basic_ofstream::basic_ofstream() this={:#x}",
+                    "[MSVCP60] (this={:#x}) basic_ofstream::basic_ofstream() -> (this={:#x})",
+                    this_ptr,
                     this_ptr
                 );
                 Some((0, Some(this_ptr as i32)))
             }
 
             "??_D?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAEXXZ" => {
-                crate::emu_log!("[MSVCP60] basic_ofstream::~basic_ofstream()");
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ofstream::~basic_ofstream() -> VOID",
+                    this_ptr
+                );
                 Some((0, None))
             }
 
@@ -165,89 +244,152 @@ impl DllMSVCP60 {
             // 역할: 입력 스트림의 읽기 위치를 이동
             "?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@V?$fpos@H@2@@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                crate::emu_log!("[MSVCP60] basic_istream::seekg(fpos)");
-                Some((0, Some(this_ptr as i32)))
+                let pos = uc.read_arg(0);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_istream::seekg({:#x}) -> (this={:#x})",
+                    this_ptr,
+                    pos,
+                    this_ptr
+                );
+                Some((1, Some(this_ptr as i32)))
             }
 
             // API: std::basic_istream<char>::getline(char*, int, char)
             // 역할: 입력 스트림에서 한 줄을 읽음
             "?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADHD@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                crate::emu_log!("[MSVCP60] basic_istream::getline(...)");
-                Some((0, Some(this_ptr as i32)))
+                let buf = uc.read_arg(0);
+                let count = uc.read_arg(1);
+                let delim = uc.read_arg(2);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_istream::getline({:#x}, {}, {}) -> (this={:#x})",
+                    this_ptr,
+                    buf,
+                    count,
+                    delim,
+                    this_ptr
+                );
+                Some((3, Some(this_ptr as i32)))
             }
 
             // basic_istream constructor
             "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z" =>
             {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let buf = uc.read_arg(0);
+                let b = uc.read_arg(1);
                 crate::emu_log!(
-                    "[MSVCP60] basic_istream::basic_istream(streambuf*) this={:#x}",
+                    "[MSVCP60] (this={:#x}) basic_istream::basic_istream({:#x}, {}) -> (this={:#x})",
+                    this_ptr,
+                    buf,
+                    b,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some((2, Some(this_ptr as i32)))
             }
 
             // API: std::basic_filebuf<char>::open(const char*, int)
             // 역할: 파일을 오픈하고 버퍼에 연결
             "?open@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAEPAV12@PBDH@Z" => {
-                let _this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                crate::emu_log!("[MSVCP60] basic_filebuf::open(...)");
-                Some((0, Some(0))) // NULL = 실패
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let filename = uc.read_arg(0);
+                let mode = uc.read_arg(1);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_filebuf::open({:#x}, {}) -> (this={:#x})",
+                    this_ptr,
+                    filename,
+                    mode,
+                    this_ptr
+                );
+                Some((2, Some(this_ptr as i32))) // NULL = 실패
             }
 
             // basic_filebuf constructor
             "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let file_ptr = uc.read_arg(0);
                 crate::emu_log!(
-                    "[MSVCP60] basic_filebuf::basic_filebuf(FILE*) this={:#x}",
+                    "[MSVCP60] (this={:#x}) basic_filebuf::basic_filebuf({:#x}) -> (this={:#x})",
+                    this_ptr,
+                    file_ptr,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some((1, Some(this_ptr as i32)))
             }
 
             // basic_filebuf destructor (virtual)
             "??1?$basic_filebuf@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                crate::emu_log!("[MSVCP60] basic_filebuf::~basic_filebuf()");
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_filebuf::~basic_filebuf() -> VOID",
+                    this_ptr
+                );
                 Some((0, None))
             }
 
             // basic_ostream destructor (virtual)
             "??1?$basic_ostream@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                crate::emu_log!("[MSVCP60] basic_ostream::~basic_ostream()");
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ostream::~basic_ostream() -> VOID",
+                    this_ptr
+                );
                 Some((0, None))
             }
 
             // basic_ios destructor (virtual)
             "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                crate::emu_log!("[MSVCP60] basic_ios::~basic_ios()");
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ios::~basic_ios() -> VOID",
+                    this_ptr
+                );
                 Some((0, None))
             }
 
             // ios_base constructor / destructor
             "??0ios_base@std@@IAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                crate::emu_log!("[MSVCP60] ios_base::ios_base() this={:#x}", this_ptr);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) ios_base::ios_base() -> (this={:#x})",
+                    this_ptr,
+                    this_ptr
+                );
                 Some((0, Some(this_ptr as i32)))
             }
 
             "??1ios_base@std@@UAE@XZ" => {
-                crate::emu_log!("[MSVCP60] ios_base::~ios_base()");
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) ios_base::~ios_base() -> VOID",
+                    this_ptr
+                );
                 Some((0, None))
             }
 
             // ios_base::getloc()
             "?getloc@ios_base@std@@QBE?AVlocale@2@XZ" => {
                 // locale 객체 반환 (가상 핸들)
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 let addr = uc.malloc(16);
-                crate::emu_log!("[MSVCP60] ios_base::getloc() -> {:#x}", addr);
-                Some((0, Some(addr as i32)))
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) ios_base::getloc() -> {:#x}",
+                    this_ptr,
+                    addr
+                );
+                Some((1, Some(addr as i32)))
             }
 
             // streambuf::imbue(const locale&)
             "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEXABVlocale@2@@Z" => {
-                crate::emu_log!("[MSVCP60] basic_streambuf::imbue(locale&)");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let locale_ptr = uc.read_arg(0);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_streambuf::imbue({:#x}) -> VOID",
+                    this_ptr,
+                    locale_ptr
+                );
+                Some((1, None))
             }
 
             // Init / _Winit
@@ -291,6 +433,7 @@ impl DllMSVCP60 {
             // API: std::operator<<(std::ostream&, const char*)
             // 역할: C 스타일 문자열을 출력 스트림에 삽입
             "??6std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@PBD@Z" => {
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 let os_ptr = uc.read_arg(0);
                 let str_ptr = uc.read_arg(1);
                 let text = if str_ptr != 0 {
@@ -298,15 +441,28 @@ impl DllMSVCP60 {
                 } else {
                     String::from("(null)")
                 };
-                crate::emu_log!("[MSVCP60] std::operator<<(ostream&, const char*): {}", text);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) std::operator<<({:#x}, {:#x}=\"{}\") -> (this={:#x})",
+                    this_ptr,
+                    os_ptr,
+                    str_ptr,
+                    text,
+                    os_ptr
+                );
                 Some((2, Some(os_ptr as i32))) // Return ostream&
             }
 
             // API: std::flush(std::ostream&)
             // 역할: 출력 스트림의 버퍼를 플러시(비움)
             "?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z" => {
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 let os_ptr = uc.read_arg(0);
-                crate::emu_log!("[MSVCP60] std::flush(ostream&)");
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) std::flush({:#x}) -> (this={:#x})",
+                    this_ptr,
+                    os_ptr,
+                    os_ptr
+                );
                 Some((1, Some(os_ptr as i32))) // Return ostream&
             }
 

@@ -51,7 +51,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
     // 3. 메인 루프: 클라이언트 연결 수락
     loop {
         let (socket, client_addr) = listener.accept().await?;
-        crate::emu_log!("\n[New Client Connected: {}]", client_addr);
+        crate::emu_log!("[New Client Connected: {}]", client_addr);
 
         // 채널 구독 (Stdin에서 오는 데이터를 받기 위함)
         let mut rx = tx.subscribe();
@@ -66,7 +66,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 match buf_reader.read(&mut buf).await {
                     Ok(0) => {
-                        crate::emu_log!("\n[Client Disconnected: {}]", client_addr);
+                        crate::emu_log!("[Client Disconnected: {}]", client_addr);
                         break;
                     }
                     Ok(n) => {
@@ -74,7 +74,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
                         let data = &buf[0..n];
                         let hex_dump = hex::encode(data);
                         let text = String::from_utf8_lossy(data);
-                        crate::emu_log!("\n[From {}]: {} (Hex: {})", client_addr, text, hex_dump);
+                        crate::emu_log!("[From {}]: {} (Hex: {})", client_addr, text, hex_dump);
                         print!("Server> "); // 프롬프트 복구
                         io::stdout().flush().unwrap();
                     }

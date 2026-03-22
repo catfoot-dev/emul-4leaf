@@ -2,8 +2,8 @@ mod debug;
 mod server;
 #[macro_use]
 mod helper;
-mod browser;
 mod packet_logger;
+mod ui;
 mod win32;
 
 use helper::{SHARED_MEM_BASE, UnicornHelper};
@@ -26,16 +26,17 @@ pub static LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 /// - `msg`: 추가할 로그의 텍스트
 pub fn push_log(msg: String) {
     if let Some(buf) = LOG_BUFFER.get()
-        && let Ok(mut b) = buf.try_lock() {
-            // \n 이 포함되어 있으면 나눠서 push 함으로써 텍스트 겹침 방지
-            for line in msg.lines() {
-                b.push_back(line.to_string());
-                if b.len() > 1000 {
-                    b.pop_front();
-                }
+        && let Ok(mut b) = buf.try_lock()
+    {
+        // \n 이 포함되어 있으면 나눠서 push 함으로써 텍스트 겹침 방지
+        for line in msg.lines() {
+            b.push_back(line.to_string());
+            if b.len() > 1000 {
+                b.pop_front();
             }
-            LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// 어플리케이션 시작 시 전역 로그 버퍼를 빈 `VecDeque`로 초기화함
@@ -43,13 +44,16 @@ pub fn init_logger() {
     LOG_BUFFER.set(Mutex::new(VecDeque::new())).unwrap();
 }
 
+pub static mut INDEX: usize = 0;
+
 #[macro_export]
 macro_rules! emu_log {
     () => {
         $crate::push_log(String::new());
     };
     ($($arg:tt)*) => {
-        let msg = std::format!($($arg)*);
+        let msg = std::format!("[{:#08x}] {}", unsafe { $crate::INDEX }, std::format!($($arg)*));
+        unsafe { $crate::INDEX += 1; }
         // std::println!("{}", msg); // 성능 저하 원인: 주석 처리
         $crate::push_log(msg);
     };
@@ -61,8 +65,8 @@ use unicorn_engine::{
 };
 use win32::Win32Context;
 
-use crate::debug::common::{CpuContext, DebugCommand, UiCommand};
-use crate::debug::create_debug_window;
+use crate::debug::common::{CpuContext, DebugCommand};
+use crate::ui::UiCommand;
 
 fn main() {
     init_logger();
@@ -84,7 +88,8 @@ fn main() {
         }
     });
 
-    create_debug_window(cmd_tx, state_rx, ui_rx);
+    let debug_painter = crate::debug::Debug::new(cmd_tx, state_rx);
+    ui::run_ui(ui_rx, vec![Box::new(debug_painter)]);
 }
 
 /// Unicorn 엔진을 초기화하고, 여러 필수 DLL 코어 파일들을 메모리에 로드 및 링킹한 뒤 메인 엔트리 포인트를 실행함
@@ -119,7 +124,7 @@ fn emu_4leaf(
         let target_base = (0x3000_0000 + i * 0x100_0000) as u64;
 
         crate::emu_log!(
-            "\n[*] Loading address {:#x} from {}...",
+            "[*] Loading address {:#x} from {}...",
             target_base,
             filename
         );
@@ -130,7 +135,7 @@ fn emu_4leaf(
         crate::emu_log!("[*] Resolving Imports for {}...", filename);
         unicorn.resolve_imports(&loaded_dll).unwrap();
 
-        crate::emu_log!("\n[*] Initializing {}...", dll_name);
+        crate::emu_log!("[*] Initializing {}...", dll_name);
         unicorn.run_dll_entry(&loaded_dll).unwrap();
     }
 

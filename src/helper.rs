@@ -103,7 +103,7 @@ macro_rules! dump_mem {
         print_hexdump($uc, $addr as u64, $size as usize);
     };
     ($uc:expr, $addr:expr, $size:expr, $label:expr) => {
-        crate::emu_log!("\n[DEBUG] Checking: {}", $label);
+        crate::emu_log!("[DEBUG] Checking: {}", $label);
         print_hexdump($uc, $addr as u64, $size as usize);
     };
 }
@@ -114,7 +114,7 @@ macro_rules! dump_mem {
 // =========================================================
 macro_rules! dump_stack {
     ($uc:expr, $count:expr) => {
-        crate::emu_log!("\n[DEBUG] Stack Trace (Top {} items):", $count);
+        crate::emu_log!("[DEBUG] Stack Trace (Top {} items):", $count);
         if let Ok(esp) = $uc.reg_read(RegisterX86::ESP) {
             let mut buf = [0u8; 4];
             for i in 0..$count {
@@ -141,7 +141,7 @@ macro_rules! dump_stack {
 // =========================================================
 macro_rules! dump_regs {
     ($uc:expr) => {
-        crate::emu_log!("\n[DEBUG] Registers:");
+        crate::emu_log!("[DEBUG] Registers:");
         let eax = $uc.reg_read(RegisterX86::EAX).unwrap_or(0);
         let ebx = $uc.reg_read(RegisterX86::EBX).unwrap_or(0);
         let ecx = $uc.reg_read(RegisterX86::ECX).unwrap_or(0);
@@ -398,7 +398,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 };
 
                 if let Some(import_func) = import_func {
-                    crate::emu_log!("[!] {import_func} -> {addr:#x}");
+                    // crate::emu_log!("[!] {import_func} -> {addr:#x}");
 
                     let splits: Vec<&str> = import_func.split('!').collect();
                     let dll_name = splits[0];
@@ -418,7 +418,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                         crate::emu_log!("[*] Calling {dll_name}!{func_name}(...args)...");
 
                         if let Err(e) = uc.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
-                            crate::emu_log!("\n[!] Emulation stopped/failed: {e:?}");
+                            crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
                             let pc = uc.reg_read(RegisterX86::EIP).unwrap();
                             crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
                         } else {
@@ -455,7 +455,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
         // self.add_code_hook(0, 0x2_000, |uc, _, _|
         // {
-        //     crate::emu_log!("\n[!] Detected execution at 0x00. Assuming successful return from function.");
+        //     crate::emu_log!("[!] Detected execution at 0x00. Assuming successful return from function.");
         //     crate::emu_log!("    (Cause: Stack pointer drift due to stdcall mismatch)");
 
         //     dump_stack!(uc, 4);
@@ -488,7 +488,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
             if regs[8] == 0 {
                 crate::emu_log!(
-                    "\n[!] Detected execution at 0x00. Assuming successful return from function."
+                    "[!] Detected execution at 0x00. Assuming successful return from function."
                 );
                 crate::emu_log!("    (Cause: Stack pointer drift due to stdcall mismatch)");
 
@@ -593,32 +593,48 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
         // Error Debug Hook
         self.add_mem_hook(
-            HookType::MEM_READ_UNMAPPED | HookType::MEM_WRITE_UNMAPPED | HookType::MEM_FETCH_UNMAPPED,
+            HookType::MEM_READ_UNMAPPED
+                | HookType::MEM_WRITE_UNMAPPED
+                | HookType::MEM_FETCH_UNMAPPED,
             0,
             -1i64 as u64,
-            |_uc, access, addr, size, value|
-        {
-            if value == 0 {
-                crate::emu_log!("\n[!] Detected execution at 0x00. Assuming successful return from function.");
-                crate::emu_log!("    (Cause: Stack pointer drift due to stdcall mismatch)");
-                crate::emu_log!("    Address: {addr:#010x}");
+            |_uc, access, addr, size, value| {
+                if value == 0 {
+                    crate::emu_log!(
+                        "[!] Detected execution at 0x00. Assuming successful return from function."
+                    );
+                    crate::emu_log!("    (Cause: Stack pointer drift due to stdcall mismatch)");
+                    crate::emu_log!("    Address: {addr:#010x}");
 
-                return false;
-            }
+                    return false;
+                }
 
-            crate::emu_log!("\n[!!!!!!] MEMORY ERROR DETECTED: {:?} at {:#x} (Size: {})", access, addr, size);
+                crate::emu_log!(
+                    "[!!!!!!] MEMORY ERROR DETECTED: {:?} at {:#x} (Size: {})",
+                    access,
+                    addr,
+                    size
+                );
 
-            match access {
-                unicorn_engine::unicorn_const::MemType::READ_UNMAPPED => print!("    Type: READ_UNMAPPED"),
-                unicorn_engine::unicorn_const::MemType::WRITE_UNMAPPED => print!("    Type: WRITE_UNMAPPED"),
-                unicorn_engine::unicorn_const::MemType::FETCH_UNMAPPED => print!("    Type: FETCH_UNMAPPED"),
-                _ => print!("    Type: Unknown"),
-            }
+                match access {
+                    unicorn_engine::unicorn_const::MemType::READ_UNMAPPED => {
+                        print!("    Type: READ_UNMAPPED")
+                    }
+                    unicorn_engine::unicorn_const::MemType::WRITE_UNMAPPED => {
+                        print!("    Type: WRITE_UNMAPPED")
+                    }
+                    unicorn_engine::unicorn_const::MemType::FETCH_UNMAPPED => {
+                        print!("    Type: FETCH_UNMAPPED")
+                    }
+                    _ => print!("    Type: Unknown"),
+                }
 
-            crate::emu_log!("    Trying to address: {:#010x}", value); // 시도한 주소 값
+                crate::emu_log!("    Trying to address: {:#010x}", value); // 시도한 주소 값
 
-            false
-        }).expect("Failed to install memory hook");
+                false
+            },
+        )
+        .expect("Failed to install memory hook");
 
         Ok(())
     }
@@ -675,50 +691,50 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
             // PE 헤더에서 재배치 정보 파싱
             if let Some(opt) = pe.header.optional_header
-                && let Some(reloc_dir) = opt.data_directories.get_base_relocation_table() {
-                    let mut reloc_rva = reloc_dir.virtual_address as usize;
-                    let reloc_end = reloc_rva + reloc_dir.size as usize;
+                && let Some(reloc_dir) = opt.data_directories.get_base_relocation_table()
+            {
+                let mut reloc_rva = reloc_dir.virtual_address as usize;
+                let reloc_end = reloc_rva + reloc_dir.size as usize;
 
-                    // .reloc 섹션 데이터 읽기 (메모리에서 읽는 게 편함)
-                    while reloc_rva < reloc_end {
-                        let mut block_header = [0u8; 8]; // VA(4) + Size(4)
-                        self.mem_read(target_base + reloc_rva as u64, &mut block_header)
-                            .unwrap();
+                // .reloc 섹션 데이터 읽기 (메모리에서 읽는 게 편함)
+                while reloc_rva < reloc_end {
+                    let mut block_header = [0u8; 8]; // VA(4) + Size(4)
+                    self.mem_read(target_base + reloc_rva as u64, &mut block_header)
+                        .unwrap();
 
-                        let page_rva = u32::from_le_bytes(block_header[0..4].try_into().unwrap());
-                        let block_size = u32::from_le_bytes(block_header[4..8].try_into().unwrap());
+                    let page_rva = u32::from_le_bytes(block_header[0..4].try_into().unwrap());
+                    let block_size = u32::from_le_bytes(block_header[4..8].try_into().unwrap());
 
-                        if block_size == 0 {
-                            break;
-                        } // Safety break
+                    if block_size == 0 {
+                        break;
+                    } // Safety break
 
-                        let entries_count = (block_size as usize - 8) / 2;
-                        let mut entries_buf = vec![0u8; (block_size - 8) as usize];
-                        self.mem_read(target_base + reloc_rva as u64 + 8, &mut entries_buf)
-                            .unwrap();
+                    let entries_count = (block_size as usize - 8) / 2;
+                    let mut entries_buf = vec![0u8; (block_size - 8) as usize];
+                    self.mem_read(target_base + reloc_rva as u64 + 8, &mut entries_buf)
+                        .unwrap();
 
-                        for i in 0..entries_count {
-                            let entry = u16::from_le_bytes(
-                                entries_buf[i * 2..(i + 1) * 2].try_into().unwrap(),
-                            );
-                            let reloc_type = entry >> 12; // 상위 4비트
-                            let offset = entry & 0x0FFF; // 하위 12비트
+                    for i in 0..entries_count {
+                        let entry =
+                            u16::from_le_bytes(entries_buf[i * 2..(i + 1) * 2].try_into().unwrap());
+                        let reloc_type = entry >> 12; // 상위 4비트
+                        let offset = entry & 0x0FFF; // 하위 12비트
 
-                            // IMAGE_REL_BASED_HIGHLOW (3) 인 경우만 수정 (32bit)
-                            if reloc_type == 3 {
-                                let target_addr = target_base + page_rva as u64 + offset as u64;
-                                let mut val_buf = [0u8; 4];
-                                self.mem_read(target_addr, &mut val_buf).unwrap();
-                                let original_val = u32::from_le_bytes(val_buf);
+                        // IMAGE_REL_BASED_HIGHLOW (3) 인 경우만 수정 (32bit)
+                        if reloc_type == 3 {
+                            let target_addr = target_base + page_rva as u64 + offset as u64;
+                            let mut val_buf = [0u8; 4];
+                            self.mem_read(target_addr, &mut val_buf).unwrap();
+                            let original_val = u32::from_le_bytes(val_buf);
 
-                                // 값 수정: 원래값 + delta
-                                let new_val = original_val.wrapping_add(delta as u32);
-                                self.mem_write(target_addr, &new_val.to_le_bytes()).unwrap();
-                            }
+                            // 값 수정: 원래값 + delta
+                            let new_val = original_val.wrapping_add(delta as u32);
+                            self.mem_write(target_addr, &new_val.to_le_bytes()).unwrap();
                         }
-                        reloc_rva += block_size as usize;
                     }
+                    reloc_rva += block_size as usize;
                 }
+            }
         }
 
         // 4. Export Table 파싱 (다른 DLL이 이 함수들을 찾을 수 있게)
@@ -757,116 +773,116 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         // Fake Address Counter (스태틱처럼 사용하기 위해 고정값 + 오프셋 방식 권장)
 
         if let Some(opt) = pe.header.optional_header
-            && let Some(import_dir) = opt.data_directories.get_import_table() {
-                if import_dir.size == 0 {
-                    // crate::emu_log!("[DEBUG] Import Directory size is 0!");
-                    return Ok(());
+            && let Some(import_dir) = opt.data_directories.get_import_table()
+        {
+            if import_dir.size == 0 {
+                // crate::emu_log!("[DEBUG] Import Directory size is 0!");
+                return Ok(());
+            }
+
+            let mut desc_addr = image_base + import_dir.virtual_address as u64;
+            // crate::emu_log!("[DEBUG] Import Descriptor Table at {desc_addr:#x}"); // 로그 추가
+
+            loop {
+                let mut desc_buf = [0u8; 20];
+                if self.mem_read(desc_addr, &mut desc_buf).is_err() {
+                    break;
                 }
 
-                let mut desc_addr = image_base + import_dir.virtual_address as u64;
-                // crate::emu_log!("[DEBUG] Import Descriptor Table at {desc_addr:#x}"); // 로그 추가
+                let orig_first_thunk = u32::from_le_bytes(desc_buf[0..4].try_into().unwrap());
+                let name_rva = u32::from_le_bytes(desc_buf[12..16].try_into().unwrap());
+                let first_thunk = u32::from_le_bytes(desc_buf[16..20].try_into().unwrap());
+
+                if orig_first_thunk == 0 && first_thunk == 0 {
+                    break;
+                }
+
+                let dll_name = self.read_string(image_base + name_rva as u64);
+                // crate::emu_log!("[DEBUG] Processing Import DLL: {dll_name}"); // 로그 추가
+
+                // 의존성 DLL인지 확인 (Case-insensitive)
+                // let dependency = dependencies.iter().find(|(name, _)| name.eq_ignore_ascii_case(&dll_name)).map(|(_, dll)| dll);
+
+                let mut ilt_rva = if orig_first_thunk != 0 {
+                    orig_first_thunk
+                } else {
+                    first_thunk
+                };
+                let mut iat_rva = first_thunk;
 
                 loop {
-                    let mut desc_buf = [0u8; 20];
-                    if self.mem_read(desc_addr, &mut desc_buf).is_err() {
+                    // let mut val_buf = [0u8; 4];
+                    // self.mem_read(image_base + ilt_rva as u64, &mut val_buf).unwrap();
+                    // let val = u32::from_le_bytes(val_buf);
+                    let val = self.read_u32(image_base + ilt_rva as u64);
+                    // crate::emu_log!("rva: {:#x}, address: {:#x}", ilt_rva, image_base + ilt_rva as u64);
+                    if val == 0 {
                         break;
                     }
 
-                    let orig_first_thunk = u32::from_le_bytes(desc_buf[0..4].try_into().unwrap());
-                    let name_rva = u32::from_le_bytes(desc_buf[12..16].try_into().unwrap());
-                    let first_thunk = u32::from_le_bytes(desc_buf[16..20].try_into().unwrap());
-
-                    if orig_first_thunk == 0 && first_thunk == 0 {
-                        break;
-                    }
-
-                    let dll_name = self.read_string(image_base + name_rva as u64);
-                    // crate::emu_log!("[DEBUG] Processing Import DLL: {dll_name}"); // 로그 추가
-
-                    // 의존성 DLL인지 확인 (Case-insensitive)
-                    // let dependency = dependencies.iter().find(|(name, _)| name.eq_ignore_ascii_case(&dll_name)).map(|(_, dll)| dll);
-
-                    let mut ilt_rva = if orig_first_thunk != 0 {
-                        orig_first_thunk
+                    let func_name = if (val & 0x80000000) != 0 {
+                        format!("Ordinal_{}", val & 0xFFFF)
                     } else {
-                        first_thunk
+                        self.read_string(image_base + val as u64 + 2)
                     };
-                    let mut iat_rva = first_thunk;
 
-                    loop {
-                        // let mut val_buf = [0u8; 4];
-                        // self.mem_read(image_base + ilt_rva as u64, &mut val_buf).unwrap();
-                        // let val = u32::from_le_bytes(val_buf);
-                        let val = self.read_u32(image_base + ilt_rva as u64);
-                        // crate::emu_log!("rva: {:#x}, address: {:#x}", ilt_rva, image_base + ilt_rva as u64);
-                        if val == 0 {
-                            break;
-                        }
+                    let iat_addr = image_base + iat_rva as u64;
+                    let mut final_addr = 0;
 
-                        let func_name = if (val & 0x80000000) != 0 {
-                            format!("Ordinal_{}", val & 0xFFFF)
-                        } else {
-                            self.read_string(image_base + val as u64 + 2)
-                        };
+                    // 1. 의존성 DLL에 있는 함수인가?
+                    let context = self.get_data();
+                    context
+                        .dll_modules
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(name, dll)| {
+                            if !name.eq_ignore_ascii_case(&dll_name) {
+                                return false;
+                            }
+                            if let Some(real_addr) = dll.exports.get(&func_name) {
+                                final_addr = *real_addr;
+                            }
+                            true
+                        });
+                    // if let Some(real_addr) = dll.exports.get(&func_name) {
+                    //     final_addr = *real_addr;
+                    // }
+                    // if let Some(dep_dll) = dependency {
+                    //     if let Some(real_addr) = dep_dll.exports.get(&func_name) {
+                    //         final_addr = *real_addr;
+                    //         // crate::emu_log!("    Linked: {}!{} -> 0x{:x}", dll_name, func_name, final_addr);
+                    //     }
+                    // }
 
-                        let iat_addr = image_base + iat_rva as u64;
-                        let mut final_addr = 0;
-
-                        // 1. 의존성 DLL에 있는 함수인가?
-                        let context = self.get_data();
-                        context
-                            .dll_modules
-                            .lock()
-                            .unwrap()
-                            .iter()
-                            .find(|(name, dll)| {
-                                if !name.eq_ignore_ascii_case(&dll_name) {
-                                    return false;
-                                }
-                                if let Some(real_addr) = dll.exports.get(&func_name) {
-                                    final_addr = *real_addr;
-                                }
-                                true
-                            });
-                        // if let Some(real_addr) = dll.exports.get(&func_name) {
-                        //     final_addr = *real_addr;
-                        // }
-                        // if let Some(dep_dll) = dependency {
-                        //     if let Some(real_addr) = dep_dll.exports.get(&func_name) {
-                        //         final_addr = *real_addr;
-                        //         // crate::emu_log!("    Linked: {}!{} -> 0x{:x}", dll_name, func_name, final_addr);
-                        //     }
-                        // }
-
-                        // 2. 없다면 Fake Address 할당 (전역 카운터 사용)
-                        if final_addr == 0 {
-                            final_addr =
-                                context.import_address.fetch_add(4, Ordering::SeqCst) as u64;
-                        }
-
-                        context
-                            .address_map
-                            .lock()
-                            .unwrap()
-                            .insert(final_addr, format!("{dll_name}!{func_name}"));
-
-                        // [디버그] 패치하는 주소와 값 출력
-                        // crate::emu_log!(
-                        //     "[DEBUG] Patching IAT at 0x{:x} -> 0x{:x} ({})",
-                        //     iat_addr,
-                        //     final_addr,
-                        //     func_name
-                        // );
-
-                        self.write_u32(iat_addr, final_addr as u32);
-                        // self.mem_write(iat_addr, &(final_addr as u32).to_le_bytes()).unwrap();
-
-                        ilt_rva += 4;
-                        iat_rva += 4;
+                    // 2. 없다면 Fake Address 할당 (전역 카운터 사용)
+                    if final_addr == 0 {
+                        final_addr = context.import_address.fetch_add(4, Ordering::SeqCst) as u64;
                     }
-                    desc_addr += 20;
+
+                    context
+                        .address_map
+                        .lock()
+                        .unwrap()
+                        .insert(final_addr, format!("{dll_name}!{func_name}"));
+
+                    // [디버그] 패치하는 주소와 값 출력
+                    // crate::emu_log!(
+                    //     "[DEBUG] Patching IAT at 0x{:x} -> 0x{:x} ({})",
+                    //     iat_addr,
+                    //     final_addr,
+                    //     func_name
+                    // );
+
+                    self.write_u32(iat_addr, final_addr as u32);
+                    // self.mem_write(iat_addr, &(final_addr as u32).to_le_bytes()).unwrap();
+
+                    ilt_rva += 4;
+                    iat_rva += 4;
                 }
+                desc_addr += 20;
             }
+        }
 
         {
             let context = self.get_data();
@@ -901,7 +917,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         // self.emu_start(dll.entry_point, EXIT_ADDRESS, 0, 0).unwrap_err();
 
         if let Err(e) = self.emu_start(dll.entry_point, EXIT_ADDRESS, 0, 0) {
-            crate::emu_log!("\n[!] Emulation stopped/failed: {e:?}");
+            crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
             let pc = self.reg_read(RegisterX86::EIP).unwrap();
             crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
         } else {
@@ -915,7 +931,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
     }
 
     fn run_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>) {
-        crate::emu_log!("\n[*] Looking for '{func_name}' in {dll_name}...");
+        crate::emu_log!("[*] Looking for '{func_name}' in {dll_name}...");
 
         let func_address = {
             let context = self.get_data();
@@ -960,7 +976,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             crate::emu_log!("[*] Calling {func_name}({arguments})...");
 
             if let Err(e) = self.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
-                crate::emu_log!("\n[!] Emulation stopped/failed: {e:?}");
+                crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
                 let pc = self.reg_read(RegisterX86::EIP).unwrap();
                 crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
             } else {

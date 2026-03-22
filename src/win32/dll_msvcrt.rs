@@ -1,3 +1,5 @@
+use unicorn_engine::Arch;
+use unicorn_engine::Mode;
 use unicorn_engine::RegisterX86;
 use unicorn_engine::Unicorn;
 
@@ -27,15 +29,16 @@ impl DllMSVCRT {
     pub fn malloc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let size = uc.read_arg(0);
         let addr = uc.malloc(size as usize);
-        crate::emu_log!("[MSVCRT] malloc({}) -> {:#x}", size, addr);
+        crate::emu_log!("[MSVCRT] malloc({}) -> void* {:#x}", size, addr);
         Some((1, Some(addr as i32)))
     }
 
     // API: void free(void* ptr)
     // 역할: 할당된 메모리를 해제
-    pub fn free(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn free(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         // 간이 힙이므로 free는 아무 작업도 수행하지 않음
-        crate::emu_log!("[MSVCRT] free(...)");
+        let ptr = uc.read_arg(0);
+        crate::emu_log!("[MSVCRT] free({:#x}) -> void", ptr);
         Some((1, None))
     }
 
@@ -48,25 +51,30 @@ impl DllMSVCRT {
         let addr = uc.malloc(total);
         let zeros = vec![0u8; total];
         uc.mem_write(addr, &zeros).unwrap();
-        crate::emu_log!("[MSVCRT] calloc({}, {}) -> {:#x}", num, size, addr);
+        crate::emu_log!("[MSVCRT] calloc({}, {}) -> void* {:#x}", num, size, addr);
         Some((2, Some(addr as i32)))
     }
 
     // API: void* realloc(void* ptr, size_t size)
     // 역할: 이미 할당된 메모리의 크기를 조정
     pub fn realloc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let _ptr = uc.read_arg(0);
+        let ptr = uc.read_arg(0);
         let size = uc.read_arg(1);
         let addr = uc.malloc(size as usize);
         // 간이 구현: 이전 데이터의 복사는 생략
-        crate::emu_log!("[MSVCRT] realloc({:#x}, {}) -> {:#x}", _ptr, size, addr);
+        crate::emu_log!(
+            "[MSVCRT] realloc({:#x}, {}) -> void* {:#x}",
+            ptr,
+            size,
+            addr
+        );
         Some((2, Some(addr as i32)))
     }
 
     pub fn new_op(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let size = uc.read_arg(0);
         let addr = uc.malloc(size as usize);
-        crate::emu_log!("[MSVCRT] operator new({}) -> {:#x}", size, addr);
+        crate::emu_log!("[MSVCRT] operator new({}) -> void* {:#x}", size, addr);
         Some((1, Some(addr as i32)))
     }
 
@@ -80,7 +88,13 @@ impl DllMSVCRT {
             let data = uc.mem_read_as_vec(src as u64, size).unwrap_or_default();
             uc.mem_write(dst as u64, &data).unwrap();
         }
-        crate::emu_log!("[MSVCRT] memmove({:#x}, {:#x}, {})", dst, src, size);
+        crate::emu_log!(
+            "[MSVCRT] memmove({:#x}, {:#x}, {}) -> void* {:#x}",
+            dst,
+            src,
+            size,
+            dst
+        );
         Some((3, Some(dst as i32)))
     }
 
@@ -97,7 +111,7 @@ impl DllMSVCRT {
             .map(|pos| buf + pos as u32)
             .unwrap_or(0);
         crate::emu_log!(
-            "[MSVCRT] memchr({:#x}, {}, {}) -> {:#x}",
+            "[MSVCRT] memchr({:#x}, {}, {}) -> void* {:#x}",
             buf,
             ch,
             count,
@@ -113,15 +127,23 @@ impl DllMSVCRT {
     // 역할: 두 문자열을 지정된 길이만큼 비교
     pub fn strncmp(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s1_addr = uc.read_arg(0);
+        let s1 = if s1_addr != 0 {
+            uc.read_euc_kr(s1_addr as u64)
+        } else {
+            String::new()
+        };
         let s2_addr = uc.read_arg(1);
+        let s2 = if s2_addr != 0 {
+            uc.read_euc_kr(s2_addr as u64)
+        } else {
+            String::new()
+        };
         let n = uc.read_arg(2) as usize;
-        let s1 = uc.read_euc_kr(s1_addr as u64);
-        let s2 = uc.read_euc_kr(s2_addr as u64);
         let r1: Vec<u8> = s1.bytes().take(n).collect();
         let r2: Vec<u8> = s2.bytes().take(n).collect();
         let result = r1.cmp(&r2) as i32;
         crate::emu_log!(
-            "[MSVCRT] strncmp(\"{}\", \"{}\", {}) -> {}",
+            "[MSVCRT] strncmp(\"{}\", \"{}\", {}) -> int {}",
             s1,
             s2,
             n,
@@ -134,11 +156,19 @@ impl DllMSVCRT {
     // 역할: 현재 로캘을 사용하여 두 문자열을 비교
     pub fn strcoll(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s1_addr = uc.read_arg(0);
+        let s1 = if s1_addr != 0 {
+            uc.read_euc_kr(s1_addr as u64)
+        } else {
+            String::new()
+        };
         let s2_addr = uc.read_arg(1);
-        let s1 = uc.read_euc_kr(s1_addr as u64);
-        let s2 = uc.read_euc_kr(s2_addr as u64);
+        let s2 = if s2_addr != 0 {
+            uc.read_euc_kr(s2_addr as u64)
+        } else {
+            String::new()
+        };
         let result = s1.cmp(&s2) as i32;
-        crate::emu_log!("[MSVCRT] strcoll(\"{}\", \"{}\") -> {}", s1, s2, result);
+        crate::emu_log!("[MSVCRT] strcoll(\"{}\", \"{}\") -> int {}", s1, s2, result);
         Some((2, Some(result)))
     }
 
@@ -147,14 +177,24 @@ impl DllMSVCRT {
     pub fn strncpy(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let dst = uc.read_arg(0);
         let src = uc.read_arg(1);
+        let s = if src != 0 {
+            uc.read_euc_kr(src as u64)
+        } else {
+            String::new()
+        };
         let n = uc.read_arg(2) as usize;
-        let s = uc.read_euc_kr(src as u64);
         let mut bytes: Vec<u8> = s.bytes().take(n).collect();
         while bytes.len() < n {
             bytes.push(0);
         }
         uc.mem_write(dst as u64, &bytes).unwrap();
-        crate::emu_log!("[MSVCRT] strncpy({:#x}, \"{}\", {})", dst, s, n);
+        crate::emu_log!(
+            "[MSVCRT] strncpy({:#x}, \"{}\", {}) -> char* {:#x}",
+            dst,
+            s,
+            n,
+            dst
+        );
         Some((3, Some(dst as i32)))
     }
 
@@ -162,11 +202,24 @@ impl DllMSVCRT {
     // 역할: 문자열 내에서 부분 문자열을 검색
     pub fn strstr(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s1_addr = uc.read_arg(0);
+        let s1 = if s1_addr != 0 {
+            uc.read_euc_kr(s1_addr as u64)
+        } else {
+            String::new()
+        };
         let s2_addr = uc.read_arg(1);
-        let s1 = uc.read_euc_kr(s1_addr as u64);
-        let s2 = uc.read_euc_kr(s2_addr as u64);
+        let s2 = if s2_addr != 0 {
+            uc.read_euc_kr(s2_addr as u64)
+        } else {
+            String::new()
+        };
         let result = s1.find(&s2).map(|pos| s1_addr + pos as u32).unwrap_or(0);
-        crate::emu_log!("[MSVCRT] strstr(\"{}\", \"{}\") -> {:#x}", s1, s2, result);
+        crate::emu_log!(
+            "[MSVCRT] strstr(\"{}\", \"{}\") -> char* {:#x}",
+            s1,
+            s2,
+            result
+        );
         Some((2, Some(result as i32)))
     }
 
@@ -174,27 +227,60 @@ impl DllMSVCRT {
     // 역할: 문자열에서 특정 문자가 마지막으로 나타나는 위치를 검색
     pub fn strrchr(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s_addr = uc.read_arg(0);
+        let s = if s_addr != 0 {
+            uc.read_euc_kr(s_addr as u64)
+        } else {
+            String::new()
+        };
         let ch = uc.read_arg(1) as u8 as char;
-        let s = uc.read_euc_kr(s_addr as u64);
         let result = s.rfind(ch).map(|pos| s_addr + pos as u32).unwrap_or(0);
-        crate::emu_log!("[MSVCRT] strrchr(\"{}\", '{}') -> {:#x}", s, ch, result);
+        crate::emu_log!(
+            "[MSVCRT] strrchr(\"{}\", '{}') -> char* {:#x}",
+            s,
+            ch,
+            result
+        );
         Some((2, Some(result as i32)))
     }
 
-    pub fn strtok(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] strtok(...)");
-        Some((2, Some(0))) // 간이: NULL 반환
+    // API: char* strtok(char* str, const char* sep)
+    // 역할: 문자열을 구분자로 분리
+    pub fn strtok(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let s_addr = uc.read_arg(0);
+        let s = if s_addr != 0 {
+            uc.read_euc_kr(s_addr as u64)
+        } else {
+            String::new()
+        };
+        let sep = uc.read_arg(1);
+        crate::emu_log!(
+            "[MSVCRT] strtok(\"{}\", '{}') -> void* {:#x}",
+            s,
+            sep as u8 as char,
+            s_addr
+        );
+        Some((2, Some(s_addr as i32)))
     }
 
     // API: unsigned long strtoul(const char* str, char** endptr, int base)
     // 역할: 문자열을 무부호 장정수로 변환
     pub fn strtoul(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s_addr = uc.read_arg(0);
-        let _endptr = uc.read_arg(1);
+        let s = if s_addr != 0 {
+            uc.read_euc_kr(s_addr as u64)
+        } else {
+            String::new()
+        };
+        let endptr = uc.read_arg(1);
         let base = uc.read_arg(2);
-        let s = uc.read_euc_kr(s_addr as u64);
         let result = u32::from_str_radix(s.trim(), base).unwrap_or(0);
-        crate::emu_log!("[MSVCRT] strtoul(\"{}\", ..., {}) -> {}", s, base, result);
+        crate::emu_log!(
+            "[MSVCRT] strtoul(\"{}\", {}, {}) -> unsigned long {}",
+            s,
+            endptr,
+            base,
+            result
+        );
         Some((3, Some(result as i32)))
     }
 
@@ -202,11 +288,24 @@ impl DllMSVCRT {
     // 역할: 대소문자 구분 없이 두 문자열을 비교
     pub fn _stricmp(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s1_addr = uc.read_arg(0);
+        let s1 = if s1_addr != 0 {
+            uc.read_euc_kr(s1_addr as u64)
+        } else {
+            String::new()
+        };
         let s2_addr = uc.read_arg(1);
-        let s1 = uc.read_euc_kr(s1_addr as u64).to_lowercase();
-        let s2 = uc.read_euc_kr(s2_addr as u64).to_lowercase();
-        let result = s1.cmp(&s2) as i32;
-        crate::emu_log!("[MSVCRT] _stricmp(\"{}\", \"{}\") -> {}", s1, s2, result);
+        let s2 = if s2_addr != 0 {
+            uc.read_euc_kr(s2_addr as u64)
+        } else {
+            String::new()
+        };
+        let result = s1.to_lowercase().cmp(&s2.to_lowercase()) as i32;
+        crate::emu_log!(
+            "[MSVCRT] _stricmp(\"{}\", \"{}\") -> int {}",
+            s1,
+            s2,
+            result
+        );
         Some((2, Some(result)))
     }
 
@@ -234,7 +333,7 @@ impl DllMSVCRT {
             .to_lowercase();
         let result = s1.cmp(&s2) as i32;
         crate::emu_log!(
-            "[MSVCRT] _strnicmp(\"{}\", \"{}\", {}) -> {}",
+            "[MSVCRT] _strnicmp(\"{}\", \"{}\", {}) -> int {}",
             s1,
             s2,
             n,
@@ -253,12 +352,14 @@ impl DllMSVCRT {
         } else {
             0
         };
+        crate::emu_log!("[MSVCRT] isspace({}) -> int {}", ch, result);
         Some((1, Some(result)))
     }
 
     pub fn isdigit(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let ch = uc.read_arg(0) as u8;
         let result = if (ch as char).is_ascii_digit() { 1 } else { 0 };
+        crate::emu_log!("[MSVCRT] isdigit({}) -> int {}", ch, result);
         Some((1, Some(result)))
     }
 
@@ -269,6 +370,7 @@ impl DllMSVCRT {
         } else {
             0
         };
+        crate::emu_log!("[MSVCRT] isalnum({}) -> int {}", ch, result);
         Some((1, Some(result)))
     }
 
@@ -279,9 +381,13 @@ impl DllMSVCRT {
     // 역할: 문자열을 정수로 변환
     pub fn atoi(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s_addr = uc.read_arg(0);
-        let s = uc.read_euc_kr(s_addr as u64);
+        let s = if s_addr != 0 {
+            uc.read_euc_kr(s_addr as u64)
+        } else {
+            String::new()
+        };
         let result = s.trim().parse::<i32>().unwrap_or(0);
-        crate::emu_log!("[MSVCRT] atoi(\"{}\") -> {}", s, result);
+        crate::emu_log!("[MSVCRT] atoi(\"{}\") -> int {}", s, result);
         Some((1, Some(result)))
     }
 
@@ -298,10 +404,11 @@ impl DllMSVCRT {
         };
         uc.mem_write(buf_addr as u64, s.as_bytes()).unwrap();
         crate::emu_log!(
-            "[MSVCRT] _itoa({}, {:#x}, {}) -> \"{}\"",
+            "[MSVCRT] _itoa({}, {:#x}, {}) -> char* {:#x}=\"{}\"",
             value,
             buf_addr,
             radix,
+            buf_addr,
             &s[..s.len() - 1]
         );
         Some((3, Some(buf_addr as i32)))
@@ -321,26 +428,91 @@ impl DllMSVCRT {
         if timer_addr != 0 {
             uc.write_u32(timer_addr as u64, now);
         }
-        crate::emu_log!("[MSVCRT] time(...) -> {}", now);
+        crate::emu_log!("[MSVCRT] time({:#x}) -> time_t {:#x}", timer_addr, now);
         Some((1, Some(now as i32)))
     }
 
     // API: struct tm* localtime(const time_t* timer)
     // 역할: 시간을 현지 시간 구조체로 변환
-    pub fn localtime(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] localtime(...)");
-        Some((1, Some(0))) // NULL (간이)
+    pub fn localtime(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let timer_ptr = uc.read_arg(0);
+        let time_val = if timer_ptr != 0 {
+            uc.read_u32(timer_ptr as u64)
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as u32
+        };
+
+        // Simple unix time to tm conversion (approximate for dummy)
+        let sec = (time_val % 60) as i32;
+        let min = ((time_val / 60) % 60) as i32;
+        let hour = ((time_val / 3600) % 24) as i32;
+        let day = ((time_val / 86400) % 31) as i32 + 1;
+        let mon = ((time_val / 2592000) % 12) as i32;
+        let year = (time_val / 31536000) as i32 + 70;
+
+        let mut tm_ptr = uc.get_data().tm_struct_ptr.load(Ordering::SeqCst);
+        if tm_ptr == 0 {
+            tm_ptr = uc.malloc(36) as u32;
+            uc.get_data().tm_struct_ptr.store(tm_ptr, Ordering::SeqCst);
+        }
+
+        let mut data = [0u32; 9];
+        data[0] = sec as u32; // tm_sec
+        data[1] = min as u32; // tm_min
+        data[2] = hour as u32; // tm_hour
+        data[3] = day as u32; // tm_mday
+        data[4] = mon as u32; // tm_mon
+        data[5] = year as u32; // tm_year
+        data[6] = 0; // tm_wday
+        data[7] = 0; // tm_yday
+        data[8] = 0; // tm_isdst
+
+        for i in 0..9 {
+            uc.write_u32((tm_ptr + (i * 4) as u32) as u64, data[i]);
+        }
+
+        crate::emu_log!(
+            "[MSVCRT] localtime({:#x}:{}) -> struct tm* {:#x}",
+            timer_ptr,
+            time_val,
+            tm_ptr
+        );
+        Some((1, Some(tm_ptr as i32)))
     }
 
     // API: time_t mktime(struct tm* timeptr)
     // 역할: tm 구조체를 time_t 값으로 변환
-    pub fn mktime(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] mktime(...)");
-        Some((1, Some(0)))
+    pub fn mktime(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let timeptr_addr = uc.read_arg(0);
+        if timeptr_addr == 0 {
+            return Some((1, Some(-1)));
+        }
+
+        let sec = uc.read_u32(timeptr_addr as u64);
+        let min = uc.read_u32(timeptr_addr as u64 + 4);
+        let hour = uc.read_u32(timeptr_addr as u64 + 8);
+        let day = uc.read_u32(timeptr_addr as u64 + 12);
+        let mon = uc.read_u32(timeptr_addr as u64 + 16);
+        let year = uc.read_u32(timeptr_addr as u64 + 20);
+
+        // Very crude conversion
+        let t = sec
+            + min * 60
+            + hour * 3600
+            + (day - 1) * 86400
+            + mon * 2592000
+            + (year - 70) * 31536000;
+
+        crate::emu_log!("[MSVCRT] mktime({:#x}) -> time_t {:#x}", timeptr_addr, t);
+        Some((1, Some(t as i32)))
     }
 
     pub fn _timezone(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _timezone");
+        // _timezone is seconds west of UTC. 0 for UTC.
+        crate::emu_log!("[MSVCRT] _timezone() -> 0");
         Some((0, Some(0)))
     }
 
@@ -349,35 +521,59 @@ impl DllMSVCRT {
     // =========================================================
     // API: double floor(double x)
     // 역할: 지정된 값보다 작거나 같은 최대 정수를 계산
-    pub fn floor(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] floor(...)");
-        Some((0, Some(0))) // FPU 기반이라 스택 인자 아님
+    pub fn floor(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let x_low = uc.read_arg(0);
+        let x_high = uc.read_arg(1);
+        let x = f64::from_bits((x_low as u64) | ((x_high as u64) << 32));
+        let res = x.floor();
+        crate::emu_log!("[MSVCRT] floor({}) -> double {}", x, res);
+        // double return usually in ST(0) or EAX:EDX. Here we return 0 for EAX and let ST(0) be handled if needed.
+        Some((2, Some(0)))
     }
 
     // API: double ceil(double x)
     // 역할: 지정된 값보다 크거나 같은 최소 정수를 계산
-    pub fn ceil(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] ceil(...)");
-        Some((0, Some(0)))
+    pub fn ceil(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let x_low = uc.read_arg(0);
+        let x_high = uc.read_arg(1);
+        let x = f64::from_bits((x_low as u64) | ((x_high as u64) << 32));
+        let res = x.ceil();
+        crate::emu_log!("[MSVCRT] ceil({}) -> double {}", x, res);
+        Some((2, Some(0)))
     }
 
-    pub fn frexp(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] frexp(...)");
-        Some((0, Some(0)))
+    pub fn frexp(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let x_low = uc.read_arg(0);
+        let x_high = uc.read_arg(1);
+        let exp_ptr = uc.read_arg(2);
+        let x = f64::from_bits((x_low as u64) | ((x_high as u64) << 32));
+        // Simple dummy: x = m * 2^e
+        uc.write_u32(exp_ptr as u64, 0);
+        crate::emu_log!("[MSVCRT] frexp({}, {:#x}) -> double {}", x, exp_ptr, x);
+        Some((3, Some(0)))
     }
 
-    pub fn ldexp(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] ldexp(...)");
-        Some((0, Some(0)))
+    pub fn ldexp(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let x_low = uc.read_arg(0);
+        let x_high = uc.read_arg(1);
+        let exp = uc.read_arg(2) as i32;
+        let x = f64::from_bits((x_low as u64) | ((x_high as u64) << 32));
+        let res = x * 2.0f64.powi(exp);
+        crate::emu_log!("[MSVCRT] ldexp({}, {}) -> double {}", x, exp, res);
+        Some((3, Some(0)))
     }
 
     pub fn __c_ipow(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _CIpow(...)");
+        // _CIpow usually takes args from FPU stack ST(0), ST(1)
+        crate::emu_log!("[MSVCRT] _CIpow() -> double st(0)^st(1)");
         Some((0, Some(0)))
     }
 
     pub fn _ftol(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _ftol(...)");
+        // _ftol: converts ST(0) to integer.
+        // We don't have easy access to FPU stack values through simple Unicorn::reg_read(ST0)
+        // because it's 80-bit. For now, return 0 or dummy.
+        crate::emu_log!("[MSVCRT] _ftol()");
         Some((0, Some(0)))
     }
 
@@ -392,6 +588,7 @@ impl DllMSVCRT {
         state = state.wrapping_mul(214013).wrapping_add(2531011);
         ctx.rand_state.store(state, Ordering::SeqCst);
         let val = (state >> 16) & 0x7FFF;
+        crate::emu_log!("[MSVCRT] rand() -> int {}", val);
         Some((0, Some(val as i32)))
     }
 
@@ -400,7 +597,7 @@ impl DllMSVCRT {
     pub fn srand(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let seed = uc.read_arg(0);
         uc.get_data().rand_state.store(seed, Ordering::SeqCst);
-        crate::emu_log!("[MSVCRT] srand({})", seed);
+        crate::emu_log!("[MSVCRT] srand({:#x}) -> void", seed);
         Some((1, None))
     }
 
@@ -766,21 +963,31 @@ impl DllMSVCRT {
     // 역할: va_list를 사용하여 서식화된 데이터를 문자열 버퍼에 출력
     pub fn _vsnprintf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let buf_addr = uc.read_arg(0);
-        let _size = uc.read_arg(1);
+        let size = uc.read_arg(1);
         let fmt_addr = uc.read_arg(2);
-        // va_list ptr at arg(3) - 에뮬레이터에서는 스택 기반이므로 직접 파싱 불가
-        // 간략 구현: 포맷 문자열만 복사
-        let fmt = uc.read_euc_kr(fmt_addr as u64);
-        let mut buf = fmt.as_bytes().to_vec();
+        if buf_addr == 0 || fmt_addr == 0 {
+            let eip = uc.reg_read(RegisterX86::EIP as i32).unwrap();
+            let esp = uc.reg_read(RegisterX86::ESP as i32).unwrap();
+            crate::emu_log!(
+                "[MSVCRT] sprintf invalid args: buf={:#x}, fmt={:#x}, eip={:#x}, esp={:#x}",
+                buf_addr,
+                fmt_addr,
+                eip,
+                esp
+            );
+        }
+        let (result, total_args) = DllMSVCRT::format_string(uc, fmt_addr, 3);
+        let bytes = result.as_bytes();
+        let mut buf = bytes.to_vec();
         buf.push(0);
         uc.mem_write(buf_addr as u64, &buf).unwrap();
         crate::emu_log!(
-            "[MSVCRT] _vsnprintf({:#x}, {}, ...) -> \"{}\" ",
+            "[MSVCRT] _vsnprintf({:#x}, {}, ...) -> \"{}\"",
             buf_addr,
-            _size,
-            fmt
+            size,
+            result
         );
-        Some((3, Some(fmt.len() as i32)))
+        Some((total_args, Some(bytes.len() as i32)))
     }
 
     // API: int vsprintf(char* str, const char* format, va_list argptr)
@@ -788,12 +995,24 @@ impl DllMSVCRT {
     pub fn vsprintf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let buf_addr = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
-        let fmt = uc.read_euc_kr(fmt_addr as u64);
-        let mut buf = fmt.as_bytes().to_vec();
+        if buf_addr == 0 || fmt_addr == 0 {
+            let eip = uc.reg_read(RegisterX86::EIP as i32).unwrap();
+            let esp = uc.reg_read(RegisterX86::ESP as i32).unwrap();
+            crate::emu_log!(
+                "[MSVCRT] sprintf invalid args: buf={:#x}, fmt={:#x}, eip={:#x}, esp={:#x}",
+                buf_addr,
+                fmt_addr,
+                eip,
+                esp
+            );
+        }
+        let (result, total_args) = DllMSVCRT::format_string(uc, fmt_addr, 2);
+        let bytes = result.as_bytes();
+        let mut buf = bytes.to_vec();
         buf.push(0);
         uc.mem_write(buf_addr as u64, &buf).unwrap();
-        crate::emu_log!("[MSVCRT] vsprintf({:#x}, ...) -> \"{}\"", buf_addr, fmt);
-        Some((3, Some(fmt.len() as i32)))
+        crate::emu_log!("[MSVCRT] vsprintf({:#x}, ...) -> \"{}\"", buf_addr, result);
+        Some((total_args, Some(bytes.len() as i32)))
     }
 
     // API: int sscanf(const char* str, const char* format, ...)
@@ -876,7 +1095,7 @@ impl DllMSVCRT {
                 let handle = context.alloc_handle();
                 context.files.lock().unwrap().insert(handle, file);
                 crate::emu_log!(
-                    "[MSVCRT] fopen(\"{}\", \"{}\") -> handle {:#x}",
+                    "[MSVCRT] fopen(\"{}\", \"{}\") -> FILE* {:#x}",
                     filename,
                     mode,
                     handle
@@ -885,7 +1104,7 @@ impl DllMSVCRT {
             }
             Err(e) => {
                 crate::emu_log!(
-                    "[MSVCRT] fopen(\"{}\", \"{}\") failed: {:?}",
+                    "[MSVCRT] fopen(\"{}\", \"{}\") -> FILE* 0 {:?}",
                     filename,
                     mode,
                     e
@@ -902,10 +1121,10 @@ impl DllMSVCRT {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
         if files.remove(&{ stream_handle }).is_some() {
-            crate::emu_log!("[MSVCRT] fclose(handle {:#x})", stream_handle);
+            crate::emu_log!("[MSVCRT] fclose({:#x}) -> int 0", stream_handle);
             Some((1, Some(0)))
         } else {
-            crate::emu_log!("[MSVCRT] fclose(handle {:#x}) failed", stream_handle);
+            crate::emu_log!("[MSVCRT] fclose({:#x}) -> int -1", stream_handle);
             Some((1, Some(-1))) // EOF
         }
     }
@@ -941,10 +1160,11 @@ impl DllMSVCRT {
 
         let actual_count = (bytes_read as u32 / size) as i32;
         crate::emu_log!(
-            "[MSVCRT] fread(handle {:#x}, size={}, count={}) -> {}",
+            "[MSVCRT] fread({:#x}, {:#x}, {:#x}, {:#x}) -> size_t {:#x}",
             stream_handle,
             size,
             count,
+            buffer_addr,
             actual_count
         );
         Some((4, Some(actual_count)))
@@ -976,10 +1196,11 @@ impl DllMSVCRT {
 
         let actual_count = (bytes_written as u32 / size) as i32;
         crate::emu_log!(
-            "[MSVCRT] fwrite(handle {:#x}, size={}, count={}) -> {}",
+            "[MSVCRT] fwrite({:#x}, {:#x}, {:#x}, {:#x}) -> size_t {:#x}",
             stream_handle,
             size,
             count,
+            buffer_addr,
             actual_count
         );
         Some((4, Some(actual_count)))
@@ -1005,7 +1226,7 @@ impl DllMSVCRT {
             match file.seek(pos) {
                 Ok(new_pos) => {
                     crate::emu_log!(
-                        "[MSVCRT] fseek(handle {:#x}, offset={}, origin={}) -> pos {}",
+                        "[MSVCRT] fseek({:#x}, {:#x}, {:#x}) -> int {:#x}",
                         stream_handle,
                         offset,
                         origin,
@@ -1015,8 +1236,10 @@ impl DllMSVCRT {
                 }
                 Err(e) => {
                     crate::emu_log!(
-                        "[MSVCRT] fseek(handle {:#x}) failed: {:?}",
+                        "[MSVCRT] fseek({:#x}, {:#x}, {:#x}) -> int -1 {:?}",
                         stream_handle,
+                        offset,
+                        origin,
                         e
                     );
                     Some((3, Some(-1)))
@@ -1040,14 +1263,14 @@ impl DllMSVCRT {
         if let Some(file) = files.get_mut(&{ stream_handle }) {
             match file.stream_position() {
                 Ok(pos) => {
-                    crate::emu_log!("[MSVCRT] ftell(handle {:#x}) -> {}", stream_handle, pos);
+                    crate::emu_log!("[MSVCRT] ftell({:#x}) -> long {:#x}", stream_handle, pos);
                     Some((1, Some(pos as i32)))
                 }
                 Err(_) => Some((1, Some(-1))),
             }
         } else {
             crate::emu_log!(
-                "[MSVCRT] ftell(handle {:#x}) - handle not found",
+                "[MSVCRT] ftell({:#x}) -> long -1 (handle not found)",
                 stream_handle
             );
             Some((1, Some(-1)))
@@ -1062,8 +1285,10 @@ impl DllMSVCRT {
         let mut files = context.files.lock().unwrap();
         if let Some(file) = files.get_mut(&{ stream_handle }) {
             file.flush().unwrap();
+            crate::emu_log!("[MSVCRT] fflush({:#x}) -> int 0", stream_handle);
             Some((1, Some(0)))
         } else {
+            crate::emu_log!("[MSVCRT] fflush({:#x}) -> int -1", stream_handle);
             Some((1, Some(-1)))
         }
     }
@@ -1108,7 +1333,7 @@ impl DllMSVCRT {
                 let handle = context.alloc_handle();
                 context.files.lock().unwrap().insert(handle, file);
                 crate::emu_log!(
-                    "[MSVCRT] _open(\"{}\", {:#x}) -> fd {:#x}",
+                    "[MSVCRT] _open(\"{}\", {:#x}) -> int {:#x}",
                     filename,
                     oflag,
                     handle
@@ -1117,7 +1342,7 @@ impl DllMSVCRT {
             }
             Err(e) => {
                 crate::emu_log!(
-                    "[MSVCRT] _open(\"{}\", {:#x}) failed: {:?}",
+                    "[MSVCRT] _open(\"{}\", {:#x}) -> int -1: {:?}",
                     filename,
                     oflag,
                     e
@@ -1133,10 +1358,10 @@ impl DllMSVCRT {
         let fd = uc.read_arg(0);
         let context = uc.get_data();
         if context.files.lock().unwrap().remove(&fd).is_some() {
-            crate::emu_log!("[MSVCRT] _close(fd {:#x})", fd);
+            crate::emu_log!("[MSVCRT] _close(fd {:#x}) -> int 0", fd);
             Some((1, Some(0)))
         } else {
-            crate::emu_log!("[MSVCRT] _close(fd {:#x}) failed", fd);
+            crate::emu_log!("[MSVCRT] _close(fd {:#x}) -> int -1", fd);
             Some((1, Some(-1)))
         }
     }
@@ -1165,8 +1390,9 @@ impl DllMSVCRT {
         }
 
         crate::emu_log!(
-            "[MSVCRT] _read(fd {:#x}, count={}) -> bytes {}",
+            "[MSVCRT] _read({:#x}, {:#x}, {}) -> int {}",
             fd,
+            buffer_addr,
             count,
             bytes_read
         );
@@ -1194,8 +1420,9 @@ impl DllMSVCRT {
         };
 
         crate::emu_log!(
-            "[MSVCRT] _write(fd {:#x}, count={}) -> bytes {}",
+            "[MSVCRT] _write({:#x}, {:#x}, {}) -> int {}",
             fd,
+            buffer_addr,
             count,
             bytes_written
         );
@@ -1222,7 +1449,7 @@ impl DllMSVCRT {
             match file.seek(pos) {
                 Ok(new_pos) => {
                     crate::emu_log!(
-                        "[MSVCRT] _lseek(fd {:#x}, offset={}, origin={}) -> pos {}",
+                        "[MSVCRT] _lseek({:#x}, {}, {}) -> int {:#x}",
                         fd,
                         offset,
                         origin,
@@ -1233,15 +1460,28 @@ impl DllMSVCRT {
                 Err(_) => Some((3, Some(-1))),
             }
         } else {
-            crate::emu_log!("[MSVCRT] _lseek(fd {:#x}) - fd not found", fd);
+            crate::emu_log!(
+                "[MSVCRT] _lseek({:#x}, {}, {}) -> int -1 (fd not found)",
+                fd,
+                offset,
+                origin
+            );
             Some((3, Some(-1)))
         }
     }
 
     // API: int _pipe(int* phandles, unsigned int size, int oflag)
     // 역할: 익명 파이프를 생성
-    pub fn _pipe(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _pipe(...)");
+    pub fn _pipe(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let phandles = uc.read_arg(0);
+        let size = uc.read_arg(1);
+        let oflag = uc.read_arg(2);
+        crate::emu_log!(
+            "[MSVCRT] _pipe({:#x}, {}, {}) -> int -1",
+            phandles,
+            size,
+            oflag
+        );
         Some((3, Some(-1))) // cdecl
     }
 
@@ -1262,8 +1502,18 @@ impl DllMSVCRT {
             stat_buf[14..18].copy_from_slice(&size.to_le_bytes());
 
             uc.mem_write(buffer_addr as u64, &stat_buf).unwrap();
+            crate::emu_log!(
+                "[MSVCRT] _stat(\"{}\", {:#x}) -> int 0",
+                filename,
+                buffer_addr
+            );
             Some((2, Some(0)))
         } else {
+            crate::emu_log!(
+                "[MSVCRT] _stat(\"{}\", {:#x}) -> int -1",
+                filename,
+                buffer_addr
+            );
             Some((2, Some(-1)))
         }
     }
@@ -1273,8 +1523,10 @@ impl DllMSVCRT {
     // =========================================================
     // API: char* getenv(const char* varname)
     // 역할: 특정 환경 변수의 값을 가져옴
-    pub fn getenv(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] getenv(...)");
+    pub fn getenv(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let varname_addr = uc.read_arg(0);
+        let varname = uc.read_euc_kr(varname_addr as u64);
+        crate::emu_log!("[MSVCRT] getenv(\"{}\") -> char* 0x0", varname);
         Some((1, Some(0))) // cdecl, NULL
     }
 
@@ -1295,16 +1547,22 @@ impl DllMSVCRT {
         let handle = ctx.alloc_handle();
 
         crate::emu_log!(
-            "[MSVCRT] _beginthreadex({:#x}, {}, {:#x}) -> handle {:#x}",
+            "[MSVCRT] _beginthreadex({:#x}, {}, {:#x}, {}, {}, {:#x}) -> uintptr_t {:#x}",
             start_address,
             stack_size,
             arglist,
+            _security,
+            _init_flag,
+            _thread_addr_ptr,
             handle
         );
 
+        let ctx_clone = ctx.clone();
         std::thread::spawn(move || {
             crate::emu_log!("[MSVCRT] Thread ex {:#x} started on host", start_address);
             // TODO: Create new engine and run guest code
+            let mut uc = Unicorn::new_with_data(Arch::X86, Mode::LITTLE_ENDIAN, ctx_clone).unwrap();
+            uc.emu_start(start_address, 0, 0, 0).unwrap();
         });
 
         Some((6, Some(handle as i32)))
@@ -1314,7 +1572,7 @@ impl DllMSVCRT {
     // 역할: _beginthreadex로 생성된 스레드를 종료
     pub fn _endthreadex(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let exit_code = uc.read_arg(0);
-        crate::emu_log!("[MSVCRT] _endthreadex({})", exit_code);
+        crate::emu_log!("[MSVCRT] _endthreadex({}) -> void", exit_code);
         Some((1, None)) // cdecl, void
     }
 
@@ -1329,7 +1587,7 @@ impl DllMSVCRT {
         let handle = ctx.alloc_handle();
 
         crate::emu_log!(
-            "[MSVCRT] _beginthread({:#x}, {}, {:#x}) -> handle {:#x}",
+            "[MSVCRT] _beginthread({:#x}, {}, {:#x}) -> uintptr_t {:#x}",
             start_address,
             stack_size,
             arglist,
@@ -1337,9 +1595,12 @@ impl DllMSVCRT {
         );
 
         // Native Thread Spawn
+        let ctx_clone = ctx.clone();
         std::thread::spawn(move || {
             crate::emu_log!("[MSVCRT] Thread {:#x} started on host", start_address);
             // TODO: Create new engine and run guest code
+            let mut uc = Unicorn::new_with_data(Arch::X86, Mode::LITTLE_ENDIAN, ctx_clone).unwrap();
+            uc.emu_start(start_address, 0, 0, 0).unwrap();
         });
 
         Some((3, Some(handle as i32)))
@@ -1350,22 +1611,48 @@ impl DllMSVCRT {
     // =========================================================
     // API: void __stdcall _CxxThrowException(void* pExceptionObject, _ThrowInfo* pThrowInfo)
     // 역할: C++ 예외를 발생시킴
-    pub fn __cxx_throw_exception(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _CxxThrowException(...)");
+    pub fn __cxx_throw_exception(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let p_exception_object = uc.read_arg(0);
+        let p_throw_info = uc.read_arg(1);
+        crate::emu_log!(
+            "[MSVCRT] _CxxThrowException({:#x}, {:#x}) -> void",
+            p_exception_object,
+            p_throw_info
+        );
         Some((2, None)) // stdcall 2 args
     }
 
     // API: int _except_handler3(...)
     // 역할: 내부 예외 처리기 (SEH)
     pub fn _except_handler3(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _except_handler3(...)");
+        let p_exception_record = _uc.read_arg(0);
+        let p_establisher_frame = _uc.read_arg(1);
+        let p_context = _uc.read_arg(2);
+        let p_dispatcher_context = _uc.read_arg(3);
+        crate::emu_log!(
+            "[MSVCRT] _except_handler3({:#x}, {:#x}, {:#x}, {:#x}) -> int 1",
+            p_exception_record,
+            p_establisher_frame,
+            p_context,
+            p_dispatcher_context
+        );
         Some((4, Some(1))) // cdecl
     }
 
     // API: int __CxxFrameHandler(...)
     // 역할: C++ 프레임 처리기
     pub fn ___cxx_frame_handler(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] __CxxFrameHandler(...)");
+        let p_exception_record = _uc.read_arg(0);
+        let p_establisher_frame = _uc.read_arg(1);
+        let p_context = _uc.read_arg(2);
+        let p_dispatcher_context = _uc.read_arg(3);
+        crate::emu_log!(
+            "[MSVCRT] __CxxFrameHandler({:#x}, {:#x}, {:#x}, {:#x}) -> int 0",
+            p_exception_record,
+            p_establisher_frame,
+            p_context,
+            p_dispatcher_context
+        );
         Some((4, Some(0))) // cdecl
     }
 
@@ -1373,21 +1660,28 @@ impl DllMSVCRT {
     // 역할: Win32 예외를 C++ 예외로 변환하는 함수를 설정
     pub fn _set_se_translator(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let se_translator_function = uc.read_arg(0);
-        crate::emu_log!("[MSVCRT] _set_se_translator({:#x})", se_translator_function);
+        crate::emu_log!(
+            "[MSVCRT] _set_se_translator({:#x}) -> _se_translator_function 0",
+            se_translator_function
+        );
         Some((1, Some(0))) // cdecl
     }
 
     // API: int _setjmp3(jmp_buf env, int count)
     // 역할: 비로컬 jump를 위한 현재 상태를 저장
-    pub fn _setjmp3(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _setjmp3(...)");
+    pub fn _setjmp3(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let env = uc.read_arg(0);
+        let count = uc.read_arg(1);
+        crate::emu_log!("[MSVCRT] _setjmp3({:#x}, {:#x}) -> int 0", env, count);
         Some((2, Some(0))) // cdecl, 바로 리턴
     }
 
     // API: void longjmp(jmp_buf env, int value)
     // 역할: setjmp로 저장된 위치로 제어를 이동
-    pub fn longjmp(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] longjmp(...)");
+    pub fn longjmp(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let env = uc.read_arg(0);
+        let value = uc.read_arg(1);
+        crate::emu_log!("[MSVCRT] longjmp({:#x}, {:#x}) -> void", env, value);
         Some((2, None)) // cdecl
     }
 
@@ -1428,28 +1722,38 @@ impl DllMSVCRT {
             }
             addr += 4;
         }
-        // crate::emu_log!("[MSVCRT] _initterm done");
+        crate::emu_log!("[MSVCRT] _initterm({:#x}, {:#x}) -> void", begin, end);
         Some((2, None)) // cdecl
     }
 
     // API: void _exit(int status)
     // 역할: 프로세스를 즉시 종료
-    pub fn _exit(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _exit(...)");
+    pub fn _exit(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let status = uc.read_arg(0);
+        crate::emu_log!("[MSVCRT] _exit({:#x}) -> void", status);
         Some((1, None)) // cdecl
     }
 
     // API: _onexit_t __dllonexit(_onexit_t func, _PVFV** begin, _PVFV** end)
     // 역할: DLL 종료 시 호출될 함수를 등록
-    pub fn __dllonexit(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] __dllonexit(...)");
+    pub fn __dllonexit(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let func = uc.read_arg(0);
+        let begin = uc.read_arg(1);
+        let end = uc.read_arg(2);
+        crate::emu_log!(
+            "[MSVCRT] __dllonexit({:#x}, {:#x}, {:#x}) -> _onexit_t 0",
+            func,
+            begin,
+            end
+        );
         Some((3, Some(0))) // cdecl
     }
 
     // API: _onexit_t _onexit(_onexit_t func)
     // 역할: 프로그램 종료 시 호출될 함수를 등록
-    pub fn _onexit(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _onexit(...)");
+    pub fn _onexit(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let func = uc.read_arg(0);
+        crate::emu_log!("[MSVCRT] _onexit({:#x}) -> _onexit_t 0", func);
         Some((1, Some(0))) // cdecl
     }
 
@@ -1475,7 +1779,7 @@ impl DllMSVCRT {
     // API: void _purecall(void)
     // 역할: 순수 가상 함수 호출 시의 에러 처리기
     pub fn _purecall(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _purecall()");
+        crate::emu_log!("[MSVCRT] _purecall() -> void");
         Some((0, None))
     }
 
@@ -1485,25 +1789,49 @@ impl DllMSVCRT {
         // _errno returns a pointer to thread-local errno
         let addr = uc.malloc(4);
         uc.write_u32(addr, 0);
-        crate::emu_log!("[MSVCRT] _errno() -> {:#x}", addr);
+        crate::emu_log!("[MSVCRT] _errno() -> int* {:#x}", addr);
         Some((0, Some(addr as i32)))
     }
 
     // API: void qsort(void* base, size_t num, size_t width, int (*compare)(const void*, const void*))
     // 역할: 퀵 정렬 알고리즘을 수행
-    pub fn qsort(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] qsort(...)");
+    pub fn qsort(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let base = uc.read_arg(0);
+        let num = uc.read_arg(1);
+        let width = uc.read_arg(2);
+        let compare = uc.read_arg(3);
+        crate::emu_log!(
+            "[MSVCRT] qsort({:#x}, {:#x}, {:#x}, {:#x}) -> void",
+            base,
+            num,
+            width,
+            compare
+        );
         Some((4, None)) // cdecl
     }
 
     // C++ exception related
-    pub fn exception_ref(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] exception::exception(const&)");
-        Some((1, Some(0))) // thiscall/cdecl hybrid
+    pub fn exception_ref(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+        let other_ptr = uc.read_arg(0);
+        crate::emu_log!(
+            "[MSVCRT] (this={:#x}) exception::exception({:#x}) -> (this={:#x})",
+            this_ptr,
+            other_ptr,
+            this_ptr
+        );
+        Some((1, Some(this_ptr as i32))) // thiscall/cdecl hybrid
     }
 
-    pub fn exception_ptr(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] exception::exception(const char*)");
+    pub fn exception_ptr(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+        let ptr = uc.read_arg(0);
+        crate::emu_log!(
+            "[MSVCRT] (this={:#x}) exception::exception({:#x}) -> (this={:#x})",
+            this_ptr,
+            ptr,
+            this_ptr
+        );
         Some((1, Some(0)))
     }
 
@@ -1513,7 +1841,7 @@ impl DllMSVCRT {
         let p_exception_object = uc.read_arg(0);
         let p_throw_info = uc.read_arg(1);
         crate::emu_log!(
-            "[MSVCRT] _CxxThrowException(pExceptionObject={:#x}, pThrowInfo={:#x})",
+            "[MSVCRT] _CxxThrowException({:#x}, {:#x}) -> void",
             p_exception_object,
             p_throw_info
         );

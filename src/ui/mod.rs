@@ -1,0 +1,65 @@
+pub mod win_event;
+pub mod win_frame;
+
+/// 에뮬레이터 코어(Win32 API)가 UI 스레드에 요청하는 창 조작 커맨드
+pub enum UiCommand {
+    /// 새로운 윈도우 창 생성 요청
+    CreateWindow {
+        /// 가상 HWND 핸들
+        hwnd: u32,
+        /// 창 제목
+        title: String,
+        /// 너비
+        width: u32,
+        /// 높이
+        height: u32,
+    },
+    /// 특정 윈도우 창 파괴 요청
+    DestroyWindow {
+        /// 가상 HWND 핸들
+        hwnd: u32,
+    },
+    /// 윈도우 표시 상태 변경 요청
+    ShowWindow { hwnd: u32, visible: bool },
+    /// 윈도우 위치/크기 변경 요청
+    MoveWindow {
+        hwnd: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    /// 윈도우 제목 변경 요청
+    SetWindowText { hwnd: u32, text: String },
+    /// 윈도우 강제 렌더링(업데이트) 요청
+    UpdateWindow { hwnd: u32 },
+}
+
+/// 윈도우 콘텐츠를 그리는 인터페이스
+pub trait Painter: std::any::Any {
+    fn create_window(
+        &self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> winit::window::Window;
+    fn quit_on_close(&self) -> bool;
+    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32);
+    fn handle_event(
+        &mut self,
+        _event: &winit::event::WindowEvent,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> bool;
+    fn tick(&mut self) -> bool;
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+use std::sync::mpsc::Receiver;
+
+/// UI 이벤트 루프를 시작하고 모든 윈도우를 관리함
+pub fn run_ui(ui_rx: Receiver<UiCommand>, initial_painters: Vec<Box<dyn Painter>>) {
+    let event_loop = winit::event_loop::EventLoop::new().unwrap();
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+
+    let mut app = win_frame::WinFrame::new(ui_rx, initial_painters);
+    event_loop.run_app(&mut app).unwrap();
+}
