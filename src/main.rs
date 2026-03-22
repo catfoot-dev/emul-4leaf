@@ -2,9 +2,9 @@ mod debug;
 mod server;
 #[macro_use]
 mod helper;
+mod browser;
 mod packet_logger;
 mod win32;
-mod browser;
 
 use helper::{SHARED_MEM_BASE, UnicornHelper};
 use std::collections::VecDeque;
@@ -26,12 +26,16 @@ pub static LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 /// - `msg`: 추가할 로그의 텍스트
 pub fn push_log(msg: String) {
     if let Some(buf) = LOG_BUFFER.get() {
-        let mut b = buf.lock().unwrap();
-        b.push_back(msg);
-        if b.len() > 100 {
-            b.pop_front();
+        if let Ok(mut b) = buf.try_lock() {
+            // \n 이 포함되어 있으면 나눠서 push 함으로써 텍스트 겹침 방지
+            for line in msg.lines() {
+                b.push_back(line.to_string());
+                if b.len() > 1000 {
+                    b.pop_front();
+                }
+            }
+            LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -43,12 +47,11 @@ pub fn init_logger() {
 #[macro_export]
 macro_rules! emu_log {
     () => {
-        std::println!();
         $crate::push_log(String::new());
     };
     ($($arg:tt)*) => {
         let msg = std::format!($($arg)*);
-        std::println!("{}", msg);
+        // std::println!("{}", msg); // 성능 저하 원인: 주석 처리
         $crate::push_log(msg);
     };
 }

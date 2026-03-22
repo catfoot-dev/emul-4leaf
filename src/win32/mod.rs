@@ -203,6 +203,8 @@ pub struct Win32Context {
     pub rand_state: AtomicU32,
     /// 패킷 로거 (프로토콜 분석용)
     pub packet_logger: Arc<Mutex<PacketLogger>>,
+    /// 가상 파일 맵 (핸들 -> 호스트 파일)
+    pub files: Arc<Mutex<HashMap<u32, std::fs::File>>>,
 }
 
 impl Win32Context {
@@ -226,6 +228,7 @@ impl Win32Context {
             start_time: Instant::now(),
             rand_state: AtomicU32::new(12345),
             packet_logger: Arc::new(Mutex::new(PacketLogger::new())),
+            files: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

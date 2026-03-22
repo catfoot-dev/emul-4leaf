@@ -20,7 +20,7 @@ impl DllADVAPI32 {
                 let _hkey = uc.read_arg(0);
                 let name_addr = uc.read_arg(1);
                 let name = if name_addr != 0 {
-                    uc.read_string(name_addr as u64)
+                    uc.read_euc_kr(name_addr as u64)
                 } else {
                     String::new()
                 };
@@ -33,7 +33,7 @@ impl DllADVAPI32 {
             "RegOpenKeyExA" => {
                 let _hkey = uc.read_arg(0);
                 let subkey_addr = uc.read_arg(1);
-                let subkey = uc.read_string(subkey_addr as u64);
+                let subkey = uc.read_euc_kr(subkey_addr as u64);
                 let result_addr = uc.read_arg(4);
                 let ctx = uc.get_data();
                 let handle = ctx.alloc_handle();
@@ -56,7 +56,7 @@ impl DllADVAPI32 {
             "RegCreateKeyExA" => {
                 let _hkey = uc.read_arg(0);
                 let subkey_addr = uc.read_arg(1);
-                let subkey = uc.read_string(subkey_addr as u64);
+                let subkey = uc.read_euc_kr(subkey_addr as u64);
                 let result_addr = uc.read_arg(7);
                 let ctx = uc.get_data();
                 let handle = ctx.alloc_handle();
@@ -77,7 +77,7 @@ impl DllADVAPI32 {
                 let _hkey = uc.read_arg(0);
                 let name_addr = uc.read_arg(1);
                 let name = if name_addr != 0 {
-                    uc.read_string(name_addr as u64)
+                    uc.read_euc_kr(name_addr as u64)
                 } else {
                     String::new()
                 };

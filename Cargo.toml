@@ -16,3 +16,5 @@ winit = "0.30"
 softbuffer = "0.4"
 
 embedded-graphics = "0.8"
+embedded-ttf = "0.2.2"
+rusttype = "0.9"

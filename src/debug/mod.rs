@@ -4,7 +4,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::raw_window_handle::HasDisplayHandle;
+use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle};
 use winit::window::{Window, WindowId};
 
 use anyhow::Result;
@@ -14,12 +14,16 @@ use std::sync::mpsc::{Receiver, Sender};
 
 // 그래픽 관련
 use embedded_graphics::{
-    mono_font::{MonoTextStyle, ascii::FONT_6X10},
     pixelcolor::Rgb888,
     prelude::*,
     text::Text,
 };
+use embedded_ttf::FontTextStyleBuilder;
+use rusttype::Font as TtfFont;
 use softbuffer::{Context as SoftContext, Surface};
+
+static FONT_DATA: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
+static TTF_FONT: std::sync::OnceLock<TtfFont<'static>> = std::sync::OnceLock::new();
 
 use crate::debug::common::{CpuContext, DebugCommand, UiCommand};
 
@@ -67,6 +71,8 @@ pub struct Debug {
     hwnd_to_id: HashMap<u32, WindowId>,
     id_to_hwnd: HashMap<WindowId, u32>,
     last_log_count: usize,
+    context: Option<SoftContext<DisplayHandle<'static>>>,
+    log_scroll_offset: usize,
 }
 
 impl Debug {
@@ -88,6 +94,8 @@ impl Debug {
             hwnd_to_id: HashMap::new(),
             id_to_hwnd: HashMap::new(),
             last_log_count: 0,
+            context: None,
+            log_scroll_offset: 0,
         }
     }
 }
@@ -101,6 +109,17 @@ impl ApplicationHandler for Debug {
                     .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
             )
             .unwrap();
+
+        if self.context.is_none() {
+            // Safety: The event loop is guaranteed to live as long as the application.
+            let display_handle = unsafe {
+                std::mem::transmute::<DisplayHandle<'_>, DisplayHandle<'static>>(
+                    event_loop.display_handle().unwrap(),
+                )
+            };
+            self.context = Some(SoftContext::new(display_handle).unwrap());
+        }
+
         let id = window.id();
         self.debug_window_id = Some(id);
         self.windows.insert(id, window);
@@ -119,7 +138,11 @@ impl ApplicationHandler for Debug {
                         width,
                         height,
                     } => {
-                        crate::emu_log!("[DEBUG] UI: Creating window for HWND {:#x} (\"{}\")", hwnd, title);
+                        crate::emu_log!(
+                            "[DEBUG] UI: Creating window for HWND {:#x} (\"{}\")",
+                            hwnd,
+                            title
+                        );
                         let window = event_loop
                             .create_window(
                                 Window::default_attributes()
@@ -179,9 +202,11 @@ impl ApplicationHandler for Debug {
                     (size.width, size.height)
                 };
 
-                let display_handle = window.display_handle().unwrap();
-                let context = SoftContext::new(display_handle).unwrap();
-                let mut surface = Surface::new(&context, window).unwrap();
+                let context = self
+                    .context
+                    .as_ref()
+                    .expect("Context should be initialized");
+                let mut surface = Surface::new(context, window).unwrap();
                 if let (Some(nw), Some(nh)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
                     surface.resize(nw, nh).unwrap();
                 }
@@ -194,12 +219,32 @@ impl ApplicationHandler for Debug {
                     buffer: &mut buffer,
                     width,
                 };
+
                 if is_debug_window {
-                    let text_style = MonoTextStyle::new(&FONT_6X10, Rgb888::WHITE);
-                    let label_style = MonoTextStyle::new(&FONT_6X10, Rgb888::YELLOW);
-                    let hl_style = MonoTextStyle::new(&FONT_6X10, Rgb888::CYAN);
-                    let style_w = MonoTextStyle::new(&FONT_6X10, Rgb888::WHITE);
-                    let style_y = MonoTextStyle::new(&FONT_6X10, Rgb888::YELLOW);
+                    // TTF 폰트 초기화 (한글 지원)
+                    let ttf_font = TTF_FONT.get_or_init(|| {
+                        let data = FONT_DATA.get_or_init(|| {
+                            let path = "Dotum.ttf";
+                            std::fs::read(path).unwrap_or_else(|_| Vec::new()).leak()
+                        });
+                        TtfFont::try_from_bytes(data).expect("Failed to load font")
+                    });
+
+                    let style_w = FontTextStyleBuilder::new(ttf_font.clone())
+                        .font_size(12)
+                        .text_color(Rgb888::WHITE)
+                        .anti_aliasing_color(Rgb888::BLACK)
+                        .build();
+                    let style_y = FontTextStyleBuilder::new(ttf_font.clone())
+                        .font_size(12)
+                        .text_color(Rgb888::YELLOW)
+                        .anti_aliasing_color(Rgb888::BLACK)
+                        .build();
+                    let style_c = FontTextStyleBuilder::new(ttf_font.clone())
+                        .font_size(12)
+                        .text_color(Rgb888::CYAN)
+                        .anti_aliasing_color(Rgb888::BLACK)
+                        .build();
 
                     if let Some(state) = self.cpu_state.as_ref() {
                         // 그리기 로직
@@ -209,34 +254,34 @@ impl ApplicationHandler for Debug {
                         ];
                         let mut y = 20;
 
-                        Text::new("REGISTERS", Point::new(10, y), label_style)
+                        Text::new("REGISTERS", Point::new(10, y), style_y.clone())
                             .draw(&mut display)
                             .ok();
                         y += 15;
 
                         for (i, val) in state.regs.iter().enumerate() {
-                            let color = if i == 8 { hl_style } else { text_style }; // EIP 강조
+                            let style = if i == 8 { style_c.clone() } else { style_w.clone() }; // EIP 강조
                             let text = format!("{}: 0x{:08x}", reg_names[i], val);
-                            Text::new(&text, Point::new(10, y), color)
+                            Text::new(&text, Point::new(10, y), style)
                                 .draw(&mut display)
                                 .ok();
-                            y += 12;
+                            y += 13;
                         }
 
                         // 다음 명령어 출력
                         y += 10;
-                        Text::new("NEXT OP:", Point::new(10, y), label_style)
+                        Text::new("NEXT OP:", Point::new(10, y), style_y.clone())
                             .draw(&mut display)
                             .ok();
                         y += 15;
-                        Text::new(&state.next_instr, Point::new(10, y), hl_style)
+                        Text::new(&state.next_instr, Point::new(10, y), style_c.clone())
                             .draw(&mut display)
                             .ok();
 
                         // 스택 뷰 출력 (오른쪽)
                         let stack_x = 200;
                         let mut stack_y = 20;
-                        Text::new("STACK (TOP 10)", Point::new(stack_x, stack_y), label_style)
+                        Text::new("STACK (TOP 10)", Point::new(stack_x, stack_y), style_y.clone())
                             .draw(&mut display)
                             .ok();
                         stack_y += 15;
@@ -244,10 +289,10 @@ impl ApplicationHandler for Debug {
                         for (addr, val) in &state.stack {
                             let mark = if *addr == state.regs[7] { "<- ESP" } else { "" };
                             let text = format!("0x{:08x}: 0x{:08x} {}", addr, val, mark);
-                            Text::new(&text, Point::new(stack_x, stack_y), text_style)
+                            Text::new(&text, Point::new(stack_x, stack_y), style_w.clone())
                                 .draw(&mut display)
                                 .ok();
-                            stack_y += 12;
+                            stack_y += 13;
                         }
                         let mode_str = if self.auto_running {
                             "[AUTO-RUN]"
@@ -255,9 +300,13 @@ impl ApplicationHandler for Debug {
                             "[STEP]"
                         };
                         let mode_color = if self.auto_running {
-                            MonoTextStyle::new(&FONT_6X10, Rgb888::new(0, 255, 128))
+                            FontTextStyleBuilder::new(ttf_font.clone())
+                                .font_size(12)
+                                .text_color(Rgb888::new(0, 255, 128))
+                                .anti_aliasing_color(Rgb888::BLACK)
+                                .build()
                         } else {
-                            style_y
+                            style_y.clone()
                         };
                         Text::new(
                             &format!(
@@ -270,7 +319,7 @@ impl ApplicationHandler for Debug {
                         .draw(&mut display)
                         .ok();
                     } else {
-                        Text::new("Waiting...", Point::new(10, 20), style_w)
+                        Text::new("Waiting for CPU state...", Point::new(10, 20), style_w.clone())
                             .draw(&mut display)
                             .ok();
                     }
@@ -287,8 +336,13 @@ impl ApplicationHandler for Debug {
                     if let Some(buf) = crate::LOG_BUFFER.get() {
                         if let Ok(b) = buf.try_lock() {
                             let lines_to_show = 14;
-                            let start_idx = b.len().saturating_sub(lines_to_show);
-                            for line in b.iter().skip(start_idx) {
+                            let total_logs = b.len();
+
+                            // 스크롤 오프셋을 고려하여 보여줄 범위 계산
+                            let end_idx = total_logs.saturating_sub(self.log_scroll_offset);
+                            let start_idx = end_idx.saturating_sub(lines_to_show);
+
+                            for line in b.iter().skip(start_idx).take(end_idx - start_idx) {
                                 // Trim the line if it's too long
                                 let max_len = 130;
                                 let text = if line.len() > max_len {
@@ -296,16 +350,31 @@ impl ApplicationHandler for Debug {
                                 } else {
                                     line.clone()
                                 };
-                                Text::new(&text, Point::new(10, log_y), style_w)
+
+                                // 한글을 위해 TTF 스타일 사용
+                                Text::new(&text, Point::new(10, log_y), style_w.clone())
                                     .draw(&mut display)
                                     .ok();
-                                log_y += 12;
+
+                                log_y += 13;
                             }
                         }
                     }
                 } else {
-                    // emulated window content (currently just a placeholder)
-                    let style_w = MonoTextStyle::new(&FONT_6X10, Rgb888::WHITE);
+                    // emulated window content
+                    let ttf_font = TTF_FONT.get_or_init(|| {
+                        let data = FONT_DATA.get_or_init(|| {
+                            let path = "Dotum.ttf";
+                            std::fs::read(path).unwrap_or_else(|_| Vec::new()).leak()
+                        });
+                        TtfFont::try_from_bytes(data).expect("Failed to load font")
+                    });
+                    let style_w = FontTextStyleBuilder::new(ttf_font.clone())
+                        .font_size(12)
+                        .text_color(Rgb888::WHITE)
+                        .anti_aliasing_color(Rgb888::BLACK)
+                        .build();
+
                     let hwnd = self.id_to_hwnd.get(&id).cloned().unwrap_or(0);
                     Text::new(&format!("HWND {:#x}", hwnd), Point::new(10, 20), style_w)
                         .draw(&mut display)
@@ -342,6 +411,53 @@ impl ApplicationHandler for Debug {
                 }
                 if PhysicalKey::Code(KeyCode::Escape) == event.physical_key {
                     event_loop.exit();
+                }
+
+                // Log Scrolling
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::PageUp) => {
+                        self.log_scroll_offset = (self.log_scroll_offset + 10).min(980);
+                        if let Some(w) = self.windows.get(&id) {
+                            w.request_redraw();
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::PageDown) => {
+                        self.log_scroll_offset = self.log_scroll_offset.saturating_sub(10);
+                        if let Some(w) = self.windows.get(&id) {
+                            w.request_redraw();
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::Home) => {
+                        self.log_scroll_offset = 980;
+                        if let Some(w) = self.windows.get(&id) {
+                            w.request_redraw();
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::End) => {
+                        self.log_scroll_offset = 0;
+                        if let Some(w) = self.windows.get(&id) {
+                            w.request_redraw();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    MouseScrollDelta::PixelDelta(pos) => (pos.y / 12.0) as i32,
+                };
+                if lines > 0 {
+                    self.log_scroll_offset = (self.log_scroll_offset + lines as usize).min(980);
+                } else {
+                    self.log_scroll_offset =
+                        self.log_scroll_offset.saturating_sub((-lines) as usize);
+                }
+                if let Some(id) = self.debug_window_id {
+                    if let Some(window) = self.windows.get(&id) {
+                        window.request_redraw();
+                    }
                 }
             }
             WindowEvent::CloseRequested => {

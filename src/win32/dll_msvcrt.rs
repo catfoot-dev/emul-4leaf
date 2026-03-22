@@ -2,8 +2,9 @@ use unicorn_engine::RegisterX86;
 use unicorn_engine::Unicorn;
 
 use crate::helper::UnicornHelper;
-use std::sync::atomic::Ordering;
 use crate::win32::{ApiHookResult, Win32Context, callee_result, caller_result};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::atomic::Ordering;
 
 /// `MSVCRT.dll` 프록시 구현 모듈
 ///
@@ -114,8 +115,8 @@ impl DllMSVCRT {
         let s1_addr = uc.read_arg(0);
         let s2_addr = uc.read_arg(1);
         let n = uc.read_arg(2) as usize;
-        let s1 = uc.read_string(s1_addr as u64);
-        let s2 = uc.read_string(s2_addr as u64);
+        let s1 = uc.read_euc_kr(s1_addr as u64);
+        let s2 = uc.read_euc_kr(s2_addr as u64);
         let r1: Vec<u8> = s1.bytes().take(n).collect();
         let r2: Vec<u8> = s2.bytes().take(n).collect();
         let result = r1.cmp(&r2) as i32;
@@ -134,8 +135,8 @@ impl DllMSVCRT {
     pub fn strcoll(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s1_addr = uc.read_arg(0);
         let s2_addr = uc.read_arg(1);
-        let s1 = uc.read_string(s1_addr as u64);
-        let s2 = uc.read_string(s2_addr as u64);
+        let s1 = uc.read_euc_kr(s1_addr as u64);
+        let s2 = uc.read_euc_kr(s2_addr as u64);
         let result = s1.cmp(&s2) as i32;
         crate::emu_log!("[MSVCRT] strcoll(\"{}\", \"{}\") -> {}", s1, s2, result);
         Some((2, Some(result)))
@@ -147,7 +148,7 @@ impl DllMSVCRT {
         let dst = uc.read_arg(0);
         let src = uc.read_arg(1);
         let n = uc.read_arg(2) as usize;
-        let s = uc.read_string(src as u64);
+        let s = uc.read_euc_kr(src as u64);
         let mut bytes: Vec<u8> = s.bytes().take(n).collect();
         while bytes.len() < n {
             bytes.push(0);
@@ -162,8 +163,8 @@ impl DllMSVCRT {
     pub fn strstr(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s1_addr = uc.read_arg(0);
         let s2_addr = uc.read_arg(1);
-        let s1 = uc.read_string(s1_addr as u64);
-        let s2 = uc.read_string(s2_addr as u64);
+        let s1 = uc.read_euc_kr(s1_addr as u64);
+        let s2 = uc.read_euc_kr(s2_addr as u64);
         let result = s1.find(&s2).map(|pos| s1_addr + pos as u32).unwrap_or(0);
         crate::emu_log!("[MSVCRT] strstr(\"{}\", \"{}\") -> {:#x}", s1, s2, result);
         Some((2, Some(result as i32)))
@@ -174,7 +175,7 @@ impl DllMSVCRT {
     pub fn strrchr(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s_addr = uc.read_arg(0);
         let ch = uc.read_arg(1) as u8 as char;
-        let s = uc.read_string(s_addr as u64);
+        let s = uc.read_euc_kr(s_addr as u64);
         let result = s.rfind(ch).map(|pos| s_addr + pos as u32).unwrap_or(0);
         crate::emu_log!("[MSVCRT] strrchr(\"{}\", '{}') -> {:#x}", s, ch, result);
         Some((2, Some(result as i32)))
@@ -191,7 +192,7 @@ impl DllMSVCRT {
         let s_addr = uc.read_arg(0);
         let _endptr = uc.read_arg(1);
         let base = uc.read_arg(2);
-        let s = uc.read_string(s_addr as u64);
+        let s = uc.read_euc_kr(s_addr as u64);
         let result = u32::from_str_radix(s.trim(), base as u32).unwrap_or(0);
         crate::emu_log!("[MSVCRT] strtoul(\"{}\", ..., {}) -> {}", s, base, result);
         Some((3, Some(result as i32)))
@@ -202,8 +203,8 @@ impl DllMSVCRT {
     pub fn _stricmp(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s1_addr = uc.read_arg(0);
         let s2_addr = uc.read_arg(1);
-        let s1 = uc.read_string(s1_addr as u64).to_lowercase();
-        let s2 = uc.read_string(s2_addr as u64).to_lowercase();
+        let s1 = uc.read_euc_kr(s1_addr as u64).to_lowercase();
+        let s2 = uc.read_euc_kr(s2_addr as u64).to_lowercase();
         let result = s1.cmp(&s2) as i32;
         crate::emu_log!("[MSVCRT] _stricmp(\"{}\", \"{}\") -> {}", s1, s2, result);
         Some((2, Some(result)))
@@ -220,13 +221,13 @@ impl DllMSVCRT {
         let s2_addr = uc.read_arg(1);
         let n = uc.read_arg(2) as usize;
         let s1: String = uc
-            .read_string(s1_addr as u64)
+            .read_euc_kr(s1_addr as u64)
             .chars()
             .take(n)
             .collect::<String>()
             .to_lowercase();
         let s2: String = uc
-            .read_string(s2_addr as u64)
+            .read_euc_kr(s2_addr as u64)
             .chars()
             .take(n)
             .collect::<String>()
@@ -278,7 +279,7 @@ impl DllMSVCRT {
     // 역할: 문자열을 정수로 변환
     pub fn atoi(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let s_addr = uc.read_arg(0);
-        let s = uc.read_string(s_addr as u64);
+        let s = uc.read_euc_kr(s_addr as u64);
         let result = s.trim().parse::<i32>().unwrap_or(0);
         crate::emu_log!("[MSVCRT] atoi(\"{}\") -> {}", s, result);
         Some((1, Some(result)))
@@ -548,7 +549,7 @@ impl DllMSVCRT {
         fmt_addr: u32,
         first_vararg_index: usize,
     ) -> (String, usize) {
-        let fmt = uc.read_string(fmt_addr as u64);
+        let fmt = uc.read_euc_kr(fmt_addr as u64);
         let mut result = String::new();
         let mut arg_idx = first_vararg_index;
         let mut chars = fmt.chars().peekable();
@@ -698,7 +699,7 @@ impl DllMSVCRT {
                         let str_addr = uc.read_arg(arg_idx);
                         arg_idx += 1;
                         if str_addr != 0 {
-                            let s = uc.read_string(str_addr as u64);
+                            let s = uc.read_euc_kr(str_addr as u64);
                             result.push_str(&s);
                         } else {
                             result.push_str("(null)");
@@ -769,7 +770,7 @@ impl DllMSVCRT {
         let fmt_addr = uc.read_arg(2);
         // va_list ptr at arg(3) - 에뮬레이터에서는 스택 기반이므로 직접 파싱 불가
         // 간략 구현: 포맷 문자열만 복사
-        let fmt = uc.read_string(fmt_addr as u64);
+        let fmt = uc.read_euc_kr(fmt_addr as u64);
         let mut buf = fmt.as_bytes().to_vec();
         buf.push(0);
         uc.mem_write(buf_addr as u64, &buf).unwrap();
@@ -787,7 +788,7 @@ impl DllMSVCRT {
     pub fn vsprintf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let buf_addr = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
-        let fmt = uc.read_string(fmt_addr as u64);
+        let fmt = uc.read_euc_kr(fmt_addr as u64);
         let mut buf = fmt.as_bytes().to_vec();
         buf.push(0);
         uc.mem_write(buf_addr as u64, &buf).unwrap();
@@ -800,7 +801,7 @@ impl DllMSVCRT {
     pub fn sscanf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let _buf_addr = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
-        let fmt = uc.read_string(fmt_addr as u64);
+        let fmt = uc.read_euc_kr(fmt_addr as u64);
         let vararg_count = DllMSVCRT::count_scanf_varargs(&fmt);
         let total_args = 2 + vararg_count; // buf + fmt + varargs
         crate::emu_log!("[MSVCRT] sscanf(..., \"{}\") -> args={}", fmt, total_args);
@@ -812,7 +813,7 @@ impl DllMSVCRT {
     pub fn fprintf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let _stream = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
-        let fmt = uc.read_string(fmt_addr as u64);
+        let fmt = uc.read_euc_kr(fmt_addr as u64);
         let vararg_count = DllMSVCRT::count_printf_varargs(&fmt);
         let total_args = 2 + vararg_count; // stream + fmt + varargs
         crate::emu_log!("[MSVCRT] fprintf(..., \"{}\") -> args={}", fmt, total_args);
@@ -824,7 +825,7 @@ impl DllMSVCRT {
     pub fn fscanf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let _stream = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
-        let fmt = uc.read_string(fmt_addr as u64);
+        let fmt = uc.read_euc_kr(fmt_addr as u64);
         let vararg_count = DllMSVCRT::count_scanf_varargs(&fmt);
         let total_args = 2 + vararg_count; // stream + fmt + varargs
         crate::emu_log!("[MSVCRT] fscanf(..., \"{}\") -> args={}", fmt, total_args);
@@ -836,87 +837,405 @@ impl DllMSVCRT {
     // =========================================================
     // API: FILE* fopen(const char* filename, const char* mode)
     // 역할: 파일을 오픈
-    pub fn fopen(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] fopen(...)");
-        Some((2, Some(0))) // cdecl, NULL 반환
+    pub fn fopen(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let filename_addr = uc.read_arg(0);
+        let mode_addr = uc.read_arg(1);
+        let filename = uc.read_euc_kr(filename_addr as u64);
+        let mode = uc.read_euc_kr(mode_addr as u64);
+
+        let mut options = std::fs::OpenOptions::new();
+        // Parse mode: r, w, a, +, b, t
+
+        for c in mode.chars() {
+            match c {
+                'r' => {
+                    options.read(true);
+                }
+                'w' => {
+                    options.write(true).create(true).truncate(true);
+                }
+                'a' => {
+                    options.append(true).create(true);
+                }
+                '+' => {
+                    options.read(true).write(true);
+                }
+                _ => {}
+            }
+        }
+
+        let mut file_result = options.open(&filename);
+        if file_result.is_err() && !filename.contains('/') && !filename.contains('\\') {
+            let alt_path = format!("Resources/{}", filename);
+            file_result = options.open(&alt_path);
+        }
+
+        match file_result {
+            Ok(file) => {
+                let context = uc.get_data();
+                let handle = context.alloc_handle();
+                context.files.lock().unwrap().insert(handle, file);
+                crate::emu_log!(
+                    "[MSVCRT] fopen(\"{}\", \"{}\") -> handle {:#x}",
+                    filename,
+                    mode,
+                    handle
+                );
+                Some((2, Some(handle as i32)))
+            }
+            Err(e) => {
+                crate::emu_log!(
+                    "[MSVCRT] fopen(\"{}\", \"{}\") failed: {:?}",
+                    filename,
+                    mode,
+                    e
+                );
+                Some((2, Some(0)))
+            }
+        }
     }
 
     // API: int fclose(FILE* stream)
     // 역할: 파일을 닫음
-    pub fn fclose(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] fclose(...)");
-        Some((1, Some(0))) // cdecl
+    pub fn fclose(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let stream_handle = uc.read_arg(0);
+        let context = uc.get_data();
+        let mut files = context.files.lock().unwrap();
+        if files.remove(&(stream_handle as u32)).is_some() {
+            crate::emu_log!("[MSVCRT] fclose(handle {:#x})", stream_handle);
+            Some((1, Some(0)))
+        } else {
+            crate::emu_log!("[MSVCRT] fclose(handle {:#x}) failed", stream_handle);
+            Some((1, Some(-1))) // EOF
+        }
     }
 
     // API: size_t fread(void* buffer, size_t size, size_t count, FILE* stream)
     // 역할: 스트림에서 데이터를 읽음
-    pub fn fread(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] fread(...)");
-        Some((4, Some(0))) // cdecl
+    pub fn fread(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let buffer_addr = uc.read_arg(0);
+        let size = uc.read_arg(1);
+        let count = uc.read_arg(2);
+        let stream_handle = uc.read_arg(3);
+        let total_size = (size * count) as usize;
+
+        if total_size == 0 {
+            return Some((4, Some(0)));
+        }
+
+        let mut data = vec![0u8; total_size];
+        let bytes_read = {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+                file.read(&mut data).unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        if bytes_read > 0 {
+            uc.mem_write(buffer_addr as u64, &data[..bytes_read])
+                .unwrap();
+        }
+
+        let actual_count = (bytes_read as u32 / size as u32) as i32;
+        crate::emu_log!(
+            "[MSVCRT] fread(handle {:#x}, size={}, count={}) -> {}",
+            stream_handle,
+            size,
+            count,
+            actual_count
+        );
+        Some((4, Some(actual_count)))
     }
 
     // API: size_t fwrite(const void* buffer, size_t size, size_t count, FILE* stream)
     // 역할: 스트림에 데이터를 씀
-    pub fn fwrite(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] fwrite(...)");
-        Some((4, Some(0))) // cdecl
+    pub fn fwrite(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let buffer_addr = uc.read_arg(0);
+        let size = uc.read_arg(1);
+        let count = uc.read_arg(2);
+        let stream_handle = uc.read_arg(3);
+        let total_size = (size * count) as usize;
+
+        if total_size == 0 {
+            return Some((4, Some(0)));
+        }
+
+        let data = uc.mem_read_as_vec(buffer_addr as u64, total_size).unwrap();
+        let bytes_written = {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+                file.write(&data).unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        let actual_count = (bytes_written as u32 / size as u32) as i32;
+        crate::emu_log!(
+            "[MSVCRT] fwrite(handle {:#x}, size={}, count={}) -> {}",
+            stream_handle,
+            size,
+            count,
+            actual_count
+        );
+        Some((4, Some(actual_count)))
     }
 
     // API: int fseek(FILE* stream, long offset, int origin)
     // 역할: 파일 포인터를 특정 위치로 이동
-    pub fn fseek(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] fseek(...)");
-        Some((3, Some(0))) // cdecl
+    pub fn fseek(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let stream_handle = uc.read_arg(0);
+        let offset = uc.read_arg(1) as i32 as i64; // Sign-extend long
+        let origin = uc.read_arg(2); // 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+
+        let pos = match origin {
+            0 => SeekFrom::Start(offset as u64),
+            1 => SeekFrom::Current(offset),
+            2 => SeekFrom::End(offset),
+            _ => return Some((3, Some(-1))),
+        };
+
+        let context = uc.get_data();
+        let mut files = context.files.lock().unwrap();
+        if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+            match file.seek(pos) {
+                Ok(new_pos) => {
+                    crate::emu_log!(
+                        "[MSVCRT] fseek(handle {:#x}, offset={}, origin={}) -> pos {}",
+                        stream_handle,
+                        offset,
+                        origin,
+                        new_pos
+                    );
+                    Some((3, Some(0)))
+                }
+                Err(e) => {
+                    crate::emu_log!(
+                        "[MSVCRT] fseek(handle {:#x}) failed: {:?}",
+                        stream_handle,
+                        e
+                    );
+                    Some((3, Some(-1)))
+                }
+            }
+        } else {
+            crate::emu_log!(
+                "[MSVCRT] fseek(handle {:#x}) - handle not found",
+                stream_handle
+            );
+            Some((3, Some(-1)))
+        }
     }
 
     // API: long ftell(FILE* stream)
     // 역할: 현재 파일 포인터의 위치를 가져옴
-    pub fn ftell(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] ftell(...)");
-        Some((1, Some(0))) // cdecl
+    pub fn ftell(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let stream_handle = uc.read_arg(0);
+        let context = uc.get_data();
+        let mut files = context.files.lock().unwrap();
+        if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+            match file.seek(SeekFrom::Current(0)) {
+                Ok(pos) => {
+                    crate::emu_log!("[MSVCRT] ftell(handle {:#x}) -> {}", stream_handle, pos);
+                    Some((1, Some(pos as i32)))
+                }
+                Err(_) => Some((1, Some(-1))),
+            }
+        } else {
+            crate::emu_log!(
+                "[MSVCRT] ftell(handle {:#x}) - handle not found",
+                stream_handle
+            );
+            Some((1, Some(-1)))
+        }
     }
 
     // API: int fflush(FILE* stream)
     // 역할: 스트림의 버퍼를 플러시(비움)
-    pub fn fflush(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] fflush(...)");
-        Some((1, Some(0))) // cdecl
+    pub fn fflush(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let stream_handle = uc.read_arg(0);
+        let context = uc.get_data();
+        let mut files = context.files.lock().unwrap();
+        if let Some(file) = files.get_mut(&(stream_handle as u32)) {
+            file.flush().unwrap();
+            Some((1, Some(0)))
+        } else {
+            Some((1, Some(-1)))
+        }
     }
 
     // Low-level I/O
     // API: int _open(const char* filename, int oflag, ...)
     // 역할: 저수준 파일 기술자를 오픈
-    pub fn _open(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _open(...)");
-        Some((2, Some(-1))) // cdecl, 에러
+    pub fn _open(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let filename_addr = uc.read_arg(0);
+        let oflag = uc.read_arg(1);
+        let filename = uc.read_euc_kr(filename_addr as u64);
+
+        let mut options = std::fs::OpenOptions::new();
+        // oflag (from fcntl.h/io.h): O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_APPEND=8, O_CREAT=0x100, O_TRUNC=0x200
+        if oflag & 0x1 != 0 {
+            options.write(true);
+        } else if oflag & 0x2 != 0 {
+            options.read(true).write(true);
+        } else {
+            options.read(true);
+        }
+
+        if oflag & 0x0008 != 0 {
+            options.append(true);
+        }
+        if oflag & 0x0100 != 0 {
+            options.create(true);
+        }
+        if oflag & 0x0200 != 0 {
+            options.truncate(true);
+        }
+
+        let mut file_result = options.open(&filename);
+        if file_result.is_err() && !filename.contains('/') && !filename.contains('\\') {
+            let alt_path = format!("Resources/{}", filename);
+            file_result = options.open(&alt_path);
+        }
+
+        match file_result {
+            Ok(file) => {
+                let context = uc.get_data();
+                let handle = context.alloc_handle();
+                context.files.lock().unwrap().insert(handle, file);
+                crate::emu_log!(
+                    "[MSVCRT] _open(\"{}\", {:#x}) -> fd {:#x}",
+                    filename,
+                    oflag,
+                    handle
+                );
+                Some((3, Some(handle as i32))) // cdecl, may have pmode
+            }
+            Err(e) => {
+                crate::emu_log!(
+                    "[MSVCRT] _open(\"{}\", {:#x}) failed: {:?}",
+                    filename,
+                    oflag,
+                    e
+                );
+                Some((3, Some(-1)))
+            }
+        }
     }
 
     // API: int _close(int fd)
     // 역할: 파일 기술자를 닫음
-    pub fn _close(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _close(...)");
-        Some((1, Some(0))) // cdecl
+    pub fn _close(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let fd = uc.read_arg(0) as u32;
+        let context = uc.get_data();
+        if context.files.lock().unwrap().remove(&fd).is_some() {
+            crate::emu_log!("[MSVCRT] _close(fd {:#x})", fd);
+            Some((1, Some(0)))
+        } else {
+            crate::emu_log!("[MSVCRT] _close(fd {:#x}) failed", fd);
+            Some((1, Some(-1)))
+        }
     }
 
     // API: int _read(int fd, void* buffer, unsigned int count)
     // 역할: 파일 기술자에서 데이터를 읽음
-    pub fn _read(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _read(...)");
-        Some((3, Some(-1))) // cdecl
+    pub fn _read(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let fd = uc.read_arg(0) as u32;
+        let buffer_addr = uc.read_arg(1);
+        let count = uc.read_arg(2);
+
+        let mut data = vec![0u8; count as usize];
+        let bytes_read = {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            if let Some(file) = files.get_mut(&fd) {
+                file.read(&mut data).unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        if bytes_read > 0 {
+            uc.mem_write(buffer_addr as u64, &data[..bytes_read])
+                .unwrap();
+        }
+
+        crate::emu_log!(
+            "[MSVCRT] _read(fd {:#x}, count={}) -> bytes {}",
+            fd,
+            count,
+            bytes_read
+        );
+        Some((3, Some(bytes_read as i32)))
     }
 
     // API: int _write(int fd, const void* buffer, unsigned int count)
     // 역할: 파일 기술자에 데이터를 씀
-    pub fn _write(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _write(...)");
-        Some((3, Some(-1))) // cdecl
+    pub fn _write(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let fd = uc.read_arg(0) as u32;
+        let buffer_addr = uc.read_arg(1);
+        let count = uc.read_arg(2);
+
+        let data = uc
+            .mem_read_as_vec(buffer_addr as u64, count as usize)
+            .unwrap();
+        let bytes_written = {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            if let Some(file) = files.get_mut(&fd) {
+                file.write(&data).unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        crate::emu_log!(
+            "[MSVCRT] _write(fd {:#x}, count={}) -> bytes {}",
+            fd,
+            count,
+            bytes_written
+        );
+        Some((3, Some(bytes_written as i32)))
     }
 
     // API: long _lseek(int fd, long offset, int origin)
     // 역할: 파일 기술자의 읽기/쓰기 위치를 이동
-    pub fn _lseek(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _lseek(...)");
-        Some((3, Some(-1))) // cdecl
+    pub fn _lseek(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let fd = uc.read_arg(0) as u32;
+        let offset = uc.read_arg(1) as i32 as i64;
+        let origin = uc.read_arg(2);
+
+        let pos = match origin {
+            0 => SeekFrom::Start(offset as u64),
+            1 => SeekFrom::Current(offset),
+            2 => SeekFrom::End(offset),
+            _ => return Some((3, Some(-1))),
+        };
+
+        let context = uc.get_data();
+        let mut files = context.files.lock().unwrap();
+        if let Some(file) = files.get_mut(&fd) {
+            match file.seek(pos) {
+                Ok(new_pos) => {
+                    crate::emu_log!(
+                        "[MSVCRT] _lseek(fd {:#x}, offset={}, origin={}) -> pos {}",
+                        fd,
+                        offset,
+                        origin,
+                        new_pos
+                    );
+                    Some((3, Some(new_pos as i32)))
+                }
+                Err(_) => Some((3, Some(-1))),
+            }
+        } else {
+            crate::emu_log!("[MSVCRT] _lseek(fd {:#x}) - fd not found", fd);
+            Some((3, Some(-1)))
+        }
     }
 
     // API: int _pipe(int* phandles, unsigned int size, int oflag)
@@ -928,9 +1247,25 @@ impl DllMSVCRT {
 
     // API: int _stat(const char* filename, struct _stat* buffer)
     // 역할: 파일의 상태 정보를 가져옴
-    pub fn _stat(_uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        crate::emu_log!("[MSVCRT] _stat(...)");
-        Some((2, Some(-1))) // cdecl
+    pub fn _stat(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+        let filename_addr = uc.read_arg(0);
+        let buffer_addr = uc.read_arg(1);
+        let filename = uc.read_euc_kr(filename_addr as u64);
+
+        if let Ok(metadata) = std::fs::metadata(&filename) {
+            let mut stat_buf = vec![0u8; 64];
+            let size = metadata.len() as u32;
+            let mode = if metadata.is_dir() { 0x4000 } else { 0x8000 } | 0o666;
+
+            // Simplified VC6 _stat layout
+            stat_buf[4..6].copy_from_slice(&(mode as u16).to_le_bytes());
+            stat_buf[14..18].copy_from_slice(&size.to_le_bytes());
+
+            uc.mem_write(buffer_addr as u64, &stat_buf).unwrap();
+            Some((2, Some(0)))
+        } else {
+            Some((2, Some(-1)))
+        }
     }
 
     // =========================================================

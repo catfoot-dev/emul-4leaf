@@ -1,9 +1,9 @@
 use unicorn_engine::Unicorn;
 
-use std::sync::atomic::Ordering;
 use crate::helper::UnicornHelper;
 use crate::packet_logger::PacketDirection;
 use crate::win32::{ApiHookResult, SocketState, Win32Context, callee_result};
+use std::sync::atomic::Ordering;
 
 /// `WS2_32.dll` 프록시 구현 모듈
 ///
@@ -95,7 +95,7 @@ impl DllWS2_32 {
             "Ordinal_8" => {
                 // gethostbyname(const char*)
                 let name_addr = uc.read_arg(0);
-                let name = uc.read_string(name_addr as u64);
+                let name = uc.read_euc_kr(name_addr as u64);
                 crate::emu_log!(
                     "[WS2_32] gethostbyname(\"{}\") -> returning localhost",
                     name
@@ -150,7 +150,7 @@ impl DllWS2_32 {
             "Ordinal_12" => {
                 // inet_addr(const char*)
                 let addr_str_ptr = uc.read_arg(0);
-                let addr_str = uc.read_string(addr_str_ptr as u64);
+                let addr_str = uc.read_euc_kr(addr_str_ptr as u64);
                 crate::emu_log!("[WS2_32] inet_addr(\"{}\") [PACKET]", addr_str);
                 let parts: Vec<u8> = addr_str.split('.').filter_map(|p| p.parse().ok()).collect();
                 let result = if parts.len() == 4 {
@@ -211,7 +211,9 @@ impl DllWS2_32 {
                         .mem_read_as_vec(buf_addr as u64, len as usize)
                         .unwrap_or_default();
                     let ctx = uc.get_data();
-                    ctx.packet_logger.lock().unwrap()
+                    ctx.packet_logger
+                        .lock()
+                        .unwrap()
                         .log(PacketDirection::Send, sock, &data);
                 }
                 Some((4, Some(len as i32)))

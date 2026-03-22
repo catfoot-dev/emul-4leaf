@@ -299,7 +299,7 @@ impl DllMSVCP60 {
                     String::from("(null)")
                 };
                 crate::emu_log!("[MSVCP60] std::operator<<(ostream&, const char*): {}", text);
-                Some((0, Some(os_ptr as i32))) // Return ostream&
+                Some((2, Some(os_ptr as i32))) // Return ostream&
             }
 
             // API: std::flush(std::ostream&)
@@ -307,7 +307,7 @@ impl DllMSVCP60 {
             "?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z" => {
                 let os_ptr = uc.read_arg(0);
                 crate::emu_log!("[MSVCP60] std::flush(ostream&)");
-                Some((0, Some(os_ptr as i32))) // Return ostream&
+                Some((1, Some(os_ptr as i32))) // Return ostream&
             }
 
             _ => {

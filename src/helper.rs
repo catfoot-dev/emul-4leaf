@@ -401,9 +401,9 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                     let func_address = {
                         let context = uc.get_data();
                         let dll_modules = context.dll_modules.lock().unwrap();
-                        dll_modules.get(dll_name).and_then(|dll| {
-                            dll.exports.get(func_name).copied()
-                        })
+                        dll_modules
+                            .get(dll_name)
+                            .and_then(|dll| dll.exports.get(func_name).copied())
                     };
 
                     if let Some(func_address) = func_address {
@@ -415,9 +415,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                             let pc = uc.reg_read(RegisterX86::EIP).unwrap();
                             crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
                         } else {
-                            crate::emu_log!(
-                                "[*] {dll_name}!{func_name} finished successfully."
-                            );
+                            crate::emu_log!("[*] {dll_name}!{func_name} finished successfully.");
                         }
 
                         return;
@@ -511,7 +509,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
             if is_auto {
                 // === 자동 실행 모드 ===
-                if inst_count % 200 == 0 {
+                if inst_count % 10000 == 0 {
                     send_state = true;
                 }
 
@@ -810,15 +808,20 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
                         // 1. 의존성 DLL에 있는 함수인가?
                         let context = self.get_data();
-                        context.dll_modules.lock().unwrap().iter().find(|(name, dll)| {
-                            if name.eq_ignore_ascii_case(&dll_name) == false {
-                                return false;
-                            }
-                            if let Some(real_addr) = dll.exports.get(&func_name) {
-                                final_addr = *real_addr;
-                            }
-                            return true;
-                        });
+                        context
+                            .dll_modules
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|(name, dll)| {
+                                if name.eq_ignore_ascii_case(&dll_name) == false {
+                                    return false;
+                                }
+                                if let Some(real_addr) = dll.exports.get(&func_name) {
+                                    final_addr = *real_addr;
+                                }
+                                return true;
+                            });
                         // if let Some(real_addr) = dll.exports.get(&func_name) {
                         //     final_addr = *real_addr;
                         // }
@@ -831,7 +834,8 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
                         // 2. 없다면 Fake Address 할당 (전역 카운터 사용)
                         if final_addr == 0 {
-                            final_addr = context.import_address.fetch_add(4, Ordering::SeqCst) as u64;
+                            final_addr =
+                                context.import_address.fetch_add(4, Ordering::SeqCst) as u64;
                         }
 
                         context
@@ -861,7 +865,11 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
         {
             let context = self.get_data();
-            context.dll_modules.lock().unwrap().insert(dll_name.clone(), target.clone());
+            context
+                .dll_modules
+                .lock()
+                .unwrap()
+                .insert(dll_name.clone(), target.clone());
         }
 
         Ok(())
@@ -903,10 +911,13 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
     fn run_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>) {
         crate::emu_log!("\n[*] Looking for '{func_name}' in {dll_name}...");
-        
+
         let func_address = {
             let context = self.get_data();
-            context.dll_modules.lock().unwrap()
+            context
+                .dll_modules
+                .lock()
+                .unwrap()
                 .get(dll_name)
                 .and_then(|module| module.exports.get(func_name).copied())
         };
@@ -977,24 +988,23 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
     }
 
     fn read_string(&self, addr: u64) -> String {
-        return self.read_euc_kr(addr);
-        // let mut chars = Vec::new();
-        // let mut curr = addr;
+        let mut chars = Vec::new();
+        let mut curr = addr;
 
-        // loop {
-        //     let byte = self.mem_read_as_vec(curr, 1).unwrap()[0];
-        //     if byte == 0 {
-        //         break;
-        //     } // NULL 문자 만나면 종료
-        //     chars.push(byte);
-        //     curr += 1;
+        loop {
+            let byte = self.mem_read_as_vec(curr, 1).unwrap()[0];
+            if byte == 0 {
+                break;
+            } // NULL 문자 만나면 종료
+            chars.push(byte);
+            curr += 1;
 
-        //     // 안전장치: 너무 길면 끊기 (예: 1KB)
-        //     if chars.len() > 1024 {
-        //         break;
-        //     }
-        // }
-        // String::from_utf8_lossy(&chars).to_string()
+            // 안전장치: 너무 길면 끊기 (예: 1KB)
+            if chars.len() > 1024 {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&chars).to_string()
     }
 
     fn write_string(&mut self, addr: u64, text: &str) {

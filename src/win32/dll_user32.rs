@@ -31,8 +31,8 @@ impl DllUSER32 {
                     let _hwnd = uc.read_arg(0);
                     let text_addr = uc.read_arg(1);
                     let caption_addr = uc.read_arg(2);
-                    let text = uc.read_string(text_addr as u64);
-                    let caption = uc.read_string(caption_addr as u64);
+                    let text = uc.read_euc_kr(text_addr as u64);
+                    let caption = uc.read_euc_kr(caption_addr as u64);
                     crate::emu_log!("[USER32] MessageBoxA(\"{}\", \"{}\")", caption, text);
                     Some((4, Some(1))) // IDOK
                 }
@@ -44,7 +44,7 @@ impl DllUSER32 {
                     let class_addr = uc.read_arg(0);
                     let wnd_proc = uc.read_u32(class_addr as u64 + 8);
                     let class_name_ptr = uc.read_u32(class_addr as u64 + 40);
-                    let class_name = uc.read_string(class_name_ptr as u64);
+                    let class_name = uc.read_euc_kr(class_name_ptr as u64);
                     let ctx = uc.get_data();
                     let atom = ctx.alloc_handle();
                     ctx.window_classes.lock().unwrap().insert(
@@ -70,7 +70,7 @@ impl DllUSER32 {
                     let class_addr = uc.read_arg(0);
                     let wnd_proc = uc.read_u32(class_addr as u64 + 4);
                     let class_name_ptr = uc.read_u32(class_addr as u64 + 36);
-                    let class_name = uc.read_string(class_name_ptr as u64);
+                    let class_name = uc.read_euc_kr(class_name_ptr as u64);
                     let ctx = uc.get_data();
                     let atom = ctx.alloc_handle();
                     ctx.window_classes.lock().unwrap().insert(
@@ -96,12 +96,12 @@ impl DllUSER32 {
                     let _ex_style = uc.read_arg(0);
                     let class_addr = uc.read_arg(1);
                     let title_addr = uc.read_arg(2);
-                    let _style = uc.read_arg(3);
+                    let style = uc.read_arg(3);
                     let x = uc.read_arg(4);
                     let y = uc.read_arg(5);
                     let width = uc.read_arg(6);
                     let height = uc.read_arg(7);
-                    let _parent = uc.read_arg(8);
+                    let parent = uc.read_arg(8);
                     let _menu = uc.read_arg(9);
                     let _instance = uc.read_arg(10);
                     let param = uc.read_arg(11);
@@ -116,10 +116,10 @@ impl DllUSER32 {
                     let class_name = if class_addr < 0x10000 {
                         format!("Atom_{}", class_addr)
                     } else {
-                        uc.read_string(class_addr as u64)
+                        uc.read_euc_kr(class_addr as u64)
                     };
                     let title = if title_addr != 0 {
-                        uc.read_string(title_addr as u64)
+                        uc.read_euc_kr(title_addr as u64)
                     } else {
                         String::new()
                     };
@@ -131,14 +131,18 @@ impl DllUSER32 {
                         y: y as i32,
                         width: width as i32,
                         height: height as i32,
-                        style: _style,
-                        parent: 0,
+                        style: style,
+                        parent: parent,
                         visible: false,
                         wnd_proc: 0,
                         user_data: 0,
                     };
 
-                    uc.get_data().win_frame.lock().unwrap().create_window(hwnd, window_state);
+                    uc.get_data()
+                        .win_frame
+                        .lock()
+                        .unwrap()
+                        .create_window(hwnd, window_state);
 
                     crate::emu_log!(
                         "[USER32] CreateWindowExA(\"{}\", \"{}\", param={:#x}) -> HWND {:#x}",
