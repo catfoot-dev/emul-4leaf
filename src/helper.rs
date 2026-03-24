@@ -2,6 +2,7 @@ use crate::{
     debug::common::{CpuContext, DebugCommand},
     win32::{LoadedDll, StackCleanup, Win32Context},
 };
+use chardetng::EncodingDetector;
 use encoding_rs::EUC_KR;
 use goblin::pe::PE;
 use std::{
@@ -13,6 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, Sender},
     },
+    u8, vec,
 };
 use unicorn_engine::{HookType, Prot, RegisterX86, Unicorn};
 
@@ -236,6 +238,14 @@ pub trait UnicornHelper {
     /// - `u32`: 해당 주소에 저장된 32비트 값
     fn read_u32(&self, addr: u64) -> u32;
 
+    /// 특정 메모리 주소에서 16비트(2바이트) 정수를 리틀 엔디안(Little Endian)으로 읽음
+    ///
+    /// # 인자
+    /// - `addr`: 읽고자 하는 메모리 주소
+    /// # 반환
+    /// - `u16`: 해당 주소에 저장된 16비트 값
+    fn read_u16(&self, addr: u64) -> u16;
+
     /// 특정 메모리 주소에 32비트(4바이트) 정수를 리틀 엔디안 방식으로 기록
     ///
     /// # 인자
@@ -321,6 +331,13 @@ pub trait UnicornHelper {
     /// # 반환
     /// - `u32`: 데이터가 복사된 힙의 32비트 주소
     fn alloc_bytes(&mut self, data: &[u8]) -> u32;
+
+    /// 대상 메모리에 32비트 정수 배열을 리틀 엔디안 방식으로 기록 (RECT 등 구조체 처리용)
+    ///
+    /// # 인자
+    /// - `addr`: 기록할 메모리 주소
+    /// - `data`: 기록할 32비트 정수 슬라이스
+    fn write_mem(&mut self, addr: u64, data: &[i32]);
 }
 
 // 모든 Unicorn<D> 타입에 대해 구현 (D는 Win32Context 등 무엇이든 가능)
@@ -420,7 +437,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                         if let Err(e) = uc.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
                             crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
                             let pc = uc.reg_read(RegisterX86::EIP).unwrap();
-                            crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
+                            crate::emu_log!("[!]    Stopped at EIP: {pc:#x}");
                         } else {
                             crate::emu_log!("[*] {dll_name}!{func_name} finished successfully.");
                         }
@@ -456,7 +473,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         // self.add_code_hook(0, 0x2_000, |uc, _, _|
         // {
         //     crate::emu_log!("[!] Detected execution at 0x00. Assuming successful return from function.");
-        //     crate::emu_log!("    (Cause: Stack pointer drift due to stdcall mismatch)");
+        //     crate::emu_log!("[!]    (Cause: Stack pointer drift due to stdcall mismatch)");
 
         //     dump_stack!(uc, 4);
         //     dump_regs!(uc);
@@ -490,7 +507,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 crate::emu_log!(
                     "[!] Detected execution at 0x00. Assuming successful return from function."
                 );
-                crate::emu_log!("    (Cause: Stack pointer drift due to stdcall mismatch)");
+                crate::emu_log!("[!]    (Cause: Stack pointer drift due to stdcall mismatch)");
 
                 // Crash 직전 상태 전송
                 let esp = regs[7] as u64;
@@ -599,18 +616,23 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             0,
             -1i64 as u64,
             |_uc, access, addr, size, value| {
-                if value == 0 {
-                    crate::emu_log!(
-                        "[!] Detected execution at 0x00. Assuming successful return from function."
-                    );
-                    crate::emu_log!("    (Cause: Stack pointer drift due to stdcall mismatch)");
-                    crate::emu_log!("    Address: {addr:#010x}");
+                if value == 0 || access == unicorn_engine::unicorn_const::MemType::FETCH_UNMAPPED {
+                    if addr == 0 {
+                        crate::emu_log!(
+                            "[!] Detected execution at 0x00. Assuming successful return from function."
+                        );
+                    } else {
+                        crate::emu_log!(
+                            "[!] Detected execution at unmapped address: {addr:#010x}. Likely stack mismatch."
+                        );
+                    }
+                    crate::emu_log!("[!]    (Cause: Stack pointer drift due to stdcall mismatch)");
 
                     return false;
                 }
 
                 crate::emu_log!(
-                    "[!!!!!!] MEMORY ERROR DETECTED: {:?} at {:#x} (Size: {})",
+                    "[!] ** MEMORY ERROR DETECTED: {:?} at {:#x} (Size: {})",
                     access,
                     addr,
                     size
@@ -618,18 +640,18 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
                 match access {
                     unicorn_engine::unicorn_const::MemType::READ_UNMAPPED => {
-                        print!("    Type: READ_UNMAPPED")
+                        print!("[!]    Type: READ_UNMAPPED")
                     }
                     unicorn_engine::unicorn_const::MemType::WRITE_UNMAPPED => {
-                        print!("    Type: WRITE_UNMAPPED")
+                        print!("[!]    Type: WRITE_UNMAPPED")
                     }
                     unicorn_engine::unicorn_const::MemType::FETCH_UNMAPPED => {
-                        print!("    Type: FETCH_UNMAPPED")
+                        print!("[!]    Type: FETCH_UNMAPPED")
                     }
-                    _ => print!("    Type: Unknown"),
+                    _ => print!("[!]    Type: Unknown"),
                 }
 
-                crate::emu_log!("    Trying to address: {:#010x}", value); // 시도한 주소 값
+                crate::emu_log!("[!]    Trying to address: {:#010x}", value); // 시도한 주소 값
 
                 false
             },
@@ -658,7 +680,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         self.mem_map(target_base, aligned_size, Prot::ALL)
             .expect("메모리 매핑 실패");
         crate::emu_log!(
-            "Load: {} at {:#x} (Size: {:#x})",
+            "[*] Load: {} at {:#x} (Size: {:#x})",
             filename,
             target_base,
             image_size
@@ -682,7 +704,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
         if original_base != target_base {
             crate::emu_log!(
-                "    Relocating from 0x{:x} to 0x{:x}...",
+                "[*]    Relocating from 0x{:x} to 0x{:x}...",
                 original_base,
                 target_base
             );
@@ -919,7 +941,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         if let Err(e) = self.emu_start(dll.entry_point, EXIT_ADDRESS, 0, 0) {
             crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
             let pc = self.reg_read(RegisterX86::EIP).unwrap();
-            crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
+            crate::emu_log!("[!]    Stopped at EIP: {pc:#x}");
         } else {
             crate::emu_log!("[*] {} finished successfully.", dll.name);
         }
@@ -946,25 +968,19 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         if let Some(func_address) = func_address {
             let esp = self.reg_read(RegisterX86::ESP as i32).unwrap();
 
-            let mut arg_strings = Vec::new();
-
             // x86 calling convention: 마지막 인자를 먼저 push
             // 먼저 모든 인자를 수집한 뒤 역순으로 push
             let mut push_values: Vec<u32> = Vec::new();
             for arg in args.iter() {
                 if let Some(v) = arg.downcast_ref::<i32>() {
                     push_values.push(*v as u32);
-                    arg_strings.push(format!("{v}"));
                 } else if let Some(v) = arg.downcast_ref::<u32>() {
                     push_values.push(*v);
-                    arg_strings.push(format!("{v}"));
                 } else if let Some(v) = arg.downcast_ref::<&str>() {
                     let str_ptr = self.alloc_str(v);
                     push_values.push(str_ptr);
-                    arg_strings.push(format!("\"{v}\""));
                 }
             }
-            let arguments = arg_strings.join(", ");
 
             // 역순으로 push (마지막 인자부터)
             for val in push_values.iter().rev() {
@@ -973,12 +989,12 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             self.push_u32(EXIT_ADDRESS as u32); // return address
 
             crate::emu_log!("[*] Function address: {func_address:#x}");
-            crate::emu_log!("[*] Calling {func_name}({arguments})...");
+            crate::emu_log!("[*] Calling {func_name}({push_values:?})...");
 
             if let Err(e) = self.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
                 crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
                 let pc = self.reg_read(RegisterX86::EIP).unwrap();
-                crate::emu_log!("    Stopped at EIP: {pc:#x}\n");
+                crate::emu_log!("[!]    Stopped at EIP: {pc:#x}");
             } else {
                 crate::emu_log!("[*] {func_name} finished successfully.");
             }
@@ -991,6 +1007,11 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
     fn read_u32(&self, addr: u64) -> u32 {
         let data = self.mem_read_as_vec(addr, 4).expect("메모리 읽기 실패");
         u32::from_le_bytes(data.try_into().unwrap())
+    }
+
+    fn read_u16(&self, addr: u64) -> u16 {
+        let data = self.mem_read_as_vec(addr, 2).expect("메모리 읽기 실패");
+        u16::from_le_bytes(data.try_into().unwrap())
     }
 
     fn write_u32(&mut self, addr: u64, value: u32) {
@@ -1059,8 +1080,20 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
     fn read_euc_kr(&self, addr: u64) -> String {
         let chars = self.read_string_bytes(addr, 1024);
-        let (res, _, _) = EUC_KR.decode(&chars);
-        res.to_string()
+        let filtered_chars = chars
+            .iter()
+            .filter(|&&c| c > 127)
+            .copied()
+            .collect::<Vec<u8>>();
+        let mut detector = EncodingDetector::new();
+        detector.feed(&filtered_chars, true);
+        let encoding = detector.guess(None, true);
+        if encoding.name().contains("UTF") == false {
+            let (res, _, _) = EUC_KR.decode(&chars);
+            res.to_string()
+        } else {
+            String::from_utf8_lossy(&chars).to_string()
+        }
     }
 
     fn push_u32(&mut self, value: u32) {
@@ -1126,6 +1159,14 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         bytes.push(0); // C-String Terminator
 
         self.alloc_bytes(&bytes)
+    }
+
+    fn write_mem(&mut self, addr: u64, data: &[i32]) {
+        let mut bytes = Vec::with_capacity(data.len() * 4);
+        for &val in data {
+            bytes.extend_from_slice(&(val as u32).to_le_bytes());
+        }
+        self.mem_write(addr, &bytes).expect("메모리 쓰기 실패");
     }
 }
 

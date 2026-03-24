@@ -9,8 +9,8 @@ use tokio::sync::broadcast;
 pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:33000";
     let listener = TcpListener::bind(addr).await?;
-    crate::emu_log!("Server running on {}", addr);
-    crate::emu_log!("Enter HEX strings (e.g., '48656c6c6f') to send to clients.");
+    crate::emu_log!("[*] Server running on {}", addr);
+    crate::emu_log!("[*] Enter HEX strings (e.g., '48656c6c6f') to send to clients.");
 
     // 1. 브로드캐스트 채널 생성
     // 콘솔 입력(Stdin)을 연결된 모든 클라이언트에게 전달하기 위한 채널
@@ -53,7 +53,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
     // 3. 메인 루프: 클라이언트 연결 수락
     loop {
         let (socket, client_addr) = listener.accept().await?;
-        crate::emu_log!("[New Client Connected: {}]", client_addr);
+        crate::emu_log!("[*] New Client Connected: {}", client_addr);
 
         // 채널 구독 (Stdin에서 오는 데이터를 받기 위함)
         let mut rx = tx.subscribe();
@@ -68,7 +68,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 match buf_reader.read(&mut buf).await {
                     Ok(0) => {
-                        crate::emu_log!("[Client Disconnected: {}]", client_addr);
+                        crate::emu_log!("[*] Client Disconnected: {}", client_addr);
                         break;
                     }
                     Ok(n) => {

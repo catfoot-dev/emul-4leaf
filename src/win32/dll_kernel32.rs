@@ -1060,8 +1060,6 @@ impl DllKERNEL32 {
     // =========================================================
 
     /// 함수명 기준 `KERNEL32.dll` API 구현체
-    ///
-    /// 처리를 성공했다면 스택 보정값과 리턴값을 포함한 `ApiHookResult`를 반환
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
         callee_result(match func_name {
             "TlsAlloc" => DllKERNEL32::tls_alloc(uc),
@@ -1129,7 +1127,7 @@ impl DllKERNEL32 {
             "LoadLibraryA" => DllKERNEL32::load_library_a(uc),
             "SetFileAttributesA" => DllKERNEL32::set_file_attributes_a(uc),
             _ => {
-                crate::emu_log!("[KERNEL32] UNHANDLED: {}", func_name);
+                crate::emu_log!("[!] KERNEL32 Unhandled: {}", func_name);
                 None
             }
         })

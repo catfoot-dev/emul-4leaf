@@ -1,3 +1,5 @@
+pub mod gdi_renderer;
+pub mod splash;
 pub mod win_event;
 pub mod win_frame;
 
@@ -37,6 +39,8 @@ pub enum UiCommand {
     SetWindowText { hwnd: u32, text: String },
     /// 윈도우 강제 렌더링(업데이트) 요청
     UpdateWindow { hwnd: u32 },
+    /// 윈도우 활성화(포커스) 요청
+    ActivateWindow { hwnd: u32 },
     /// 메시지 박스 표시 요청 (동기 응답 채널 포함)
     MessageBox {
         caption: String,
@@ -70,10 +74,16 @@ pub trait Painter: std::any::Any {
 use std::sync::mpsc::Receiver;
 
 /// UI 이벤트 루프를 시작하고 모든 윈도우를 관리함
-pub fn run_ui(ui_rx: Receiver<UiCommand>, initial_painters: Vec<Box<dyn Painter>>) {
+pub fn run_ui(
+    ui_rx: Receiver<UiCommand>,
+    initial_painters: Vec<Box<dyn Painter>>,
+    gdi_objects: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<u32, crate::win32::GdiObject>>,
+    >,
+) {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 
-    let mut app = win_frame::WinFrame::new(ui_rx, initial_painters);
+    let mut app = win_frame::WinFrame::new(ui_rx, initial_painters, gdi_objects);
     event_loop.run_app(&mut app).unwrap();
 }

@@ -108,10 +108,12 @@ pub enum GdiObject {
     Bitmap {
         width: u32,
         height: u32,
-        bits_ptr: u64,
+        pixels: Arc<Mutex<Vec<u32>>>,
     },
     Dc {
         associated_window: u32,
+        width: i32,
+        height: i32,
         selected_bitmap: u32,
         selected_font: u32,
         selected_brush: u32,
@@ -131,7 +133,9 @@ pub enum GdiObject {
         right: i32,
         bottom: i32,
     },
-    Palette,
+    Palette {
+        num_entries: u32,
+    },
     StockObject(u32),
 }
 
@@ -170,6 +174,12 @@ pub struct WindowClass {
     pub wnd_proc: u32,
     pub style: u32,
     pub hinstance: u32,
+    pub cb_cls_extra: i32,
+    pub cb_wnd_extra: i32,
+    pub h_icon: u32,
+    pub h_cursor: u32,
+    pub hbr_background: u32,
+    pub menu_name: String,
 }
 
 /// 가상 윈도우 상태
@@ -192,6 +202,7 @@ pub struct WindowState {
     pub iconic: bool,
     pub wnd_proc: u32,
     pub user_data: u32,
+    pub surface_bitmap: u32,
 }
 
 /// Unicorn 엔진의 `User Data` 에 적재되어, 모든 Win32 가상 OS 환경의 전역 상태 트리를
@@ -225,8 +236,9 @@ pub struct Win32Context {
     /// TLS 슬롯 카운터
     pub tls_counter: AtomicU32,
     /// 가상 레지스트리 (키 경로 → 값)
-    #[allow(dead_code)]
     pub registry: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    /// 가상 레지스트리 핸들 맵 (HKEY → 키 경로)
+    pub registry_handles: Arc<Mutex<HashMap<u32, String>>>,
     /// GetTickCount 기준 시간
     pub start_time: Instant,
     /// rand() 시드 상태
@@ -237,6 +249,10 @@ pub struct Win32Context {
     pub files: Arc<Mutex<HashMap<u32, std::fs::File>>>,
     /// 포커스를 가진 윈도우 핸들
     pub focus_hwnd: AtomicU32,
+    /// 활성화된 윈도우 핸들
+    pub active_hwnd: AtomicU32,
+    /// 전면에 있는 윈도우 핸들
+    pub foreground_hwnd: AtomicU32,
     /// 마우스 캡처를 가진 윈도우 핸들
     pub capture_hwnd: AtomicU32,
     /// 애플리케이션 가상 메시지 큐 (hwnd, message, wParam, lParam, time, pt.x, pt.y)
@@ -271,11 +287,21 @@ impl Win32Context {
             tls_slots: Arc::new(Mutex::new(HashMap::new())),
             tls_counter: AtomicU32::new(0),
             registry: Arc::new(Mutex::new(HashMap::new())),
+            registry_handles: Arc::new(Mutex::new({
+                let mut m = HashMap::new();
+                m.insert(0x80000000, "HKEY_CLASSES_ROOT".to_string());
+                m.insert(0x80000001, "HKEY_CURRENT_USER".to_string());
+                m.insert(0x80000002, "HKEY_LOCAL_MACHINE".to_string());
+                m.insert(0x80000003, "HKEY_USERS".to_string());
+                m
+            })),
             start_time: Instant::now(),
             rand_state: AtomicU32::new(12345),
             packet_logger: Arc::new(Mutex::new(PacketLogger::new())),
             files: Arc::new(Mutex::new(HashMap::new())),
             focus_hwnd: AtomicU32::new(0),
+            active_hwnd: AtomicU32::new(0),
+            foreground_hwnd: AtomicU32::new(0),
             capture_hwnd: AtomicU32::new(0),
             message_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             timers: Arc::new(Mutex::new(HashMap::new())),
@@ -291,11 +317,27 @@ impl Win32Context {
         self.handle_counter.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// 윈도우용 표면 비트맵 생성
+    pub fn create_surface_bitmap(&self, width: u32, height: u32) -> u32 {
+        let hbmp = self.alloc_handle();
+        let pixels = Arc::new(Mutex::new(vec![0u32; (width * height) as usize]));
+        self.gdi_objects.lock().unwrap().insert(
+            hbmp,
+            GdiObject::Bitmap {
+                width,
+                height,
+                pixels,
+            },
+        );
+        hbmp
+    }
+
     pub fn handle(
         uc: &mut Unicorn<Win32Context>,
         dll_name: &str,
         func_name: &str,
     ) -> Option<ApiHookResult> {
+        // 처리를 성공했다면 스택 보정값과 리턴값을 포함한 `ApiHookResult`를 반환
         match dll_name {
             "ADVAPI32.dll" => DllADVAPI32::handle(uc, func_name),
             "COMCTL32.dll" => DllCOMCTL32::handle(uc, func_name),
@@ -310,7 +352,7 @@ impl Win32Context {
             "WINMM.dll" => DllWINMM::handle(uc, func_name),
             "WS2_32.dll" => DllWS2_32::handle(uc, func_name),
             _ => {
-                crate::emu_log!("Undefined DLL: {}", dll_name);
+                crate::emu_log!("[!] Undefined DLL: {}", dll_name);
                 None
             }
         }
@@ -334,11 +376,14 @@ impl Clone for Win32Context {
             tls_slots: self.tls_slots.clone(),
             tls_counter: AtomicU32::new(self.tls_counter.load(Ordering::SeqCst)),
             registry: self.registry.clone(),
+            registry_handles: self.registry_handles.clone(),
             start_time: self.start_time.clone(),
             rand_state: AtomicU32::new(self.rand_state.load(Ordering::SeqCst)),
             packet_logger: self.packet_logger.clone(),
             files: self.files.clone(),
             focus_hwnd: AtomicU32::new(self.focus_hwnd.load(Ordering::SeqCst)),
+            active_hwnd: AtomicU32::new(self.active_hwnd.load(Ordering::SeqCst)),
+            foreground_hwnd: AtomicU32::new(self.foreground_hwnd.load(Ordering::SeqCst)),
             capture_hwnd: AtomicU32::new(self.capture_hwnd.load(Ordering::SeqCst)),
             message_queue: self.message_queue.clone(),
             timers: self.timers.clone(),

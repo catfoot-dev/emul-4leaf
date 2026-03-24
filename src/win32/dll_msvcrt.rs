@@ -1,7 +1,7 @@
-use unicorn_engine::Arch;
-use unicorn_engine::Mode;
-use unicorn_engine::RegisterX86;
-use unicorn_engine::Unicorn;
+use unicorn_engine::{
+    Unicorn,
+    unicorn_const::{Arch, Mode},
+};
 
 use crate::helper::UnicornHelper;
 use crate::win32::{ApiHookResult, Win32Context, callee_result, caller_result};
@@ -15,9 +15,14 @@ pub struct DllMSVCRT;
 
 impl DllMSVCRT {
     fn wrap_result(func_name: &str, result: Option<(usize, Option<i32>)>) -> Option<ApiHookResult> {
-        match func_name {
-            "_CxxThrowException" => callee_result(result),
-            _ => caller_result(result),
+        // MSVCRT.dll은 대부분 cdecl 이지만 C++ 예외/기능 일부는 thiscall/stdcall 임
+        let is_thiscall = func_name.contains("@QAE") || func_name.contains("@IAE");
+        let is_stdcall = func_name.contains("@YG") || func_name == "_CxxThrowException";
+        
+        if is_thiscall || is_stdcall {
+            callee_result(result)
+        } else {
+            caller_result(result)
         }
     }
 
@@ -925,25 +930,8 @@ impl DllMSVCRT {
     // API: int sprintf(char* str, const char* format, ...)
     // 역할: 서식화된 데이터를 문자열로 출력
     pub fn sprintf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let esp_val = uc
-            .reg_read(unicorn_engine::RegisterX86::ESP as i32)
-            .unwrap();
-        let mut buf_dump = [0u8; 32];
-        uc.mem_read(esp_val, &mut buf_dump).unwrap();
-
         let buf_addr = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
-        if buf_addr == 0 || fmt_addr == 0 {
-            let eip = uc.reg_read(RegisterX86::EIP as i32).unwrap();
-            let esp = uc.reg_read(RegisterX86::ESP as i32).unwrap();
-            crate::emu_log!(
-                "[MSVCRT] sprintf invalid args: buf={:#x}, fmt={:#x}, eip={:#x}, esp={:#x}",
-                buf_addr,
-                fmt_addr,
-                eip,
-                esp
-            );
-        }
         let (result, total_args) = DllMSVCRT::format_string(uc, fmt_addr, 2);
         let bytes = result.as_bytes();
         let mut buf = bytes.to_vec();
@@ -965,26 +953,17 @@ impl DllMSVCRT {
         let buf_addr = uc.read_arg(0);
         let size = uc.read_arg(1);
         let fmt_addr = uc.read_arg(2);
-        if buf_addr == 0 || fmt_addr == 0 {
-            let eip = uc.reg_read(RegisterX86::EIP as i32).unwrap();
-            let esp = uc.reg_read(RegisterX86::ESP as i32).unwrap();
-            crate::emu_log!(
-                "[MSVCRT] sprintf invalid args: buf={:#x}, fmt={:#x}, eip={:#x}, esp={:#x}",
-                buf_addr,
-                fmt_addr,
-                eip,
-                esp
-            );
-        }
+        let fmt = uc.read_euc_kr(fmt_addr as u64);
         let (result, total_args) = DllMSVCRT::format_string(uc, fmt_addr, 3);
         let bytes = result.as_bytes();
         let mut buf = bytes.to_vec();
         buf.push(0);
         uc.mem_write(buf_addr as u64, &buf).unwrap();
         crate::emu_log!(
-            "[MSVCRT] _vsnprintf({:#x}, {}, ...) -> \"{}\"",
+            "[MSVCRT] _vsnprintf({:#x}, {}, \"{}\", ...) -> \"{}\"",
             buf_addr,
             size,
+            fmt,
             result
         );
         Some((total_args, Some(bytes.len() as i32)))
@@ -995,17 +974,6 @@ impl DllMSVCRT {
     pub fn vsprintf(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let buf_addr = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
-        if buf_addr == 0 || fmt_addr == 0 {
-            let eip = uc.reg_read(RegisterX86::EIP as i32).unwrap();
-            let esp = uc.reg_read(RegisterX86::ESP as i32).unwrap();
-            crate::emu_log!(
-                "[MSVCRT] sprintf invalid args: buf={:#x}, fmt={:#x}, eip={:#x}, esp={:#x}",
-                buf_addr,
-                fmt_addr,
-                eip,
-                esp
-            );
-        }
         let (result, total_args) = DllMSVCRT::format_string(uc, fmt_addr, 2);
         let bytes = result.as_bytes();
         let mut buf = bytes.to_vec();
@@ -1561,8 +1529,10 @@ impl DllMSVCRT {
         std::thread::spawn(move || {
             crate::emu_log!("[MSVCRT] Thread ex {:#x} started on host", start_address);
             // TODO: Create new engine and run guest code
-            let mut uc = Unicorn::new_with_data(Arch::X86, Mode::LITTLE_ENDIAN, ctx_clone).unwrap();
-            uc.emu_start(start_address, 0, 0, 0).unwrap();
+            let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, ctx_clone).unwrap();
+            if let Err(e) = uc.emu_start(start_address, 0, 0, 0) {
+                crate::emu_log!("[MSVCRT] Thread failed/stopped: {:#x}, err: {:?}", start_address, e);
+            }
         });
 
         Some((6, Some(handle as i32)))
@@ -1599,8 +1569,10 @@ impl DllMSVCRT {
         std::thread::spawn(move || {
             crate::emu_log!("[MSVCRT] Thread {:#x} started on host", start_address);
             // TODO: Create new engine and run guest code
-            let mut uc = Unicorn::new_with_data(Arch::X86, Mode::LITTLE_ENDIAN, ctx_clone).unwrap();
-            uc.emu_start(start_address, 0, 0, 0).unwrap();
+            let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, ctx_clone).unwrap();
+            if let Err(e) = uc.emu_start(start_address, 0, 0, 0) {
+                crate::emu_log!("[MSVCRT] Thread failed/stopped: {:#x}, err: {:?}", start_address, e);
+            }
         });
 
         Some((3, Some(handle as i32)))
@@ -1938,7 +1910,7 @@ impl DllMSVCRT {
                 "_stat" => DllMSVCRT::_stat(uc),
                 "_CxxThrowException" => DllMSVCRT::_cxx_throw_exception(uc),
                 _ => {
-                    crate::emu_log!("[MSVCRT] UNHANDLED: {}", func_name);
+                    crate::emu_log!("[!] MSVCRT Unhandled: {}", func_name);
                     None
                 }
             },

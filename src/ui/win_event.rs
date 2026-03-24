@@ -85,6 +85,40 @@ impl WinEvent {
         }
     }
 
+    /// 윈도우 크기, 위치 및 Z 순서 변경, UI 알림
+    pub fn set_window_pos(
+        &mut self,
+        hwnd: u32,
+        _insert_after: u32,
+        x: u32,
+        y: u32,
+        cx: u32,
+        cy: u32,
+        _flags: u32,
+    ) {
+        // SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            if _flags & 0x0002 == 0 {
+                state.x = x as i32;
+                state.y = y as i32;
+            }
+            if _flags & 0x0001 == 0 {
+                state.width = cx as i32;
+                state.height = cy as i32;
+            }
+        }
+        // UI 스레드에는 일단 MoveWindow 명령으로 전달 (Z-order 등은 현재 UI에서 미지원할 수 있음)
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(UiCommand::MoveWindow {
+                hwnd,
+                x: x as i32,
+                y: y as i32,
+                width: cx,
+                height: cy,
+            });
+        }
+    }
+
     /// 윈도우 제목 변경 및 UI 알림
     pub fn set_window_text(&mut self, hwnd: u32, text: String) {
         if let Some(state) = self.windows.get_mut(&hwnd) {
@@ -114,7 +148,35 @@ impl WinEvent {
             });
         }
 
-        // UI 스레드로부터 응답이 올 때까지 대기
-        rx.recv().unwrap_or(1) // 기본값 IDOK(1)
+        rx.recv().unwrap_or(1)
+    }
+
+    /// 윈도우 표시 여부 반환
+    pub fn is_window_visible(&self, hwnd: u32) -> bool {
+        self.windows.get(&hwnd).map(|w| w.visible).unwrap_or(false)
+    }
+
+    /// 윈도우 활성화 여부 반환 (현재는 항상 true)
+    pub fn is_window_enabled(&self, _hwnd: u32) -> bool {
+        true
+    }
+
+    /// 윈도우 닫기 요청
+    pub fn close_window(&mut self, hwnd: u32) {
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(UiCommand::DestroyWindow { hwnd });
+        }
+    }
+
+    /// 윈도우 활성화/비활성화 설정 (스텁)
+    pub fn enable_window(&mut self, _hwnd: u32, _enable: bool) -> bool {
+        true
+    }
+
+    /// 윈도우 활성화 요청 (포커스)
+    pub fn activate_window(&mut self, hwnd: u32) {
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(UiCommand::ActivateWindow { hwnd });
+        }
     }
 }

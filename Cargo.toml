@@ -5,18 +5,17 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+chardetng = "0.1"
 encoding_rs = "0.8"
 hex = "0.4"
-
-unicorn-engine = "2.0.1"
-goblin = "0.8"
+unicorn-engine = "2.0"
+goblin = "0.10"
 anyhow = "1.0"
-
 winit = "0.30"
 softbuffer = "0.4"
-
 embedded-graphics = "0.8"
-embedded-ttf = "0.2.2"
+embedded-ttf = "0.2"
 rusttype = "0.9"
-chrono = "0.4.44"
-rfd = "0.17.2"
+chrono = "0.4"
+rfd = "0.17"
+fd-lock = "4.0.4"

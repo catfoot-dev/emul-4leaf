@@ -8,8 +8,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle};
 use winit::window::{Window, WindowId};
 
+use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use softbuffer::{Context as SoftContext, Surface};
-use rfd::{MessageButtons, MessageDialog, MessageLevel, MessageDialogResult};
 
 use crate::ui::{Painter, UiCommand};
 
@@ -37,13 +37,19 @@ pub struct WinFrame {
 
     /// softbuffer 컨텍스트
     context: Option<SoftContext<DisplayHandle<'static>>>,
+    /// gdi_objects 가상 메모리 맵
+    pub gdi_objects: std::sync::Arc<std::sync::Mutex<HashMap<u32, crate::win32::GdiObject>>>,
 
     /// 초기 페인터 목록 (resumed에서 창 생성 후 painters로 이동)
     initial_painters: Vec<Box<dyn Painter>>,
 }
 
 impl WinFrame {
-    pub fn new(ui_rx: Receiver<UiCommand>, initial_painters: Vec<Box<dyn Painter>>) -> Self {
+    pub fn new(
+        ui_rx: Receiver<UiCommand>,
+        initial_painters: Vec<Box<dyn Painter>>,
+        gdi_objects: std::sync::Arc<std::sync::Mutex<HashMap<u32, crate::win32::GdiObject>>>,
+    ) -> Self {
         Self {
             ui_rx,
             windows: HashMap::new(),
@@ -51,6 +57,7 @@ impl WinFrame {
             hwnd_to_id: HashMap::new(),
             id_to_hwnd: HashMap::new(),
             context: None,
+            gdi_objects,
             initial_painters,
         }
     }
@@ -125,7 +132,10 @@ impl ApplicationHandler for WinFrame {
                     self.id_to_hwnd.insert(id, hwnd);
 
                     // 에뮬레이션 윈도우용 기본 Painter
-                    let painter = DefaultEmulatorPainter { hwnd };
+                    let painter = DefaultEmulatorPainter {
+                        hwnd,
+                        gdi_objects: self.gdi_objects.clone(),
+                    };
                     self.painters.insert(id, Box::new(painter));
                     self.windows.insert(id, window);
                     needs_redraw = true;
@@ -175,6 +185,14 @@ impl ApplicationHandler for WinFrame {
                     if let Some(id) = self.hwnd_to_id.get(&hwnd) {
                         if let Some(window) = self.windows.get(id) {
                             window.request_redraw();
+                        }
+                    }
+                }
+
+                UiCommand::ActivateWindow { hwnd } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
+                        if let Some(window) = self.windows.get(id) {
+                            window.focus_window();
                         }
                     }
                 }
@@ -248,6 +266,11 @@ impl ApplicationHandler for WinFrame {
                 window.request_redraw();
             }
         }
+
+        // 10ms 마다 다시 깨어나서 리시버를 확인하도록 설정 (ControlFlow::Wait면 이벤트를 기다림)
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(10),
+        ));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -309,6 +332,7 @@ impl ApplicationHandler for WinFrame {
 /// 에뮬레이터 윈도우용 기본 페인터
 struct DefaultEmulatorPainter {
     hwnd: u32,
+    gdi_objects: std::sync::Arc<std::sync::Mutex<HashMap<u32, crate::win32::GdiObject>>>,
 }
 impl Painter for DefaultEmulatorPainter {
     fn create_window(
@@ -322,8 +346,50 @@ impl Painter for DefaultEmulatorPainter {
         false
     }
 
-    fn paint(&mut self, _buffer: &mut [u32], _width: u32, _height: u32) {
-        // TODO: 실제 에뮬레이션의 그래픽 데이터를 그리는 로직 추가
+    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
+        let gdi_objects = self.gdi_objects.lock().unwrap();
+
+        // 1. HWND에 해당하는 DC 찾기 (가장 최근에 생성된 DC 등)
+        // 사실 USER32 상의 윈도우 surface_bitmap을 찾는게 더 정확함.
+        // 하지만 WinFrame에는 WindowState가 없음.
+        // 대신 gdi_objects에서 이 hwnd를 associated_window로 가지는 DC를 찾거나,
+        // (더 좋은 방법) GdiObject::Dc에 surface_bitmap이 이미 들어있음.
+
+        // 여기서는 간단히 gdi_objects를 순회하여 이 hwnd를 가진 DC의 selected_bitmap을 찾음.
+        let mut surface_pixels = None;
+
+        for obj in gdi_objects.values() {
+            if let crate::win32::GdiObject::Dc {
+                associated_window,
+                selected_bitmap,
+                ..
+            } = obj
+            {
+                if *associated_window == self.hwnd && *selected_bitmap != 0 {
+                    if let Some(crate::win32::GdiObject::Bitmap {
+                        pixels: p,
+                        width: sw,
+                        height: sh,
+                    }) = gdi_objects.get(selected_bitmap)
+                    {
+                        surface_pixels = Some((p.clone(), *sw, *sh));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some((p, sw, sh)) = surface_pixels {
+            let p = p.lock().unwrap();
+            let copy_w = width.min(sw);
+            let copy_h = height.min(sh);
+
+            for y in 0..copy_h {
+                for x in 0..copy_w {
+                    buffer[(y * width + x) as usize] = p[(y * sw + x) as usize];
+                }
+            }
+        }
     }
 
     fn handle_event(

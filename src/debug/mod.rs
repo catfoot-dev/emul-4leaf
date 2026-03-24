@@ -10,7 +10,7 @@ use rusttype::Font as TtfFont;
 static FONT_DATA: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
 static TTF_FONT: std::sync::OnceLock<TtfFont<'static>> = std::sync::OnceLock::new();
 
-const LOG_SCROLL_MAX: usize = 1500;
+pub const LOG_SCROLL_MAX: usize = 3000;
 
 use crate::debug::common::{CpuContext, DebugCommand};
 use crate::ui::Painter;
@@ -208,7 +208,7 @@ impl Painter for Debug {
         }
     }
 
-    fn paint(&mut self, buffer: &mut [u32], width: u32, _height: u32) {
+    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
         // 그리기 도구 준비
         let mut display = FrameBuffer { buffer, width };
 
@@ -224,6 +224,11 @@ impl Painter for Debug {
         let style_w = FontTextStyleBuilder::new(ttf_font.clone())
             .font_size(12)
             .text_color(Rgb888::WHITE)
+            .anti_aliasing_color(Rgb888::BLACK)
+            .build();
+        let style_r = FontTextStyleBuilder::new(ttf_font.clone())
+            .font_size(12)
+            .text_color(Rgb888::RED)
             .anti_aliasing_color(Rgb888::BLACK)
             .build();
         let style_y = FontTextStyleBuilder::new(ttf_font.clone())
@@ -344,7 +349,7 @@ impl Painter for Debug {
             let current_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
             self.last_log_count = current_count;
 
-            let lines_to_show = 14;
+            let lines_to_show = height.saturating_sub(LOG_Y_START as u32) as usize / 13; // 14;
             let total_logs = b.len();
 
             // 스크롤 오프셋을 고려하여 보여줄 범위 계산
@@ -361,14 +366,35 @@ impl Painter for Debug {
                 + lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13;
             for line in b.iter().skip(start_idx).take(row_count) {
                 // Trim the line if it's too long
-                let text = if line.len() > LOG_X_MAX {
-                    format!("{}...", &line[0..LOG_X_MAX])
+                let text = line.clone();
+                // let text = if text.chars().count() > LOG_X_MAX {
+                //     format!("{}...", &text[0..LOG_X_MAX])
+                // } else {
+                //     text.clone()
+                // };
+                let no = if text.starts_with("[0x") {
+                    &text[1..9]
                 } else {
-                    line.clone()
+                    &text
+                };
+                let message = if text.starts_with("[0x") {
+                    format!("[             ] {}", &text[11..])
+                } else {
+                    format!("")
                 };
 
                 // 한글을 위해 TTF 스타일 사용
-                Text::new(&text, Point::new(10, log_y), style_w.clone())
+                let style = if message.contains("[!]") {
+                    style_r.clone()
+                } else if message.contains("[*]") {
+                    style_c.clone()
+                } else {
+                    style_w.clone()
+                };
+                Text::new(&message, Point::new(10, log_y), style)
+                    .draw(&mut display)
+                    .ok();
+                Text::new(&no, Point::new(14, log_y), style_w.clone())
                     .draw(&mut display)
                     .ok();
 

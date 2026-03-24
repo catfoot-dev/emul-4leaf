@@ -7,7 +7,7 @@ mod win32;
 
 use helper::{SHARED_MEM_BASE, UnicornHelper};
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
 use std::{
     any::Any,
     sync::mpsc::{Receiver, Sender, channel},
@@ -24,13 +24,12 @@ pub static LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 /// # 인자
 /// - `msg`: 추가할 로그의 텍스트
 pub fn push_log(msg: String) {
-    if let Some(buf) = LOG_BUFFER.get()
-        && let Ok(mut b) = buf.try_lock()
-    {
+    if let Some(buf) = LOG_BUFFER.get() {
+        let mut b = buf.lock().unwrap();
         // \n 이 포함되어 있으면 나눠서 push 함으로써 텍스트 겹침 방지
         for line in msg.lines() {
             b.push_back(line.to_string());
-            if b.len() > 1000 {
+            if b.len() > LOG_SCROLL_MAX {
                 b.pop_front();
             }
         }
@@ -43,7 +42,7 @@ pub fn init_logger() {
     LOG_BUFFER.set(Mutex::new(VecDeque::new())).unwrap();
 }
 
-pub static mut INDEX: usize = 0;
+pub static INDEX: AtomicUsize = AtomicUsize::new(0);
 
 #[macro_export]
 macro_rules! emu_log {
@@ -51,10 +50,12 @@ macro_rules! emu_log {
         $crate::push_log(String::new());
     };
     ($($arg:tt)*) => {
-        let msg = std::format!("[{:#08x}] {}", unsafe { $crate::INDEX }, std::format!($($arg)*));
-        unsafe { $crate::INDEX += 1; }
-        // std::println!("{}", msg); // 성능 저하 원인: 주석 처리
-        $crate::push_log(msg);
+        let index = $crate::INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let msg = std::format!("[{:#08x}] {}", index, std::format!($($arg)*)).replace("\r", "\\r").replace("\n", "\\n");
+        // if msg.contains("[*]") || msg.contains("[!]") || msg.contains("[-]") {
+            // std::println!("{}", msg); // 성능 저하 원인: 주석 처리
+            $crate::push_log(msg);
+        // }
     };
 }
 
@@ -64,19 +65,24 @@ use unicorn_engine::{
 };
 use win32::Win32Context;
 
+use crate::debug::LOG_SCROLL_MAX;
 use crate::debug::common::{CpuContext, DebugCommand};
 use crate::ui::UiCommand;
 
 fn main() {
     init_logger();
 
-    // 1. 통신 채널 생성
+    // 통신 채널 생성
     let (cmd_tx, cmd_rx) = channel::<DebugCommand>();
     let (state_tx, state_rx) = channel::<CpuContext>();
     let (ui_tx, ui_rx) = channel::<UiCommand>();
+    let (splash_tx, splash_rx) = channel::<()>(); // 스플래시 신호 채널
+
+    let context = Win32Context::new(Some(ui_tx.clone()));
+    let gdi_objects = context.gdi_objects.clone();
 
     thread::spawn(move || {
-        if let Err(e) = emu_4leaf(state_tx, cmd_rx, ui_tx) {
+        if let Err(e) = emu_4leaf(state_tx, cmd_rx, ui_tx, context, splash_tx) {
             eprintln!("[4leaf Emulator Error] {:?}", e);
         }
     });
@@ -87,8 +93,22 @@ fn main() {
         }
     });
 
+    let mut initial_painters: Vec<Box<dyn ui::Painter>> = Vec::new();
+    if let Some((pixels, width, height)) = ui::splash::load_splash_data("./Resources") {
+        let splash_painter = ui::splash::SplashPainter {
+            pixels,
+            width,
+            height,
+            receiver: splash_rx,
+            should_close: false,
+        };
+        initial_painters.push(Box::new(splash_painter));
+    }
+
     let debug_painter = crate::debug::Debug::new(cmd_tx, state_rx);
-    ui::run_ui(ui_rx, vec![Box::new(debug_painter)]);
+    initial_painters.push(Box::new(debug_painter));
+
+    ui::run_ui(ui_rx, initial_painters, gdi_objects);
 }
 
 /// Unicorn 엔진을 초기화하고, 여러 필수 DLL 코어 파일들을 메모리에 로드 및 링킹한 뒤 메인 엔트리 포인트를 실행함
@@ -102,9 +122,10 @@ fn main() {
 fn emu_4leaf(
     state_tx: Sender<CpuContext>,
     cmd_rx: Receiver<DebugCommand>,
-    ui_tx: Sender<UiCommand>,
+    _ui_tx: Sender<UiCommand>,
+    context: Win32Context,
+    splash_tx: Sender<()>,
 ) -> Result<(), ()> {
-    let context = Win32Context::new(Some(ui_tx));
     let mut unicorn = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, context)
         .expect("Failed to create the Unicorn");
 
@@ -137,6 +158,9 @@ fn emu_4leaf(
         crate::emu_log!("[*] Initializing {}...", dll_name);
         unicorn.run_dll_entry(&loaded_dll).unwrap();
     }
+
+    // 스플래시 종료 신호 전송
+    let _ = splash_tx.send(());
 
     run_4leaf_main(&mut unicorn);
 
