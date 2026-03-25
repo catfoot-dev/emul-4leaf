@@ -20,7 +20,7 @@ use unicorn_engine::{HookType, Prot, RegisterX86, Unicorn};
 
 // pub const HOOK_BASE: u64 = 0x1000_0000;
 pub const HEAP_BASE: u64 = 0x2000_0000;
-pub const HEAP_SIZE: u64 = 2 * 1024 * 1024;
+pub const HEAP_SIZE: u64 = 256 * 1024 * 1024;
 
 pub const STACK_BASE: u64 = 0x5000_0000;
 pub const STACK_SIZE: u64 = 1024 * 1024;
@@ -246,12 +246,14 @@ pub trait UnicornHelper {
     /// - `u16`: 해당 주소에 저장된 16비트 값
     fn read_u16(&self, addr: u64) -> u16;
 
-    /// 특정 메모리 주소에 32비트(4바이트) 정수를 리틀 엔디안 방식으로 기록
+    fn write_u32(&mut self, addr: u64, value: u32);
+
+    /// 특정 메모리 주소에 16비트(2바이트) 정수를 리틀 엔디안 방식으로 기록
     ///
     /// # 인자
     /// - `addr`: 기록하고자 하는 메모리 대상 주소
-    /// - `value`: 기록할 32비트 정수 값
-    fn write_u32(&mut self, addr: u64, value: u32);
+    /// - `value`: 기록할 16비트 정수 값
+    fn write_u16(&mut self, addr: u64, value: u16);
 
     /// 함수 호출 시 전달된 인자(스택) 중 N번째 인자를 읽음 (cdecl/stdcall 호출 규약 기준)
     /// `index = 0` 일 때 첫 번째 인자 값 반환
@@ -383,26 +385,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         self.mem_map(0xFFFF_0000, 64 * 1024, Prot::ALL | Prot::EXEC)
             .unwrap();
 
-        // self.add_code_hook(
-        //     0,
-        //     0x10 as u64,
-        //     |uc, addr, _|
-        // {
-        //     crate::emu_log!("[!] Run code at {addr:#x}");
-        //     // dump_mem!(uc, addr & 0xFFFF_FFF0, 16);
-        // }).expect("Failed to install code hook(Dll Code)");
-
-        // self.add_code_hook(
-        //     // 0x3000_0000,
-        //     // 0x4FFF_FFFF,
-        //     0x20000,
-        //     -1i64 as u64,
-        //     |uc, addr, _|
-        // {
-        //     crate::emu_log!("[!] Run code at {addr:#x}");
-        //     // dump_mem!(uc, addr & 0xFFFF_FFF0, 16);
-        // }).expect("Failed to install code hook(Dll Code)");
-
         // API Call Hook (Fake Address Range)
         self.add_code_hook(
             FAKE_IMPORT_BASE,
@@ -432,7 +414,17 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
                     if let Some(func_address) = func_address {
                         crate::emu_log!("[*] Function address: {func_address:#x}");
-                        crate::emu_log!("[*] Calling {dll_name}!{func_name}(...args)...");
+                        let arg0 = uc.read_arg(0);
+                        let arg1 = uc.read_arg(1);
+                        let arg2 = uc.read_arg(2);
+                        let arg3 = uc.read_arg(3);
+                        crate::emu_log!(
+                            "[*] Calling {dll_name}!{func_name}({:#X}, {:#X}, {:#X}, {:#X}, ...)...",
+                            arg0,
+                            arg1,
+                            arg2,
+                            arg3
+                        );
 
                         if let Err(e) = uc.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
                             crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
@@ -469,17 +461,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             },
         )
         .expect("Failed to install code hook(Fake Address)");
-
-        // self.add_code_hook(0, 0x2_000, |uc, _, _|
-        // {
-        //     crate::emu_log!("[!] Detected execution at 0x00. Assuming successful return from function.");
-        //     crate::emu_log!("[!]    (Cause: Stack pointer drift due to stdcall mismatch)");
-
-        //     dump_stack!(uc, 4);
-        //     dump_regs!(uc);
-
-        //     uc.emu_stop().unwrap();
-        // }).expect("Failed to install code hook(Address 0x00)");
 
         // 자동 실행 모드 플래그 (true = 자동, false = F10 스텝)
         let auto_run = Arc::new(AtomicBool::new(true));
@@ -833,9 +814,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 let mut iat_rva = first_thunk;
 
                 loop {
-                    // let mut val_buf = [0u8; 4];
-                    // self.mem_read(image_base + ilt_rva as u64, &mut val_buf).unwrap();
-                    // let val = u32::from_le_bytes(val_buf);
                     let val = self.read_u32(image_base + ilt_rva as u64);
                     // crate::emu_log!("rva: {:#x}, address: {:#x}", ilt_rva, image_base + ilt_rva as u64);
                     if val == 0 {
@@ -867,15 +845,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                             }
                             true
                         });
-                    // if let Some(real_addr) = dll.exports.get(&func_name) {
-                    //     final_addr = *real_addr;
-                    // }
-                    // if let Some(dep_dll) = dependency {
-                    //     if let Some(real_addr) = dep_dll.exports.get(&func_name) {
-                    //         final_addr = *real_addr;
-                    //         // crate::emu_log!("    Linked: {}!{} -> 0x{:x}", dll_name, func_name, final_addr);
-                    //     }
-                    // }
 
                     // 2. 없다면 Fake Address 할당 (전역 카운터 사용)
                     if final_addr == 0 {
@@ -897,7 +866,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                     // );
 
                     self.write_u32(iat_addr, final_addr as u32);
-                    // self.mem_write(iat_addr, &(final_addr as u32).to_le_bytes()).unwrap();
 
                     ilt_rva += 4;
                     iat_rva += 4;
@@ -989,7 +957,11 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             self.push_u32(EXIT_ADDRESS as u32); // return address
 
             crate::emu_log!("[*] Function address: {func_address:#x}");
-            crate::emu_log!("[*] Calling {func_name}({push_values:?})...");
+            let hex_args: Vec<String> = push_values.iter().map(|v| format!("{:#X}", v)).collect();
+            crate::emu_log!(
+                "[*] Calling {dll_name}!{func_name}({})...",
+                hex_args.join(", ")
+            );
 
             if let Err(e) = self.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
                 crate::emu_log!("[!] Emulation stopped/failed: {e:?}");
@@ -1017,6 +989,10 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
     fn write_u32(&mut self, addr: u64, value: u32) {
         self.mem_write(addr, &value.to_le_bytes())
             .expect("메모리 쓰기 실패");
+    }
+
+    fn write_u16(&mut self, addr: u64, value: u16) {
+        self.mem_write(addr, &value.to_le_bytes()).unwrap();
     }
 
     // 스택에서 n번째 인자 읽기 (stdcall 기준)
@@ -1138,6 +1114,14 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
         // 4바이트 정렬 (속도와 안정성을 위해)
         let aligned_size = (size as u32 + 3) & !3;
+
+        if (addr as u64 + aligned_size as u64) > (HEAP_BASE + HEAP_SIZE) {
+            crate::emu_log!(
+                "[!] HEAP OVERFLOW! Attempted to allocate {} bytes at {:#x}",
+                size,
+                addr
+            );
+        }
 
         data.heap_cursor.fetch_add(aligned_size, Ordering::SeqCst);
 

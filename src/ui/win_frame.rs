@@ -61,6 +61,15 @@ impl WinFrame {
             initial_painters,
         }
     }
+
+    pub fn get_painter_mut<T: Painter + 'static>(
+        &mut self,
+        id: winit::window::WindowId,
+    ) -> Option<&mut T> {
+        self.painters
+            .get_mut(&id)
+            .and_then(|p| p.as_any_mut().downcast_mut::<T>())
+    }
 }
 
 impl ApplicationHandler for WinFrame {
@@ -97,6 +106,7 @@ impl ApplicationHandler for WinFrame {
                     height,
                     style,
                     ex_style,
+                    surface_bitmap,
                 } => {
                     let mut attributes = Window::default_attributes()
                         .with_title(title)
@@ -133,7 +143,7 @@ impl ApplicationHandler for WinFrame {
 
                     // 에뮬레이션 윈도우용 기본 Painter
                     let painter = DefaultEmulatorPainter {
-                        hwnd,
+                        surface_bitmap,
                         gdi_objects: self.gdi_objects.clone(),
                     };
                     self.painters.insert(id, Box::new(painter));
@@ -237,6 +247,79 @@ impl ApplicationHandler for WinFrame {
                     };
                     let _ = response_tx.send(win_result);
                 }
+
+                UiCommand::SetCursor { hwnd, hcursor } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
+                        if let Some(window) = self.windows.get(id) {
+                            let mut cursor_applied = false;
+                            {
+                                let gdi_objects = self.gdi_objects.lock().unwrap();
+                                if let Some(crate::win32::GdiObject::Cursor {
+                                    resource_id,
+                                    frames,
+                                    ..
+                                }) = gdi_objects.get(&hcursor)
+                                {
+                                    // First try custom frames
+                                    if let Some(frame) = frames.first() {
+                                        if !frame.pixels.is_empty() {
+                                            let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
+                                            for p in &frame.pixels {
+                                                let a = (p >> 24) as u8;
+                                                let r = (p >> 16) as u8;
+                                                let g = (p >> 8) as u8;
+                                                let b = *p as u8;
+                                                rgba.push(r);
+                                                rgba.push(g);
+                                                rgba.push(b);
+                                                rgba.push(a);
+                                            }
+
+                                            let source = winit::window::CustomCursor::from_rgba(
+                                                rgba,
+                                                frame.width as u16,
+                                                frame.height as u16,
+                                                frame.hotspot_x as u16,
+                                                frame.hotspot_y as u16,
+                                            );
+                                            if let Ok(source) = source {
+                                                let custom_cursor = event_loop.create_custom_cursor(source);
+                                                window.set_cursor(custom_cursor);
+                                                cursor_applied = true;
+                                            }
+                                        }
+                                    }
+
+                                    if !cursor_applied {
+                                        // Fall back to system cursor mapping by resource_id
+                                        let icon = match *resource_id {
+                                            32512 => winit::window::CursorIcon::Default,    // IDC_ARROW
+                                            32513 => winit::window::CursorIcon::Text,       // IDC_IBEAM
+                                            32514 => winit::window::CursorIcon::Wait,       // IDC_WAIT
+                                            32515 => winit::window::CursorIcon::Crosshair,  // IDC_CROSS
+                                            32516 => winit::window::CursorIcon::NResize,    // IDC_UPARROW
+                                            32642 => winit::window::CursorIcon::NwseResize, // IDC_SIZENWSE
+                                            32643 => winit::window::CursorIcon::NeswResize, // IDC_SIZENESW
+                                            32644 => winit::window::CursorIcon::EwResize,   // IDC_SIZEWE
+                                            32645 => winit::window::CursorIcon::NsResize,   // IDC_SIZENS
+                                            32646 => winit::window::CursorIcon::Move,       // IDC_SIZEALL
+                                            32648 => winit::window::CursorIcon::NotAllowed, // IDC_NO
+                                            32649 => winit::window::CursorIcon::Pointer,    // IDC_HAND
+                                            32650 => winit::window::CursorIcon::Progress,   // IDC_APPSTARTING
+                                            32651 => winit::window::CursorIcon::Help,       // IDC_HELP
+                                            _ => winit::window::CursorIcon::Default,
+                                        };
+                                        window.set_cursor(icon);
+                                        cursor_applied = true;
+                                    }
+                                }
+                            }
+                            if !cursor_applied {
+                                window.set_cursor(winit::window::CursorIcon::Default);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -330,8 +413,8 @@ impl ApplicationHandler for WinFrame {
 }
 
 /// 에뮬레이터 윈도우용 기본 페인터
-struct DefaultEmulatorPainter {
-    hwnd: u32,
+pub struct DefaultEmulatorPainter {
+    surface_bitmap: u32,
     gdi_objects: std::sync::Arc<std::sync::Mutex<HashMap<u32, crate::win32::GdiObject>>>,
 }
 impl Painter for DefaultEmulatorPainter {
@@ -349,34 +432,15 @@ impl Painter for DefaultEmulatorPainter {
     fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
         let gdi_objects = self.gdi_objects.lock().unwrap();
 
-        // 1. HWND에 해당하는 DC 찾기 (가장 최근에 생성된 DC 등)
-        // 사실 USER32 상의 윈도우 surface_bitmap을 찾는게 더 정확함.
-        // 하지만 WinFrame에는 WindowState가 없음.
-        // 대신 gdi_objects에서 이 hwnd를 associated_window로 가지는 DC를 찾거나,
-        // (더 좋은 방법) GdiObject::Dc에 surface_bitmap이 이미 들어있음.
-
-        // 여기서는 간단히 gdi_objects를 순회하여 이 hwnd를 가진 DC의 selected_bitmap을 찾음.
         let mut surface_pixels = None;
 
-        for obj in gdi_objects.values() {
-            if let crate::win32::GdiObject::Dc {
-                associated_window,
-                selected_bitmap,
-                ..
-            } = obj
-            {
-                if *associated_window == self.hwnd && *selected_bitmap != 0 {
-                    if let Some(crate::win32::GdiObject::Bitmap {
-                        pixels: p,
-                        width: sw,
-                        height: sh,
-                    }) = gdi_objects.get(selected_bitmap)
-                    {
-                        surface_pixels = Some((p.clone(), *sw, *sh));
-                        break;
-                    }
-                }
-            }
+        if let Some(crate::win32::GdiObject::Bitmap {
+            pixels: p,
+            width: sw,
+            height: sh,
+        }) = gdi_objects.get(&self.surface_bitmap)
+        {
+            surface_pixels = Some((p.clone(), *sw, *sh));
         }
 
         if let Some((p, sw, sh)) = surface_pixels {
@@ -411,5 +475,3 @@ impl Painter for DefaultEmulatorPainter {
         self
     }
 }
-
-// Painter 트레이트에 as_any_mut를 추가해야 함을 나중에 mod.rs에 반영해야겠군.

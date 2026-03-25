@@ -54,6 +54,10 @@ pub struct Debug {
     auto_running: bool,
     last_log_count: usize,
     log_scroll_offset: usize,
+    input_buffer: String, // 서버로 보낼 Hex 데이터 입력 버퍼
+    show_stack: bool,
+    show_socket_log: bool,
+    show_log: bool,
 }
 
 impl Debug {
@@ -66,6 +70,10 @@ impl Debug {
             auto_running: true,
             last_log_count: 0,
             log_scroll_offset: 0,
+            input_buffer: String::new(),
+            show_stack: true,
+            show_socket_log: true,
+            show_log: true,
         }
     }
 
@@ -109,6 +117,14 @@ impl Painter for Debug {
         // 로그 변경 확인
         let current_log_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
         if self.last_log_count != current_log_count {
+            needs_redraw = true;
+        }
+
+        // 소켓 로그 변경 확인
+        let current_socket_count =
+            crate::SOCKET_LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+        if current_socket_count > 0 {
+            // 소켓 로그가 있으면 항상 redraw (간단한 dirty 체크)
             needs_redraw = true;
         }
 
@@ -185,7 +201,59 @@ impl Painter for Debug {
                         self.log_scroll_offset = self.log_scroll_offset.saturating_sub(1);
                         redraw = true;
                     }
-                    _ => {}
+                    PhysicalKey::Code(KeyCode::Backspace) => {
+                        self.input_buffer.pop();
+                        redraw = true;
+                    }
+                    PhysicalKey::Code(KeyCode::Enter) => {
+                        if !self.input_buffer.is_empty() {
+                            let trimmed = self.input_buffer.trim();
+                            match hex::decode(trimmed) {
+                                Ok(bytes) => {
+                                    if let Some(tx) = crate::server::SERVER_TX.get() {
+                                        let _ = tx.send(bytes);
+                                        crate::push_socket_log(format!(
+                                            "[UI] Sent packet: {}",
+                                            trimmed
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::push_socket_log(format!("[UI] Hex Error: {}", e));
+                                }
+                            }
+                            self.input_buffer.clear();
+                            redraw = true;
+                        }
+                    }
+                    _ => {
+                        // Hex 입력 처리 (0-9, A-F)
+                        if let Some(text) = event.text.as_ref() {
+                            for c in text.chars() {
+                                if c.is_ascii_hexdigit() {
+                                    self.input_buffer.push(c.to_ascii_uppercase());
+                                    redraw = true;
+                                } else if self.input_buffer.is_empty() {
+                                    // 입력 버퍼가 비어있을 때만 토글 단축키 작동
+                                    match c.to_ascii_uppercase() {
+                                        'S' => {
+                                            self.show_stack = !self.show_stack;
+                                            redraw = true;
+                                        }
+                                        'K' => {
+                                            self.show_socket_log = !self.show_socket_log;
+                                            redraw = true;
+                                        }
+                                        'L' => {
+                                            self.show_log = !self.show_log;
+                                            redraw = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 redraw
             }
@@ -242,163 +310,175 @@ impl Painter for Debug {
             .anti_aliasing_color(Rgb888::BLACK)
             .build();
 
-        if let Some(state) = self.cpu_state.as_ref() {
-            // 그리기 로직
-            // 레지스터 출력
-            let reg_names = [
-                "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP",
-            ];
-            let mut y = 10;
+        // === GUI: Header (Mode & Shortcuts) ===
+        let mode_str = if self.auto_running {
+            "[AUTO-RUN]"
+        } else {
+            "[STEP]"
+        };
+        let mode_color = if self.auto_running {
+            FontTextStyleBuilder::new(ttf_font.clone())
+                .font_size(12)
+                .text_color(Rgb888::new(0, 255, 128))
+                .anti_aliasing_color(Rgb888::BLACK)
+                .build()
+        } else {
+            style_y.clone()
+        };
 
-            Text::new("REGISTERS", Point::new(10, y), style_y.clone())
-                .draw(&mut display)
-                .ok();
-            y += 15;
+        Text::new(
+            &format!(
+                "Mode: {}  |  F5: Run/Pause  |  F10: Step  |  Toggles: [S]tate [K]Socket [L]Log  |  ESC: Quit",
+                mode_str
+            ),
+            Point::new(10, 15),
+            mode_color,
+        )
+        .draw(&mut display)
+        .ok();
 
-            for (i, val) in state.regs.iter().enumerate() {
-                let style = if i == 8 {
-                    style_c.clone()
-                } else {
-                    style_w.clone()
-                }; // EIP 강조
-                let text = format!("{}: 0x{:08x}", reg_names[i], val);
-                Text::new(&text, Point::new(10, y), style)
-                    .draw(&mut display)
-                    .ok();
-                y += 13;
+        // === 동적 레이아웃 계산 ===
+        let header_h = 30i32;
+        let usable_h = height as i32 - header_h;
+        let active_panels = (self.show_stack as i32) + (self.show_socket_log as i32) + (self.show_log as i32);
+
+        if active_panels == 0 {
+            return;
+        }
+
+        let panel_h = usable_h / active_panels;
+        let mut current_y = header_h;
+
+        // === GUI: CPU State (Registers & Stack) ===
+        if self.show_stack {
+            // 구분선
+            for x in 10..width.saturating_sub(10) {
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(80, 80, 40)).draw(&mut display).ok();
+            }
+            current_y += 10;
+
+            if let Some(state) = self.cpu_state.as_ref() {
+                // 레지스터 출력
+                let reg_names = ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP"];
+                let mut reg_y = current_y + 10;
+                Text::new("REGISTERS", Point::new(10, reg_y), style_y.clone()).draw(&mut display).ok();
+                reg_y += 15;
+
+                for (i, val) in state.regs.iter().enumerate() {
+                    let style = if i == 8 { style_c.clone() } else { style_w.clone() };
+                    let text = format!("{}: 0x{:08x}", reg_names[i], val);
+                    Text::new(&text, Point::new(10, reg_y), style).draw(&mut display).ok();
+                    reg_y += 13;
+                    if reg_y > current_y + panel_h - 20 { break; }
+                }
+
+                // 다음 명령어
+                reg_y += 10;
+                if reg_y < current_y + panel_h - 15 {
+                    Text::new("NEXT OP:", Point::new(10, reg_y), style_y.clone()).draw(&mut display).ok();
+                    reg_y += 15;
+                    Text::new(&state.next_instr, Point::new(10, reg_y), style_c.clone()).draw(&mut display).ok();
+                }
+
+                // 스택 뷰 (오른쪽)
+                let stack_x = 200;
+                let mut stack_y = current_y + 10;
+                Text::new("STACK (TOP 10)", Point::new(stack_x, stack_y), style_y.clone()).draw(&mut display).ok();
+                stack_y += 15;
+
+                for (addr, val) in &state.stack {
+                    let mark = if *addr == state.regs[7] { "<- ESP" } else { "" };
+                    let text = format!("0x{:08x}: 0x{:08x} {}", addr, val, mark);
+                    Text::new(&text, Point::new(stack_x, stack_y), style_w.clone()).draw(&mut display).ok();
+                    stack_y += 13;
+                    if stack_y > current_y + panel_h - 15 { break; }
+                }
+            } else {
+                Text::new("Waiting for CPU state...", Point::new(10, current_y + 10), style_w.clone()).draw(&mut display).ok();
+            }
+            current_y += panel_h;
+        }
+
+        // === GUI: Socket Log Panel ===
+        if self.show_socket_log {
+            // 구분선
+            for x in 10..width.saturating_sub(10) {
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(60, 120, 60)).draw(&mut display).ok();
+            }
+            current_y += 10;
+
+            let style_g = FontTextStyleBuilder::new(ttf_font.clone())
+                .font_size(12)
+                .text_color(Rgb888::new(100, 255, 100))
+                .anti_aliasing_color(Rgb888::BLACK)
+                .build();
+
+            Text::new("SOCKET LOG", Point::new(10, current_y), style_y.clone()).draw(&mut display).ok();
+
+            let socket_content_h = panel_h - 40; // 제목 + 입력란 제외 높이
+            let socket_lines_max = (socket_content_h / 13).max(1) as usize;
+            if let Some(buf) = crate::SOCKET_LOG_BUFFER.get() {
+                if let Ok(b) = buf.try_lock() {
+                    let total = b.len();
+                    let start = total.saturating_sub(socket_lines_max);
+                    let mut sy = current_y + 15;
+                    for line in b.iter().skip(start) {
+                        Text::new(line, Point::new(10, sy), style_g.clone()).draw(&mut display).ok();
+                        sy += 13;
+                    }
+                }
             }
 
-            // 다음 명령어 출력
-            y += 10;
-            Text::new("NEXT OP:", Point::new(10, y), style_y.clone())
-                .draw(&mut display)
-                .ok();
-            y += 15;
-            Text::new(&state.next_instr, Point::new(10, y), style_c.clone())
-                .draw(&mut display)
-                .ok();
-
-            // 스택 뷰 출력 (오른쪽)
-            let stack_x = 200;
-            let mut stack_y = 10;
+            // 입력 버퍼 표시
             Text::new(
-                "STACK (TOP 10)",
-                Point::new(stack_x, stack_y),
+                &format!("Input: {}", self.input_buffer),
+                Point::new(10, current_y + socket_content_h + 15),
                 style_y.clone(),
             )
             .draw(&mut display)
             .ok();
-            stack_y += 15;
 
-            for (addr, val) in &state.stack {
-                let mark = if *addr == state.regs[7] { "<- ESP" } else { "" };
-                let text = format!("0x{:08x}: 0x{:08x} {}", addr, val, mark);
-                Text::new(&text, Point::new(stack_x, stack_y), style_w.clone())
-                    .draw(&mut display)
-                    .ok();
-                stack_y += 13;
-            }
-            let mode_str = if self.auto_running {
-                "[AUTO-RUN]"
-            } else {
-                "[STEP]"
-            };
-            let mode_color = if self.auto_running {
-                FontTextStyleBuilder::new(ttf_font.clone())
-                    .font_size(12)
-                    .text_color(Rgb888::new(0, 255, 128))
-                    .anti_aliasing_color(Rgb888::BLACK)
-                    .build()
-            } else {
-                style_y.clone()
-            };
-            Text::new(
-                &format!(
-                    "Mode: {}  |  F5: Run/Pause  |  F10: Step  |  ESC: Quit",
-                    mode_str
-                ),
-                Point::new(10, 390),
-                mode_color,
-            )
-            .draw(&mut display)
-            .ok();
-        } else {
-            Text::new(
-                "Waiting for CPU state...",
-                Point::new(10, 10),
-                style_w.clone(),
-            )
-            .draw(&mut display)
-            .ok();
+            current_y += panel_h;
         }
 
         // === GUI: Log Box ===
-        // Draw a separator line
-        for x in 10..width.saturating_sub(10) {
-            Pixel(Point::new(x as i32, 405), Rgb888::new(100, 100, 100))
-                .draw(&mut display)
-                .ok();
-        }
-
-        const LOG_Y_START: i32 = 407;
-        const LOG_X_MAX: usize = 145;
-
-        if let Some(buf) = crate::LOG_BUFFER.get()
-            && let Ok(b) = buf.try_lock()
-        {
-            let current_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-            self.last_log_count = current_count;
-
-            let lines_to_show = height.saturating_sub(LOG_Y_START as u32) as usize / 13; // 14;
-            let total_logs = b.len();
-
-            // 스크롤 오프셋을 고려하여 보여줄 범위 계산
-            if total_logs < lines_to_show {
-                self.log_scroll_offset = 0;
-            } else if self.log_scroll_offset > total_logs.saturating_sub(lines_to_show) {
-                self.log_scroll_offset = total_logs.saturating_sub(lines_to_show);
+        if self.show_log {
+            // 구분선
+            for x in 10..width.saturating_sub(10) {
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(100, 100, 100)).draw(&mut display).ok();
             }
-            let end_idx = total_logs.saturating_sub(self.log_scroll_offset);
-            let start_idx = end_idx.saturating_sub(lines_to_show);
-            let row_count = end_idx - start_idx;
+            let log_y_start = current_y + 5;
 
-            let mut log_y = LOG_Y_START
-                + lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13;
-            for line in b.iter().skip(start_idx).take(row_count) {
-                // Trim the line if it's too long
-                let text = line.clone();
-                // let text = if text.chars().count() > LOG_X_MAX {
-                //     format!("{}...", &text[0..LOG_X_MAX])
-                // } else {
-                //     text.clone()
-                // };
-                let no = if text.starts_with("[0x") {
-                    &text[1..9]
-                } else {
-                    &text
-                };
-                let message = if text.starts_with("[0x") {
-                    format!("[             ] {}", &text[11..])
-                } else {
-                    format!("")
-                };
+            if let Some(buf) = crate::LOG_BUFFER.get() && let Ok(b) = buf.try_lock() {
+                let current_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+                self.last_log_count = current_count;
 
-                // 한글을 위해 TTF 스타일 사용
-                let style = if message.contains("[!]") {
-                    style_r.clone()
-                } else if message.contains("[*]") {
-                    style_c.clone()
-                } else {
-                    style_w.clone()
-                };
-                Text::new(&message, Point::new(10, log_y), style)
-                    .draw(&mut display)
-                    .ok();
-                Text::new(&no, Point::new(14, log_y), style_w.clone())
-                    .draw(&mut display)
-                    .ok();
+                let lines_to_show = (height as i32 - log_y_start) as usize / 13;
+                let total_logs = b.len();
 
-                log_y += 13;
+                if total_logs < lines_to_show {
+                    self.log_scroll_offset = 0;
+                } else if self.log_scroll_offset > total_logs.saturating_sub(lines_to_show) {
+                    self.log_scroll_offset = total_logs.saturating_sub(lines_to_show);
+                }
+                let end_idx = total_logs.saturating_sub(self.log_scroll_offset);
+                let start_idx = end_idx.saturating_sub(lines_to_show);
+                let row_count = end_idx - start_idx;
+
+                let mut log_y = log_y_start + (lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13);
+                for line in b.iter().skip(start_idx).take(row_count) {
+                    let text = line.clone();
+                    let no = if text.starts_with("[0x") { &text[1..9] } else { &text };
+                    let message = if text.starts_with("[0x") { format!("[             ] {}", &text[11..]) } else { "".to_string() };
+
+                    let style = if message.contains("[!]") { style_r.clone() }
+                               else if message.contains("[*]") { style_c.clone() }
+                               else { style_w.clone() };
+
+                    Text::new(&message, Point::new(10, log_y), style).draw(&mut display).ok();
+                    Text::new(&no, Point::new(14, log_y), style_w.clone()).draw(&mut display).ok();
+                    log_y += 13;
+                }
             }
         }
     }

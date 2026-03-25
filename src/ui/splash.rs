@@ -1,11 +1,4 @@
 use goblin::pe::PE;
-use softbuffer::{Context, Surface};
-use std::num::NonZeroU32;
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::raw_window_handle::HasDisplayHandle;
-use winit::window::{Window, WindowId};
 
 pub fn load_splash_data(path: &str) -> Option<(Vec<u32>, u32, u32)> {
     let dir = std::path::PathBuf::from(path);
@@ -241,8 +234,9 @@ impl crate::ui::Painter for SplashPainter {
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> winit::window::Window {
         let attributes = winit::window::Window::default_attributes()
-            .with_title("Splash Screen")
+            .with_title("4Leaf Emulator")
             .with_inner_size(winit::dpi::LogicalSize::new(self.width, self.height))
+            .with_resizable(false)
             .with_decorations(false)
             .with_visible(true)
             .with_window_level(winit::window::WindowLevel::AlwaysOnTop);

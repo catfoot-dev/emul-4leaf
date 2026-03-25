@@ -20,6 +20,13 @@ impl WinEvent {
         }
     }
 
+    /// UI 스레드에 임의의 커맨드 전송
+    pub fn send_ui_command(&self, command: UiCommand) {
+        if let Some(tx) = &self.ui_tx {
+            let _ = tx.send(command);
+        }
+    }
+
     /// 새 윈도우 생성 및 UI 스레드에 알림
     pub fn create_window(&mut self, hwnd: u32, state: WindowState) {
         let title = state.title.clone();
@@ -27,6 +34,8 @@ impl WinEvent {
         let height = state.height as u32;
         let style = state.style;
         let ex_style = state.ex_style;
+
+        let surface_bitmap = state.surface_bitmap;
 
         self.windows.insert(hwnd, state);
 
@@ -38,6 +47,7 @@ impl WinEvent {
                 height,
                 style,
                 ex_style,
+                surface_bitmap,
             });
         }
     }

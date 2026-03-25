@@ -19,6 +19,8 @@ pub enum UiCommand {
         style: u32,
         /// 확장 스타일 (WS_EX_*)
         ex_style: u32,
+        /// 표면 비트맵 핸들
+        surface_bitmap: u32,
     },
     /// 특정 윈도우 창 파괴 요청
     DestroyWindow {
@@ -47,6 +49,11 @@ pub enum UiCommand {
         text: String,
         u_type: u32,
         response_tx: std::sync::mpsc::Sender<i32>,
+    },
+    /// 윈도우 커서 변경 요청
+    SetCursor {
+        hwnd: u32,
+        hcursor: u32,
     },
 }
 

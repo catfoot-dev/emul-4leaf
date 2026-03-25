@@ -66,7 +66,7 @@ impl DllKERNEL32 {
         // sleep은 단일 스레드 에뮬이므로 no-op
         let dw_milliseconds = uc.read_arg(0);
         thread::sleep(time::Duration::from_millis(dw_milliseconds as u64));
-        // crate::emu_log!("[KERNEL32] Sleep({}) -> VOID", dw_milliseconds);
+        crate::emu_log!("[KERNEL32] Sleep({}) -> VOID", dw_milliseconds);
         Some((1, None))
     }
 

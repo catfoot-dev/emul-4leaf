@@ -19,6 +19,10 @@ pub static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 /// 새로운 로그가 들어올 때 마다 증가하여 UI가 언제 렌더링 루프를 `Redraw` 할 지 결정하게 돕는 카운터
 pub static LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// 소켓/패킷 관련 로그 전용 버퍼 (디버그 UI의 소켓 패널에 표시)
+pub static SOCKET_LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+pub static SOCKET_LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// 전역 버퍼에 새로운 로그 메시지를 밀어넣고 100줄을 초과하면 가장 오래된 로그가 지워짐
 ///
 /// # 인자
@@ -40,6 +44,21 @@ pub fn push_log(msg: String) {
 /// 어플리케이션 시작 시 전역 로그 버퍼를 빈 `VecDeque`로 초기화함
 pub fn init_logger() {
     LOG_BUFFER.set(Mutex::new(VecDeque::new())).unwrap();
+    SOCKET_LOG_BUFFER.set(Mutex::new(VecDeque::new())).unwrap();
+}
+
+/// 소켓 전용 로그 버퍼에 메시지를 추가 (최대 200줄)
+pub fn push_socket_log(msg: String) {
+    if let Some(buf) = SOCKET_LOG_BUFFER.get() {
+        let mut b = buf.lock().unwrap();
+        for line in msg.lines() {
+            b.push_back(line.to_string());
+            if b.len() > 200 {
+                b.pop_front();
+            }
+        }
+        SOCKET_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub static INDEX: AtomicUsize = AtomicUsize::new(0);

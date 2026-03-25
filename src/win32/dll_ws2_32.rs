@@ -1,24 +1,56 @@
+use std::sync::atomic::Ordering;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use unicorn_engine::Unicorn;
 
 use crate::helper::UnicornHelper;
 use crate::server::packet_logger::PacketDirection;
-use crate::win32::{ApiHookResult, SocketState, Win32Context, callee_result};
-use std::sync::atomic::Ordering;
+use crate::win32::{ApiHookResult, TokioSocket, Win32Context, callee_result};
 
 /// `WS2_32.dll` 프록시 구현 모듈
 ///
-/// Winsock 라이브러리를 가상화하여 소켓 생성, 바인딩, 네트워크 I/O 송수신 등을 패킷 단위로 추적 및 에뮬레이팅
+/// Tokio 기반의 실제 TCP 소켓 I/O를 에뮬레이션합니다.
+/// 에뮬레이터 훅은 동기 컨텍스트이므로 `Handle::block_on()`으로 async 작동을 동기화합니다.
 pub struct DllWS2_32;
+
+/// WSAEWOULDBLOCK - 논블로킹 소켓의 '지금 바로 처리 불가' 오류 코드
+const WSAEWOULDBLOCK: u32 = 10035;
+/// WSAETIMEDOUT
+const WSAETIMEDOUT: u32 = 10060;
+/// WSAECONNREFUSED
+const WSAECONNREFUSED: u32 = 10061;
+/// SOCKET_ERROR return value
+const SOCKET_ERROR: i32 = -1;
+/// ioctlsocket FIONBIO cmd
+const FIONBIO: u32 = 0x8004667E;
+
+/// 소켓 I/O 전용 Tokio 런타임 (프로세스 수명 동안 유지)
+/// main()이 #[tokio::main]이 아니고 에뮬레이터가 std::thread::spawn으로 동작하므로
+/// Handle::current()를 쓸 수 없어 별도의 런타임을 생성합니다.
+fn get_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("Failed to create Tokio runtime for WS2_32")
+    })
+}
+
+/// 전용 런타임에서 async 작업을 동기 컨텍스트로 실행하는 헬퍼
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    get_runtime().block_on(f)
+}
 
 impl DllWS2_32 {
     // API: SOCKET accept(SOCKET s, struct sockaddr* addr, int* addrlen)
-    // 역할: Ordinal_1 - 들어오는 연결 요청을 수락
+    // 역할: Ordinal_1 - 들어오는 연결 요청을 수락 (리스닝 소켓 미구현으로 INVALID_SOCKET 반환)
     pub fn accept(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let addr_ptr = uc.read_arg(1);
         let addrlen_ptr = uc.read_arg(2);
         crate::emu_log!(
-            "[WS2_32] accept({}, {:#x}, {:#x}) -> SOCKET -1i32",
+            "[WS2_32] accept({}, {:#x}, {:#x}) -> SOCKET -1 (not implemented)",
             sock,
             addr_ptr,
             addrlen_ptr
@@ -27,63 +59,114 @@ impl DllWS2_32 {
     }
 
     // API: int bind(SOCKET s, const struct sockaddr* name, int namelen)
-    // 역할: Ordinal_2 - 로컬 주소를 소켓에 연결
+    // 역할: Ordinal_2 - 로컬 주소를 소켓에 연결 (에뮬레이션에서는 성공으로 처리)
     pub fn bind(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let addr_ptr = uc.read_arg(1);
-        let addrlen_ptr = uc.read_arg(2);
+        let addrlen = uc.read_arg(2);
         crate::emu_log!(
-            "[WS2_32] bind({}, {:#x}, {:#x}) -> int 0",
+            "[WS2_32] bind({}, {:#x}, {}) -> int 0",
             sock,
             addr_ptr,
-            addrlen_ptr
+            addrlen
         );
+        crate::push_socket_log(format!("[BIND] sock={} addr_ptr={:#x}", sock, addr_ptr));
         Some((3, Some(0)))
     }
 
     // API: int closesocket(SOCKET s)
-    // 역할: Ordinal_3 - 소켓을 닫음
+    // 역할: Ordinal_3 - 소켓을 닫음 (TokioSocket 제거로 TcpStream 자동 Drop)
     pub fn closesocket(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let ctx = uc.get_data();
-        if let Some(s) = ctx.sockets.lock().unwrap().get_mut(&sock) {
-            *s = SocketState::Closed;
-        }
+        ctx.tcp_sockets.lock().unwrap().remove(&sock);
         crate::emu_log!("[WS2_32] closesocket({}) -> int 0", sock);
+        crate::push_socket_log(format!("[CLOSE] sock={}", sock));
         Some((1, Some(0)))
     }
 
-    /// API: int connect(SOCKET s, const struct sockaddr* name, int namelen)
-    /// 역할: Ordinal_4 - 대상 서버에 연결을 시도
+    // API: int connect(SOCKET s, const struct sockaddr* name, int namelen)
+    // 역할: Ordinal_4 - 실제 tokio::net::TcpStream::connect() 로 TCP 연결 수립
     pub fn connect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let addr_ptr = uc.read_arg(1);
 
-        // sockaddr_in: sin_family(2), sin_port(2), sin_addr(4)
-        let port_bytes = uc.mem_read_as_vec(addr_ptr as u64 + 2, 2).unwrap();
+        // sockaddr_in: sin_family(2), sin_port(2 BE), sin_addr(4)
+        let port_bytes = uc
+            .mem_read_as_vec(addr_ptr as u64 + 2, 2)
+            .unwrap_or_default();
         let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-        let ip_bytes = uc.mem_read_as_vec(addr_ptr as u64 + 4, 4).unwrap();
-
+        let ip_bytes = uc
+            .mem_read_as_vec(addr_ptr as u64 + 4, 4)
+            .unwrap_or_default();
         let ip = format!(
             "{}.{}.{}.{}",
             ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]
         );
-        let address = format!("{}:{}\0", ip, port);
+        let addr_str = format!("{}:{}", ip, port);
+
+        crate::emu_log!("[WS2_32] connect({}, \"{}\") ...", sock, addr_str);
+
+        let result = block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::net::TcpStream::connect(&addr_str),
+            )
+            .await
+        });
+
         let ctx = uc.get_data();
-        ctx.sockets.lock().unwrap().insert(
-            sock,
-            SocketState::Connected {
-                remote_addr: ip,
-                remote_port: port,
-            },
-        );
-        crate::emu_log!(
-            "[WS2_32] connect({}, \"{}\", {}) -> int 0",
-            sock,
-            address,
-            address.len() + 1,
-        );
-        Some((3, Some(0))) // 성공
+        match result {
+            Ok(Ok(stream)) => {
+                // 논블로킹 설정 여부는 별도로 관리 (ioctlsocket 에서 처리)
+                let non_blocking = ctx
+                    .tcp_sockets
+                    .lock()
+                    .unwrap()
+                    .get(&sock)
+                    .map(|s| s.non_blocking)
+                    .unwrap_or(false);
+                ctx.tcp_sockets.lock().unwrap().insert(
+                    sock,
+                    TokioSocket {
+                        af: 2,        // AF_INET
+                        sock_type: 1, // SOCK_STREAM
+                        protocol: 6,  // IPPROTO_TCP
+                        stream: Some(stream),
+                        recv_buf: Vec::new(),
+                        non_blocking,
+                        remote_addr: Some(addr_str.clone()),
+                    },
+                );
+                crate::emu_log!("[WS2_32] connect({}, \"{}\") -> int 0 (OK)", sock, addr_str);
+                crate::push_socket_log(format!("[CONN] sock={} -> {} OK", sock, addr_str));
+                Some((3, Some(0)))
+            }
+            Ok(Err(e)) => {
+                let code = if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                    WSAECONNREFUSED
+                } else {
+                    WSAEWOULDBLOCK
+                };
+                ctx.last_error.store(code, Ordering::SeqCst);
+                crate::emu_log!(
+                    "[WS2_32] connect({}, \"{}\") -> SOCKET_ERROR ({})",
+                    sock, addr_str, e
+                );
+                crate::push_socket_log(format!("[CONN] sock={} -> {} FAIL: {}", sock, addr_str, e));
+                Some((3, Some(SOCKET_ERROR)))
+            }
+            Err(_) => {
+                // timeout
+                ctx.last_error.store(WSAETIMEDOUT, Ordering::SeqCst);
+                crate::emu_log!(
+                    "[WS2_32] connect({}, \"{}\") -> SOCKET_ERROR (timeout)",
+                    sock,
+                    addr_str
+                );
+                Some((3, Some(SOCKET_ERROR)))
+            }
+        }
     }
 
     // API: int getpeername(SOCKET s, struct sockaddr* name, int* namelen)
@@ -92,13 +175,38 @@ impl DllWS2_32 {
         let sock = uc.read_arg(0);
         let addr_ptr = uc.read_arg(1);
         let addrlen_ptr = uc.read_arg(2);
+
+        let remote = uc
+            .get_data()
+            .tcp_sockets
+            .lock()
+            .unwrap()
+            .get(&sock)
+            .and_then(|s| s.remote_addr.clone());
+
+        if let Some(addr) = remote {
+            if let Ok(sockaddr) = addr.parse::<std::net::SocketAddr>() {
+                if let std::net::SocketAddr::V4(v4) = sockaddr {
+                    let ip = v4.ip().octets();
+                    let port = v4.port().to_be();
+                    if addr_ptr != 0 {
+                        uc.write_u32(addr_ptr as u64, 0x0002u32); // sin_family = AF_INET(2)
+                        uc.mem_write(addr_ptr as u64 + 2, &port.to_be_bytes()).ok();
+                        uc.mem_write(addr_ptr as u64 + 4, &ip).ok();
+                    }
+                    if addrlen_ptr != 0 {
+                        uc.write_u32(addrlen_ptr as u64, 16);
+                    }
+                    crate::emu_log!("[WS2_32] getpeername({}) -> \"{}\" (OK)", sock, addr);
+                    return Some((3, Some(0)));
+                }
+            }
+        }
         crate::emu_log!(
-            "[WS2_32] getpeername({}, {}, {}) -> int 0",
-            sock,
-            addr_ptr,
-            addrlen_ptr
+            "[WS2_32] getpeername({}) -> SOCKET_ERROR (not connected)",
+            sock
         );
-        Some((3, Some(0)))
+        Some((3, Some(SOCKET_ERROR)))
     }
 
     // API: int getsockopt(SOCKET s, int level, int optname, char* optval, int* optlen)
@@ -109,13 +217,17 @@ impl DllWS2_32 {
         let optname = uc.read_arg(2);
         let optval = uc.read_arg(3);
         let optlen = uc.read_arg(4);
+        // SO_ERROR (0xFFFF 레벨, optname 4103) - 연결 오류 없음으로 0 반환
+        if optval != 0 {
+            uc.write_u32(optval as u64, 0);
+        }
         crate::emu_log!(
-            "[WS2_32] getsockopt({}, {}, {}, {}, {}) -> int 0",
+            "[WS2_32] getsockopt({}, {}, {}, {:#x}, {}) -> int 0",
             sock,
             level,
             optname,
             optval,
-            optlen,
+            optlen
         );
         Some((5, Some(0)))
     }
@@ -124,8 +236,8 @@ impl DllWS2_32 {
     // 역할: Ordinal_8 - 32비트 호스트 바이트 순서를 네트워크 바이트 순서(Big-Endian)로 변환
     pub fn htonl(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let val = uc.read_arg(0);
-        let result = val.to_be();
-        crate::emu_log!("[WS2_32] htonl({}) -> u_long {}", val, result);
+        let result = val.swap_bytes();
+        crate::emu_log!("[WS2_32] htonl({:#x}) -> u_long {:#x}", val, result);
         Some((1, Some(result as i32)))
     }
 
@@ -139,12 +251,55 @@ impl DllWS2_32 {
     }
 
     // API: int ioctlsocket(SOCKET s, long cmd, u_long* argp)
-    // 역할: Ordinal_10 - 소켓의 동작 방식을 변경
+    // 역할: Ordinal_10 - FIONBIO로 논블로킹 모드 설정
     pub fn ioctlsocket(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let cmd = uc.read_arg(1);
         let argp = uc.read_arg(2);
-        crate::emu_log!("[WS2_32] ioctlsocket({}, {}, {}) -> int 0", sock, cmd, argp);
+        let ctx = uc.get_data();
+
+        if cmd == FIONBIO {
+            let val = if argp != 0 {
+                uc.read_u32(argp as u64)
+            } else {
+                0
+            };
+            let non_blocking = val != 0;
+            if let Some(s) = ctx.tcp_sockets.lock().unwrap().get_mut(&sock) {
+                s.non_blocking = non_blocking;
+                crate::emu_log!(
+                    "[WS2_32] ioctlsocket({}, FIONBIO, {}) -> non_blocking={}",
+                    sock,
+                    val,
+                    non_blocking
+                );
+                crate::push_socket_log(format!(
+                    "[IOCTL] sock={} FIONBIO non_blocking={}",
+                    sock, non_blocking
+                ));
+            } else {
+                // 소켓이 아직 연결되지 않은 경우 - 나중에 반영하기 위해 생성
+                ctx.tcp_sockets.lock().unwrap().insert(
+                    sock,
+                    TokioSocket {
+                        af: 2,
+                        sock_type: 1,
+                        protocol: 6,
+                        stream: None,
+                        recv_buf: Vec::new(),
+                        non_blocking,
+                        remote_addr: None,
+                    },
+                );
+            }
+        } else {
+            crate::emu_log!(
+                "[WS2_32] ioctlsocket({}, cmd={:#x}, argp={:#x}) -> 0",
+                sock,
+                cmd,
+                argp
+            );
+        }
         Some((3, Some(0)))
     }
 
@@ -159,11 +314,7 @@ impl DllWS2_32 {
         } else {
             0xFFFFFFFF // INADDR_NONE
         };
-        crate::emu_log!(
-            "[WS2_32] inet_addr(\"{}\") -> u_long {:#x}",
-            addr_str,
-            result
-        );
+        crate::emu_log!("[WS2_32] inet_addr(\"{}\") -> {:#x}", addr_str, result);
         Some((1, Some(result as i32)))
     }
 
@@ -172,8 +323,8 @@ impl DllWS2_32 {
     pub fn inet_ntoa(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let addr = uc.read_arg(0);
         let bytes = addr.to_le_bytes();
-        let ip_str = format!("{}.{}.{}.{}\0", bytes[0], bytes[1], bytes[2], bytes[3]);
-        let ptr = uc.alloc_str(&ip_str[..ip_str.len() - 1]);
+        let ip_str = format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]);
+        let ptr = uc.alloc_str(&ip_str);
         crate::emu_log!(
             "[WS2_32] inet_ntoa({:#x}) -> char* {:#x}=\"{}\"",
             addr,
@@ -188,7 +339,7 @@ impl DllWS2_32 {
     pub fn listen(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let backlog = uc.read_arg(1);
-        crate::emu_log!("[WS2_32] listen({}, {}) -> int 0", sock, backlog);
+        crate::emu_log!("[WS2_32] listen({}, {}) -> int 0 (stub)", sock, backlog);
         Some((2, Some(0)))
     }
 
@@ -202,72 +353,288 @@ impl DllWS2_32 {
     }
 
     // API: int recv(SOCKET s, char* buf, int len, int flags)
-    // 역할: Ordinal_16 - 소켓으로부터 데이터를 수신
+    // 역할: Ordinal_16 - 실제 TcpStream에서 데이터를 수신
     pub fn recv(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
-        let _buf = uc.read_arg(1);
-        let _len = uc.read_arg(2);
-        // 현재는 WSAEWOULDBLOCK 반환 (비동기 모기 시뮬레이션)
-        uc.get_data().last_error.store(10035, Ordering::SeqCst); // WSAEWOULDBLOCK
-        crate::emu_log!(
-            "[WS2_32] recv({}, {:#x}, {}, 0) -> int {}",
-            sock,
-            _buf,
-            _len,
-            -1i32
-        );
-        Some((4, Some(-1i32))) // SOCKET_ERROR
+        let buf_addr = uc.read_arg(1);
+        let len = uc.read_arg(2) as usize;
+        let flags = uc.read_arg(3);
+
+        // 나중에 uc.mem_write()와 동시에 ctx를 빌릴 수 없으므로 Arc 먼저 클론
+        // AtomicU32는 Clone이 없으므로 last_error는 별도로 처리
+        let (tcp_sockets, packet_logger) = {
+            let ctx = uc.get_data();
+            (ctx.tcp_sockets.clone(), ctx.packet_logger.clone())
+        };
+
+        let mut sockets = tcp_sockets.lock().unwrap();
+        let socket = match sockets.get_mut(&sock) {
+            Some(s) => s,
+            None => {
+                drop(sockets);
+                uc.get_data()
+                    .last_error
+                    .store(WSAEWOULDBLOCK, Ordering::SeqCst);
+                crate::emu_log!("[WS2_32] recv({}) -> SOCKET_ERROR (no socket)", sock);
+                return Some((4, Some(SOCKET_ERROR)));
+            }
+        };
+
+        // 1. 기존 recv_buf에서 먼저 소비
+        if !socket.recv_buf.is_empty() {
+            let take = len.min(socket.recv_buf.len());
+            let data: Vec<u8> = socket.recv_buf.drain(..take).collect();
+            drop(sockets);
+            uc.mem_write(buf_addr as u64, &data).ok();
+            packet_logger
+                .lock()
+                .unwrap()
+                .log(PacketDirection::Recv, sock, &data);
+            crate::emu_log!(
+                "[WS2_32] recv({}, {:#x}, {}) -> {} (from buf)",
+                sock,
+                buf_addr,
+                len,
+                take
+            );
+            return Some((4, Some(take as i32)));
+        }
+
+        let non_blocking = socket.non_blocking;
+        let stream = match socket.stream.as_mut() {
+            Some(s) => s,
+            None => {
+                drop(sockets);
+                uc.get_data()
+                    .last_error
+                    .store(WSAEWOULDBLOCK, Ordering::SeqCst);
+                return Some((4, Some(SOCKET_ERROR)));
+            }
+        };
+
+        if non_blocking {
+            // 논블로킹: try_read 시도
+            let mut tmp = vec![0u8; len];
+            match stream.try_read(&mut tmp) {
+                Ok(0) => {
+                    drop(sockets);
+                    crate::emu_log!("[WS2_32] recv({}) -> 0 (connection closed)", sock);
+                    Some((4, Some(0)))
+                }
+                Ok(n) => {
+                    let data = tmp[..n].to_vec();
+                    drop(sockets);
+                    uc.mem_write(buf_addr as u64, &data).ok();
+                    packet_logger
+                        .lock()
+                        .unwrap()
+                        .log(PacketDirection::Recv, sock, &data);
+                    crate::emu_log!(
+                        "[WS2_32] recv({}, {:#x}, {}, {}) -> {} bytes (non-blocking)",
+                        sock,
+                        buf_addr,
+                        len,
+                        flags,
+                        n
+                    );
+                    Some((4, Some(n as i32)))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    drop(sockets);
+                    uc.get_data()
+                        .last_error
+                        .store(WSAEWOULDBLOCK, Ordering::SeqCst);
+                    crate::emu_log!("[WS2_32] recv({}) -> SOCKET_ERROR (WSAEWOULDBLOCK)", sock);
+                    Some((4, Some(SOCKET_ERROR)))
+                }
+                Err(e) => {
+                    drop(sockets);
+                    crate::emu_log!("[WS2_32] recv({}) -> SOCKET_ERROR ({})", sock, e);
+                    Some((4, Some(SOCKET_ERROR)))
+                }
+            }
+        } else {
+            // 블로킹: async read
+            let mut tmp = vec![0u8; len];
+            let read_result = block_on(async { stream.read(&mut tmp).await });
+            match read_result {
+                Ok(0) => {
+                    drop(sockets);
+                    crate::emu_log!("[WS2_32] recv({}) -> 0 (connection closed)", sock);
+                    Some((4, Some(0)))
+                }
+                Ok(n) => {
+                    let data = tmp[..n].to_vec();
+                    drop(sockets);
+                    uc.mem_write(buf_addr as u64, &data).ok();
+                    packet_logger
+                        .lock()
+                        .unwrap()
+                        .log(PacketDirection::Recv, sock, &data);
+                    crate::emu_log!(
+                        "[WS2_32] recv({}, {:#x}, {}, {}) -> {} bytes (blocking)",
+                        sock,
+                        buf_addr,
+                        len,
+                        flags,
+                        n
+                    );
+                    Some((4, Some(n as i32)))
+                }
+                Err(e) => {
+                    drop(sockets);
+                    crate::emu_log!("[WS2_32] recv({}) -> SOCKET_ERROR ({})", sock, e);
+                    Some((4, Some(SOCKET_ERROR)))
+                }
+            }
+        }
     }
 
     // API: int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, const struct timeval* timeout)
-    // 역할: Ordinal_18 - 소켓의 읽기/쓰기/예외 상태를 확인
+    // 역할: Ordinal_18 - 소켓 읽기/쓰기 가능 여부를 확인
     pub fn select(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let nfds = uc.read_arg(0);
         let readfds = uc.read_arg(1);
         let writefds = uc.read_arg(2);
         let exceptfds = uc.read_arg(3);
-        let timeout = uc.read_arg(4);
+        let timeout_ptr = uc.read_arg(4);
+
+        // timeval 구조체 파싱: tv_sec(4) + tv_usec(4)
+        let timeout_us = if timeout_ptr != 0 {
+            let sec = uc.read_u32(timeout_ptr as u64) as u64;
+            let usec = uc.read_u32(timeout_ptr as u64 + 4) as u64;
+            sec * 1_000_000 + usec
+        } else {
+            500_000 // 기본 500ms 타임아웃
+        };
+
+        // fd_set: count(4) + fd[64](4 each) 구조체
+        // readfds 에서 소켓 핸들 목록 추출
+        let mut readable_count = 0i32;
+        let mut writable_count = 0i32;
+
+        if readfds != 0 {
+            let count = uc.read_u32(readfds as u64) as usize;
+            let count = count.min(64);
+            let ctx = uc.get_data();
+            for i in 0..count {
+                let sock = uc.read_u32(readfds as u64 + 4 + (i * 4) as u64);
+                let sockets = ctx.tcp_sockets.lock().unwrap();
+                if let Some(s) = sockets.get(&sock) {
+                    if !s.recv_buf.is_empty() {
+                        readable_count += 1;
+                        continue;
+                    }
+                    if let Some(stream) = &s.stream {
+                        // 소켓이 읽기 가능한지 짧은 타임아웃으로 확인
+                        let readable = block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_micros(timeout_us / count.max(1) as u64),
+                                stream.readable(),
+                            )
+                            .await
+                        });
+                        if readable.is_ok() {
+                            readable_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if writefds != 0 {
+            let count = uc.read_u32(writefds as u64) as usize;
+            let count = count.min(64);
+            let ctx = uc.get_data();
+            for i in 0..count {
+                let sock = uc.read_u32(writefds as u64 + 4 + (i * 4) as u64);
+                let sockets = ctx.tcp_sockets.lock().unwrap();
+                if let Some(s) = sockets.get(&sock) {
+                    // 연결된 소켓은 기본적으로 쓰기 가능
+                    if s.stream.is_some() {
+                        writable_count += 1;
+                    }
+                }
+            }
+        }
+
+        let total = readable_count + writable_count;
         crate::emu_log!(
-            "[WS2_32] select({}, {:#x}, {:#x}, {:#x}, {:#x}) -> int 0",
+            "[WS2_32] select({}, {:#x}, {:#x}, {:#x}, {:#x}) -> {} (r={}, w={})",
             nfds,
             readfds,
             writefds,
             exceptfds,
-            timeout
+            timeout_ptr,
+            total,
+            readable_count,
+            writable_count
         );
-        Some((5, Some(0)))
+        Some((5, Some(total)))
     }
 
     // API: int send(SOCKET s, const char* buf, int len, int flags)
-    // 역할: Ordinal_19 - 소켓을 통해 데이터를 전송
+    // 역할: Ordinal_19 - 실제 TcpStream에 데이터 전송
     pub fn send(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let buf_addr = uc.read_arg(1);
-        let len = uc.read_arg(2);
+        let len = uc.read_arg(2) as usize;
         let flags = uc.read_arg(3);
-        if len > 0 {
-            let data = uc
-                .mem_read_as_vec(buf_addr as u64, len as usize)
-                .unwrap_or_default();
-            let ctx = uc.get_data();
-            ctx.packet_logger
-                .lock()
-                .unwrap()
-                .log(PacketDirection::Send, sock, &data);
+
+        if len == 0 {
+            return Some((4, Some(0)));
         }
-        crate::emu_log!(
-            "[WS2_32] send({}, {:#x}, {}, {}) -> int {}",
-            sock,
-            buf_addr,
-            len,
-            flags,
-            len
-        );
-        Some((4, Some(len as i32)))
+
+        let data = uc.mem_read_as_vec(buf_addr as u64, len).unwrap_or_default();
+        let ctx = uc.get_data();
+
+        let mut sockets = ctx.tcp_sockets.lock().unwrap();
+        let socket = match sockets.get_mut(&sock) {
+            Some(s) => s,
+            None => {
+                ctx.last_error.store(WSAEWOULDBLOCK, Ordering::SeqCst);
+                crate::emu_log!("[WS2_32] send({}) -> SOCKET_ERROR (no socket)", sock);
+                return Some((4, Some(SOCKET_ERROR)));
+            }
+        };
+
+        let stream = match socket.stream.as_mut() {
+            Some(s) => s,
+            None => {
+                ctx.last_error.store(WSAEWOULDBLOCK, Ordering::SeqCst);
+                crate::emu_log!("[WS2_32] send({}) -> SOCKET_ERROR (not connected)", sock);
+                return Some((4, Some(SOCKET_ERROR)));
+            }
+        };
+
+        let result = block_on(async { stream.write_all(&data).await });
+        drop(sockets);
+
+        match result {
+            Ok(()) => {
+                ctx.packet_logger
+                    .lock()
+                    .unwrap()
+                    .log(PacketDirection::Send, sock, &data);
+                crate::emu_log!(
+                    "[WS2_32] send({}, {:#x}, {}, {}) -> {} bytes",
+                    sock,
+                    buf_addr,
+                    len,
+                    flags,
+                    len
+                );
+                Some((4, Some(len as i32)))
+            }
+            Err(e) => {
+                crate::emu_log!("[WS2_32] send({}) -> SOCKET_ERROR ({})", sock, e);
+                Some((4, Some(SOCKET_ERROR)))
+            }
+        }
     }
 
     // API: int setsockopt(SOCKET s, int level, int optname, const char* optval, int optlen)
-    // 역할: Ordinal_21 - 소켓 옵션을 설정
+    // 역할: Ordinal_21 - 소켓 옵션 설정 (주요 옵션만 처리)
     pub fn setsockopt(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let level = uc.read_arg(1);
@@ -275,13 +642,12 @@ impl DllWS2_32 {
         let optval = uc.read_arg(3);
         let optlen = uc.read_arg(4);
         crate::emu_log!(
-            "[WS2_32] setsockopt({}, {}, {}, {:#x}, {}) -> int {}",
+            "[WS2_32] setsockopt({}, level={}, optname={}, {:#x}, {}) -> 0",
             sock,
             level,
             optname,
             optval,
-            optlen,
-            0
+            optlen
         );
         Some((5, Some(0)))
     }
@@ -291,71 +657,102 @@ impl DllWS2_32 {
     pub fn shutdown(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let how = uc.read_arg(1);
-        crate::emu_log!("[WS2_32] shutdown({}, {}) -> int {}", sock, how, 0);
+        // 실제로 TcpStream을 끊지는 않고 closesocket에서 처리
+        crate::emu_log!("[WS2_32] shutdown({}, how={}) -> 0", sock, how);
         Some((2, Some(0)))
     }
 
     // API: SOCKET socket(int af, int type, int protocol)
-    // 역할: Ordinal_23 - 새 소켓을 생성
+    // 역할: Ordinal_23 - 새 TokioSocket 생성
     pub fn socket(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let af = uc.read_arg(0);
         let sock_type = uc.read_arg(1);
         let protocol = uc.read_arg(2);
         let ctx = uc.get_data();
         let sock = ctx.alloc_handle();
-        ctx.sockets.lock().unwrap().insert(
+        ctx.tcp_sockets.lock().unwrap().insert(
             sock,
-            SocketState::Created {
+            TokioSocket {
                 af,
                 sock_type,
                 protocol,
+                stream: None,
+                recv_buf: Vec::new(),
+                non_blocking: false,
+                remote_addr: None,
             },
         );
         crate::emu_log!(
-            "[WS2_32] socket({}, {}, {}) -> sock {}",
+            "[WS2_32] socket(af={}, type={}, proto={}) -> SOCKET {:#x}",
             af,
             sock_type,
             protocol,
             sock
         );
+        crate::push_socket_log(format!(
+            "[SOCK] created sock={} af={} type={} proto={}",
+            sock, af, sock_type, protocol
+        ));
         Some((3, Some(sock as i32)))
     }
 
     // API: struct hostent* gethostbyname(const char* name)
-    // 역할: Ordinal_52 - 호스트 이름에 해당하는 호스트 정보를 가져옴
+    // 역할: Ordinal_52 - 실제 DNS 조회로 호스트 이름 해석
     pub fn gethostbyname(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let name_addr = uc.read_arg(0);
         let name = uc.read_euc_kr(name_addr as u64);
-        // hostent 구조체를 에뮬 메모리에 할당
-        // 간략화: 127.0.0.1로 반환
-        let hostent_addr = uc.malloc(32);
+
+        let resolved_ip = block_on(async {
+            tokio::net::lookup_host(format!("{}:80", name))
+                .await
+                .ok()
+                .and_then(|mut iter| iter.next())
+                .map(|addr| match addr.ip() {
+                    std::net::IpAddr::V4(v4) => v4.octets(),
+                    std::net::IpAddr::V6(_) => [127, 0, 0, 1],
+                })
+        })
+        .unwrap_or([127, 0, 0, 1]);
+
+        crate::emu_log!(
+            "[WS2_32] gethostbyname(\"{}\") -> {}.{}.{}.{}",
+            name,
+            resolved_ip[0],
+            resolved_ip[1],
+            resolved_ip[2],
+            resolved_ip[3]
+        );
+        crate::push_socket_log(format!(
+            "[DNS] \"{}\" -> {}.{}.{}.{}",
+            name,
+            resolved_ip[0],
+            resolved_ip[1],
+            resolved_ip[2],
+            resolved_ip[3]
+        ));
+
+        // hostent 구조체를 에뮬 메모리에 할당 (16 bytes)
+        let hostent_addr = uc.malloc(16);
         let ip_data = uc.malloc(4);
-        uc.mem_write(ip_data, &[127, 0, 0, 1]).unwrap();
+        uc.mem_write(ip_data, &resolved_ip).unwrap();
         let ip_ptr = uc.malloc(8);
         uc.write_u32(ip_ptr, ip_data as u32);
         uc.write_u32(ip_ptr + 4, 0); // NULL 종료
 
-        // hostent: h_name, h_aliases, h_addrtype, h_length, h_addr_list
-        let name_str = uc.alloc_str("localhost");
-        uc.write_u32(hostent_addr, name_str); // h_name
+        let name_str = uc.alloc_str(&name);
+        uc.write_u32(hostent_addr, name_str as u32); // h_name
         uc.write_u32(hostent_addr + 4, 0); // h_aliases
-        uc.write_u32(hostent_addr + 8, 2); // h_addrtype (AF_INET)
-        uc.write_u32(hostent_addr + 12, 4); // h_length
-        uc.write_u32(hostent_addr + 16, ip_ptr as u32); // h_addr_list
+        uc.write_u16(hostent_addr + 8, 2); // h_addrtype (AF_INET)
+        uc.write_u16(hostent_addr + 10, 4); // h_length (IPv4)
+        uc.write_u32(hostent_addr + 12, ip_ptr as u32); // h_addr_list
 
-        crate::emu_log!(
-            "[WS2_32] gethostbyname(\"{}\") -> struct hostent* {:#x}",
-            name,
-            hostent_addr
-        );
         Some((1, Some(hostent_addr as i32)))
     }
 
     // API: int WSAGetLastError(void)
     // 역할: Ordinal_111 - 마지막으로 발생한 네트워크 오류 코드를 반환
     pub fn wsa_get_last_error(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let ctx = uc.get_data();
-        let err = ctx.last_error.load(Ordering::SeqCst);
+        let err = uc.get_data().last_error.load(Ordering::SeqCst);
         crate::emu_log!("[WS2_32] WSAGetLastError() -> {}", err);
         Some((0, Some(err as i32)))
     }
@@ -366,17 +763,15 @@ impl DllWS2_32 {
         let version = uc.read_arg(0);
         let wsa_data_addr = uc.read_arg(1);
 
-        // WSAData 구조체 394 bytes - 0으로 초기화 후 버전 세팅
         if wsa_data_addr != 0 {
             let zeros = vec![0u8; 394];
             uc.mem_write(wsa_data_addr as u64, &zeros).unwrap();
-            // wVersion(2) + wHighVersion(2)
-            uc.mem_write(wsa_data_addr as u64, &[2, 2]).unwrap();
-            uc.mem_write(wsa_data_addr as u64 + 2, &[2, 2]).unwrap();
+            uc.mem_write(wsa_data_addr as u64, &[2, 2]).unwrap(); // wVersion
+            uc.mem_write(wsa_data_addr as u64 + 2, &[2, 2]).unwrap(); // wHighVersion
         }
 
         crate::emu_log!(
-            "[WS2_32] WSAStartup({:#x}, {:#x}) -> int 0",
+            "[WS2_32] WSAStartup({:#x}, {:#x}) -> 0",
             version,
             wsa_data_addr
         );
@@ -390,8 +785,7 @@ impl DllWS2_32 {
         Some((0, Some(0)))
     }
 
-    // API: int WSAGetLastError(void)
-    // 역할: Ordinal_111 - 마지막으로 발생한 네트워크 오류 코드를 반환
+    // API: int __WSAFDIsSet(SOCKET fd, fd_set* set)
     pub fn wsa_fd_is_set(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let set = uc.read_arg(1);
@@ -400,27 +794,47 @@ impl DllWS2_32 {
     }
 
     // API: int WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD lpNumberOfBytesSent, DWORD dwFlags, LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
-    // 역할: 중첩된(Overlapped) 입출력을 사용하여 데이터를 전송
+    // 역할: WSABuf 배열에서 데이터를 읽어 실제로 전송
     pub fn wsa_send(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
-        let bufs = uc.read_arg(1);
+        let bufs_addr = uc.read_arg(1);
         let buf_count = uc.read_arg(2);
-        let bytes_sent = uc.read_arg(3);
-        let flags = uc.read_arg(4);
-        let overlapped = uc.read_arg(5);
-        let completion_routine = uc.read_arg(6);
-        crate::emu_log!(
-            "[WS2_32] WSASend({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> int {}",
-            sock,
-            bufs,
-            buf_count,
-            bytes_sent,
-            flags,
-            overlapped,
-            completion_routine,
-            0
-        );
-        Some((7, Some(0)))
+        let bytes_sent_addr = uc.read_arg(3);
+        let _flags = uc.read_arg(4);
+        let _overlapped = uc.read_arg(5);
+        let _completion_routine = uc.read_arg(6);
+
+        let mut total_sent = 0usize;
+        for i in 0..buf_count {
+            // WSABUF: len(4) + buf(4 ptr)
+            let offset = (i * 8) as u64;
+            let buf_len = uc.read_u32(bufs_addr as u64 + offset) as usize;
+            let buf_ptr = uc.read_u32(bufs_addr as u64 + offset + 4);
+
+            if buf_len == 0 || buf_ptr == 0 {
+                continue;
+            }
+            let data = uc
+                .mem_read_as_vec(buf_ptr as u64, buf_len)
+                .unwrap_or_default();
+            let ctx = uc.get_data();
+
+            let mut sockets = ctx.tcp_sockets.lock().unwrap();
+            if let Some(s) = sockets.get_mut(&sock) {
+                if let Some(stream) = s.stream.as_mut() {
+                    if block_on(async { stream.write_all(&data).await }).is_ok() {
+                        total_sent += buf_len;
+                    }
+                }
+            }
+            drop(sockets);
+        }
+
+        if bytes_sent_addr != 0 {
+            uc.write_u32(bytes_sent_addr as u64, total_sent as u32);
+        }
+        crate::emu_log!("[WS2_32] WSASend({:#x}) -> {} bytes sent", sock, total_sent);
+        Some((7, Some(if total_sent > 0 { 0 } else { SOCKET_ERROR })))
     }
 
     // API: SOCKET WSASocketA(int af, int type, int protocol, LPWSAPROTOCOL_INFOA lpProtocolInfo, GROUP g, DWORD dwFlags)
@@ -429,37 +843,41 @@ impl DllWS2_32 {
         let af = uc.read_arg(0);
         let sock_type = uc.read_arg(1);
         let protocol = uc.read_arg(2);
-        let protocol_info = uc.read_arg(3);
-        let group = uc.read_arg(4);
-        let flags = uc.read_arg(5);
+        let _protocol_info = uc.read_arg(3);
+        let _group = uc.read_arg(4);
+        let _flags = uc.read_arg(5);
         let ctx = uc.get_data();
         let sock = ctx.alloc_handle();
-        ctx.sockets.lock().unwrap().insert(
+        ctx.tcp_sockets.lock().unwrap().insert(
             sock,
-            SocketState::Created {
+            TokioSocket {
                 af,
                 sock_type,
                 protocol,
+                stream: None,
+                recv_buf: Vec::new(),
+                non_blocking: false,
+                remote_addr: None,
             },
         );
         crate::emu_log!(
-            "[WS2_32] WSASocketA({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> sock {:#x}",
+            "[WS2_32] WSASocketA(af={}, type={}, proto={}) -> SOCKET {:#x}",
             af,
             sock_type,
             protocol,
-            protocol_info,
-            group,
-            flags,
             sock
         );
+        crate::push_socket_log(format!(
+            "[SOCK] created(WSA) sock={} af={} type={} proto={}",
+            sock, af, sock_type, protocol
+        ));
         Some((6, Some(sock as i32)))
     }
 
     // API: WSAEVENT WSACreateEvent(void)
     // 역할: 새 이벤트 개체를 생성
     pub fn wsa_create_event(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let ctx = uc.get_data();
-        let handle = ctx.alloc_handle();
+        let handle = uc.get_data().alloc_handle();
         crate::emu_log!("[WS2_32] WSACreateEvent() -> {:#x}", handle);
         Some((0, Some(handle as i32)))
     }
@@ -483,8 +901,8 @@ impl DllWS2_32 {
     // 역할: 이벤트 개체를 닫음
     pub fn wsa_close_event(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let event = uc.read_arg(0);
-        crate::emu_log!("[WS2_32] WSACloseEvent({:#x}) -> 1", event);
-        Some((1, Some(1))) // TRUE
+        crate::emu_log!("[WS2_32] WSACloseEvent({:#x}) -> TRUE", event);
+        Some((1, Some(1)))
     }
 
     // API: int WSAEnumNetworkEvents(SOCKET s, WSAEVENT hEventObject, LPWSANETWORKEVENTS lpNetworkEvents)
@@ -493,13 +911,12 @@ impl DllWS2_32 {
         let sock = uc.read_arg(0);
         let event = uc.read_arg(1);
         let net_events_addr = uc.read_arg(2);
-        // WSANETWORKEVENTS: lNetworkEvents(4) + iErrorCode[10](40) = 44 bytes
         if net_events_addr != 0 {
             let zeros = [0u8; 44];
             uc.mem_write(net_events_addr as u64, &zeros).unwrap();
         }
         crate::emu_log!(
-            "[WS2_32] WSAEnumNetworkEvents({:#x}, {:#x}, {:#x}) -> int 0",
+            "[WS2_32] WSAEnumNetworkEvents({:#x}, {:#x}, {:#x}) -> 0",
             sock,
             event,
             net_events_addr

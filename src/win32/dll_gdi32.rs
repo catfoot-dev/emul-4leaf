@@ -507,40 +507,85 @@ impl DllGDI32 {
     // 역할: 지정된 장치 컨텍스트에서 문자열을 출력
     pub fn text_out_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let hdc = uc.read_arg(0);
-        let n_x_start = uc.read_arg(1);
-        let n_y_start = uc.read_arg(2);
+        let n_x_start = uc.read_arg(1) as i32;
+        let n_y_start = uc.read_arg(2) as i32;
         let lp_string = uc.read_arg(3);
         let cb_string = uc.read_arg(4);
 
-        let font_height = {
-            let ctx = uc.get_data();
-            let gdi_objects = ctx.gdi_objects.lock().unwrap();
-            if let Some(GdiObject::Dc { selected_font, .. }) = gdi_objects.get(&hdc) {
-                if let Some(GdiObject::Font { height, .. }) = gdi_objects.get(selected_font) {
-                    Some(*height)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+        let text = uc.read_euc_kr(lp_string as u64);
+        let text = if cb_string != 0xFFFFFFFF {
+            text.chars().take(cb_string as usize).collect::<String>()
+        } else {
+            text
         };
 
-        let mut ret = 0;
-        if let Some(_height) = font_height {
-            ret = 1;
+        let mut draw_params = None;
+        {
+            let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
+            if let Some(GdiObject::Dc {
+                selected_bitmap,
+                selected_pen,
+                text_color,
+                bk_color,
+                bk_mode,
+                associated_window,
+                ..
+            }) = gdi_objects.get(&hdc)
+            {
+                draw_params = Some((
+                    *selected_bitmap,
+                    *selected_pen,
+                    *text_color,
+                    *bk_color,
+                    *bk_mode,
+                    *associated_window,
+                ));
+            }
+        }
+
+        if let Some((hbmp, _hpen, text_color, bk_color, bk_mode, hwnd)) = draw_params {
+            if hbmp != 0 {
+                let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
+                if let Some(GdiObject::Bitmap {
+                    width,
+                    height,
+                    pixels,
+                }) = gdi_objects.get(&hbmp)
+                {
+                    let width = *width;
+                    let height = *height;
+                    let mut pixels = pixels.lock().unwrap();
+                    GdiRenderer::draw_text(
+                        &mut pixels,
+                        width,
+                        height,
+                        n_x_start,
+                        n_y_start,
+                        &text,
+                        text_color,
+                        if bk_mode == 2 { Some(bk_color) } else { None }, // OPAQUE=2
+                    );
+                    drop(pixels);
+                    drop(gdi_objects);
+                    if hwnd != 0 {
+                        uc.get_data()
+                            .win_event
+                            .lock()
+                            .unwrap()
+                            .update_window(hwnd);
+                    }
+                }
+            }
         }
 
         crate::emu_log!(
-            "[GDI32] TextOutA({:#x}, {}, {}, {:#x}, {}) -> BOOL {}",
+            "[GDI32] TextOutA({:#x}, {}, {}, \"{}\") -> BOOL 1",
             hdc,
             n_x_start,
             n_y_start,
-            lp_string,
-            cb_string,
-            ret
+            text
         );
-        Some((5, Some(ret)))
+        Some((5, Some(1)))
     }
 
     // API: int SetBkMode(HDC hdc, int mode)
@@ -777,35 +822,33 @@ impl DllGDI32 {
         let fn_combine = uc.read_arg(3);
         let ctx = uc.get_data();
         let mut result = 0;
-        if let Some(GdiObject::Region {
-            left: left1,
-            top: top1,
-            right: right1,
-            bottom: bottom1,
-        }) = ctx.gdi_objects.lock().unwrap().get(&hrgn_src1)
-        {
-            if let Some(GdiObject::Region {
-                left: left2,
-                top: top2,
-                right: right2,
-                bottom: bottom2,
-            }) = ctx.gdi_objects.lock().unwrap().get(&hrgn_src2)
-            {
-                let left = *left1.min(left2);
-                let top = *top1.min(top2);
-                let right = *right1.max(right2);
-                let bottom = *bottom1.max(bottom2);
-                ctx.gdi_objects.lock().unwrap().insert(
-                    hrgn_dest,
-                    GdiObject::Region {
-                        left,
-                        top,
-                        right,
-                        bottom,
-                    },
-                );
-                result = 1;
-            }
+        let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
+        let region1 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn_src1) {
+            Some((*left, *top, *right, *bottom))
+        } else {
+            None
+        };
+        let region2 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn_src2) {
+            Some((*left, *top, *right, *bottom))
+        } else {
+            None
+        };
+
+        if let (Some(r1), Some(r2)) = (region1, region2) {
+            let left = r1.0.min(r2.0);
+            let top = r1.1.min(r2.1);
+            let right = r1.2.max(r2.2);
+            let bottom = r1.3.max(r2.3);
+            gdi_objects.insert(
+                hrgn_dest,
+                GdiObject::Region {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+            );
+            result = 1;
         }
         crate::emu_log!(
             "[GDI32] CombineRgn({:#x}, {:#x}, {:#x}, {:#x}) -> int {:#x}",
@@ -825,23 +868,21 @@ impl DllGDI32 {
         let hrgn2 = uc.read_arg(1);
         let ctx = uc.get_data();
         let mut result = 0;
-        if let Some(GdiObject::Region {
-            left: left1,
-            top: top1,
-            right: right1,
-            bottom: bottom1,
-        }) = ctx.gdi_objects.lock().unwrap().get(&hrgn1)
-        {
-            if let Some(GdiObject::Region {
-                left: left2,
-                top: top2,
-                right: right2,
-                bottom: bottom2,
-            }) = ctx.gdi_objects.lock().unwrap().get(&hrgn2)
-            {
-                if left1 == left2 && top1 == top2 && right1 == right2 && bottom1 == bottom2 {
-                    result = 1;
-                }
+        let gdi_objects = ctx.gdi_objects.lock().unwrap();
+        let region1 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn1) {
+            Some((*left, *top, *right, *bottom))
+        } else {
+            None
+        };
+        let region2 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn2) {
+            Some((*left, *top, *right, *bottom))
+        } else {
+            None
+        };
+
+        if let (Some(r1), Some(r2)) = (region1, region2) {
+            if r1 == r2 {
+                result = 1;
             }
         }
         crate::emu_log!(
@@ -988,6 +1029,7 @@ impl DllGDI32 {
                 let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
                 if let Some(GdiObject::Dc {
                     selected_bitmap: hbmp_dest,
+                    associated_window: hwnd_dest,
                     ..
                 }) = gdi_objects.get(&hdc_dest)
                 {
@@ -996,12 +1038,12 @@ impl DllGDI32 {
                         ..
                     }) = gdi_objects.get(&hdc_src)
                     {
-                        draw_params = Some((*hbmp_dest, *hbmp_src));
+                        draw_params = Some((*hbmp_dest, *hbmp_src, *hwnd_dest));
                     }
                 }
             }
 
-            if let Some((hbmp_dest, hbmp_src)) = draw_params {
+            if let Some((hbmp_dest, hbmp_src, hwnd_dest)) = draw_params {
                 if hbmp_dest != 0 && hbmp_src != 0 {
                     let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
                     if let (
@@ -1035,6 +1077,13 @@ impl DllGDI32 {
                             x_src,
                             y_src,
                         );
+                        if hwnd_dest != 0 {
+                            uc.get_data()
+                                .win_event
+                                .lock()
+                                .unwrap()
+                                .update_window(hwnd_dest);
+                        }
                     }
                 }
             }
@@ -1069,13 +1118,19 @@ impl DllGDI32 {
             selected_bitmap,
             selected_pen,
             selected_brush,
+            associated_window,
             ..
         }) = uc.get_data().gdi_objects.lock().unwrap().get(&hdc)
         {
-            draw_params = Some((*selected_bitmap, *selected_pen, *selected_brush));
+            draw_params = Some((
+                *selected_bitmap,
+                *selected_pen,
+                *selected_brush,
+                *associated_window,
+            ));
         }
 
-        if let Some((hbmp, hpen, hbrush)) = draw_params {
+        if let Some((hbmp, hpen, hbrush, hwnd)) = draw_params {
             if hbmp != 0 {
                 let (pen_color, brush_color) = {
                     let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
@@ -1121,6 +1176,9 @@ impl DllGDI32 {
                         pen_color,
                         brush_color,
                     );
+                    if hwnd != 0 {
+                        uc.get_data().win_event.lock().unwrap().update_window(hwnd);
+                    }
                 }
             }
         }
@@ -1186,15 +1244,22 @@ impl DllGDI32 {
             current_y,
             selected_bitmap,
             text_color,
+            associated_window,
             ..
         }) = uc.get_data().gdi_objects.lock().unwrap().get_mut(&hdc)
         {
-            draw_data = Some((*current_x, *current_y, *selected_bitmap, *text_color));
+            draw_data = Some((
+                *current_x,
+                *current_y,
+                *selected_bitmap,
+                *text_color,
+                *associated_window,
+            ));
             *current_x = x;
             *current_y = y;
         }
 
-        if let Some((x1, y1, hbmp, color)) = draw_data {
+        if let Some((x1, y1, hbmp, color, hwnd)) = draw_data {
             if hbmp != 0 {
                 let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
                 if let Some(GdiObject::Bitmap {
@@ -1207,6 +1272,9 @@ impl DllGDI32 {
                     let height = *height;
                     let mut pixels = pixels.lock().unwrap();
                     GdiRenderer::draw_line(&mut pixels, width, height, x1, y1, x, y, color);
+                    if hwnd != 0 {
+                        uc.get_data().win_event.lock().unwrap().update_window(hwnd);
+                    }
                 }
             }
         }

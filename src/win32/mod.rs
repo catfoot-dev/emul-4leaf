@@ -89,6 +89,22 @@ pub struct LoadedDll {
     pub exports: HashMap<String, u64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CursorFrame {
+    pub width: u32,
+    pub height: u32,
+    pub hotspot_x: i32,
+    pub hotspot_y: i32,
+    pub pixels: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IconFrame {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u32>,
+}
+
 /// 가상 GDI 오브젝트 종류
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -137,9 +153,50 @@ pub enum GdiObject {
         num_entries: u32,
     },
     StockObject(u32),
+    Cursor {
+        resource_id: u32,
+        name: Option<String>,
+        frames: Vec<CursorFrame>,
+        is_animated: bool,
+    },
+    Icon {
+        resource_id: u32,
+        name: Option<String>,
+        frames: Vec<IconFrame>,
+    },
 }
 
-/// 가상 소켓 상태
+/// 실제 TCP 스트림을 보유하는 Winsock 소켓 상태 (Tokio 기반)
+#[allow(dead_code)]
+pub struct TokioSocket {
+    pub af: u32,
+    pub sock_type: u32,
+    pub protocol: u32,
+    /// 실제 연결된 TCP 스트림 (connect 후 Some으로 변경)
+    pub stream: Option<tokio::net::TcpStream>,
+    /// recv() 에서 미소비된 바이트 버퍼
+    pub recv_buf: Vec<u8>,
+    /// ioctlsocket(FIONBIO) 로 설정하는 논블로킹 모드
+    pub non_blocking: bool,
+    /// 연결된 원격 주소 문자열 (IP:port)
+    pub remote_addr: Option<String>,
+}
+
+impl std::fmt::Debug for TokioSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokioSocket")
+            .field("af", &self.af)
+            .field("sock_type", &self.sock_type)
+            .field("protocol", &self.protocol)
+            .field("connected", &self.stream.is_some())
+            .field("recv_buf_len", &self.recv_buf.len())
+            .field("non_blocking", &self.non_blocking)
+            .field("remote_addr", &self.remote_addr)
+            .finish()
+    }
+}
+
+/// 가상 소켓 상태 (레거시 호환용, 새 코드는 TokioSocket 사용)
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum SocketState {
@@ -203,6 +260,7 @@ pub struct WindowState {
     pub wnd_proc: u32,
     pub user_data: u32,
     pub surface_bitmap: u32,
+    pub window_rgn: u32,
 }
 
 /// Unicorn 엔진의 `User Data` 에 적재되어, 모든 Win32 가상 OS 환경의 전역 상태 트리를
@@ -221,7 +279,9 @@ pub struct Win32Context {
     pub last_error: AtomicU32,
     /// 가상 핸들 카운터 (HWND, HDC, HFONT, SOCKET 등에 사용)
     pub handle_counter: AtomicU32,
-    /// 가상 소켓 맵 (핸들 → 상태)
+    /// TCP 소켓 맵 (핸들 → TokioSocket, 실제 I/O 담당)
+    pub tcp_sockets: Arc<Mutex<HashMap<u32, TokioSocket>>>,
+    /// 가상 소켓 맵 (레거시 상태 추적용)
     pub sockets: Arc<Mutex<HashMap<u32, SocketState>>>,
     /// 윈도우 관리 프레임
     pub win_event: Arc<Mutex<WinEvent>>,
@@ -267,11 +327,21 @@ pub struct Win32Context {
     pub clipboard_open: AtomicU32,
     /// localtime() 등을 위한 정적 tm 구조체 주소
     pub tm_struct_ptr: AtomicU32,
+    /// 데스크톱 창의 핸들
+    pub desktop_hwnd: AtomicU32,
+    /// 현재 활성화된 커서 핸들
+    pub current_cursor: AtomicU32,
+    /// 마우스 현재 X 좌표
+    pub mouse_x: AtomicU32,
+    /// 마우스 현재 Y 좌표
+    pub mouse_y: AtomicU32,
+    /// CRT exit handlers (__dllonexit, _onexit)
+    pub onexit_handlers: Arc<Mutex<Vec<u32>>>,
 }
 
 impl Win32Context {
     pub fn new(ui_tx: Option<Sender<UiCommand>>) -> Self {
-        Win32Context {
+        let ctx = Win32Context {
             heap_cursor: AtomicU32::new(HEAP_BASE as u32),
             import_address: AtomicU32::new(FAKE_IMPORT_BASE as u32),
             dll_modules: Arc::new(Mutex::new(HashMap::new())),
@@ -279,13 +349,14 @@ impl Win32Context {
             // 새 상태
             last_error: AtomicU32::new(0),
             handle_counter: AtomicU32::new(0x1000), // 핸들은 0x1000부터 시작
+            tcp_sockets: Arc::new(Mutex::new(HashMap::new())),
             sockets: Arc::new(Mutex::new(HashMap::new())),
             win_event: Arc::new(Mutex::new(WinEvent::new(ui_tx))),
             window_classes: Arc::new(Mutex::new(HashMap::new())),
             gdi_objects: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(HashMap::new())),
             tls_slots: Arc::new(Mutex::new(HashMap::new())),
-            tls_counter: AtomicU32::new(0),
+            tls_counter: AtomicU32::new(1),
             registry: Arc::new(Mutex::new(HashMap::new())),
             registry_handles: Arc::new(Mutex::new({
                 let mut m = HashMap::new();
@@ -309,7 +380,16 @@ impl Win32Context {
             clipboard_data: Arc::new(Mutex::new(Vec::new())),
             clipboard_open: AtomicU32::new(0),
             tm_struct_ptr: AtomicU32::new(0),
-        }
+            desktop_hwnd: AtomicU32::new(0), // 초기값은 0, 필요 시 아래에서 설정
+            current_cursor: AtomicU32::new(0),
+            mouse_x: AtomicU32::new(320), // 기본 마우스 위치
+            mouse_y: AtomicU32::new(240),
+            onexit_handlers: Arc::new(Mutex::new(Vec::new())),
+        };
+        // 데스크톱 핸들 할당 (0x10000 등 고정값 대신 handle_counter 사용)
+        let desktop_hwnd = ctx.alloc_handle();
+        ctx.desktop_hwnd.store(desktop_hwnd, Ordering::SeqCst);
+        ctx
     }
 
     /// 새 가상 핸들 발급
@@ -368,6 +448,7 @@ impl Clone for Win32Context {
             address_map: self.address_map.clone(),
             last_error: AtomicU32::new(self.last_error.load(Ordering::SeqCst)),
             handle_counter: AtomicU32::new(self.handle_counter.load(Ordering::SeqCst)),
+            tcp_sockets: self.tcp_sockets.clone(),
             sockets: self.sockets.clone(),
             win_event: self.win_event.clone(),
             window_classes: self.window_classes.clone(),
@@ -391,6 +472,11 @@ impl Clone for Win32Context {
             clipboard_data: self.clipboard_data.clone(),
             clipboard_open: AtomicU32::new(self.clipboard_open.load(Ordering::SeqCst)),
             tm_struct_ptr: AtomicU32::new(self.tm_struct_ptr.load(Ordering::SeqCst)),
+            desktop_hwnd: AtomicU32::new(self.desktop_hwnd.load(Ordering::SeqCst)),
+            current_cursor: AtomicU32::new(self.current_cursor.load(Ordering::SeqCst)),
+            mouse_x: AtomicU32::new(self.mouse_x.load(Ordering::SeqCst)),
+            mouse_y: AtomicU32::new(self.mouse_y.load(Ordering::SeqCst)),
+            onexit_handlers: self.onexit_handlers.clone(),
         }
     }
 }

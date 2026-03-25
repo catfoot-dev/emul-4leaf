@@ -466,34 +466,38 @@ impl DllMSVCP60 {
 
             // Init
             "??0Init@ios_base@std@@QAE@XZ" => {
-                crate::emu_log!("[MSVCP60] ios_base::Init::Init()");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!("[MSVCP60] (this={:#x}) ios_base::Init::Init()", this_ptr);
+                Some((0, Some(this_ptr as i32)))
             }
-
             "??1Init@ios_base@std@@QAE@XZ" => {
-                crate::emu_log!("[MSVCP60] ios_base::Init::~Init()");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!("[MSVCP60] (this={:#x}) ios_base::Init::~Init()", this_ptr);
+                Some((0, Some(this_ptr as i32)))
             }
 
             // _Winit
             "??0_Winit@std@@QAE@XZ" => {
-                crate::emu_log!("[MSVCP60] std::_Winit::_Winit()");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!("[MSVCP60] (this={:#x}) std::_Winit::_Winit()", this_ptr);
+                Some((0, Some(this_ptr as i32)))
             }
-
             "??1_Winit@std@@QAE@XZ" => {
-                crate::emu_log!("[MSVCP60] std::_Winit::~_Winit()");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!("[MSVCP60] (this={:#x}) std::_Winit::~_Winit()", this_ptr);
+                Some((0, Some(this_ptr as i32)))
             }
 
             // _Lockit
             "??0_Lockit@std@@QAE@XZ" => {
-                crate::emu_log!("[MSVCP60] std::_Lockit::_Lockit()");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!("[MSVCP60] (this={:#x}) std::_Lockit::_Lockit()", this_ptr);
+                Some((0, Some(this_ptr as i32)))
             }
             "??1_Lockit@std@@QAE@XZ" => {
-                crate::emu_log!("[MSVCP60] std::_Lockit::~_Lockit()");
-                Some((0, None))
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                crate::emu_log!("[MSVCP60] (this={:#x}) std::_Lockit::~_Lockit()", this_ptr);
+                Some((0, Some(this_ptr as i32)))
             }
 
             // basic_iostream constructor

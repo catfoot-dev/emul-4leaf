@@ -39,7 +39,7 @@ impl PacketLogger {
         }
     }
 
-    /// 주어진 방향, 소켓 ID, 파일 데이터를 로거에 추가하고 터미널 버퍼(`emu_log!`)에도 16진수/ASCII 포맷으로 보기 좋게 출력
+    /// 주어진 방향, 소켓 ID, 파일 데이터를 로거에 추가하고 터미널 버퍼(`println!`)에도 16진수/ASCII 포맷으로 보기 좋게 출력
     ///
     /// # 인자
     /// - `direction`: `Send` 인지 `Recv` 인지 여부 (`PacketDirection`)
@@ -75,16 +75,21 @@ impl PacketLogger {
             })
             .collect();
 
-        crate::emu_log!(
+        let log_line = format!(
+            "[{}] t={}ms sock={} len={} | {}",
+            dir_str, timestamp_ms, socket_id, data.len(), hex
+        );
+        println!(
             "[PACKET][{}] t={:>8}ms | sock={:>5} | len={:>5} | {}",
-            dir_str,
-            timestamp_ms,
-            socket_id,
-            data.len(),
-            hex
+            dir_str, timestamp_ms, socket_id, data.len(), hex
         );
         if !data.is_empty() {
-            crate::emu_log!("[PACKET][{}] ASCII: {}", dir_str, ascii);
+            println!("[PACKET][{}] ASCII: {}", dir_str, ascii);
+        }
+        // 소켓 전용 로그 버퍼에도 기록
+        crate::push_socket_log(log_line);
+        if !data.is_empty() {
+            crate::push_socket_log(format!("  ASCII: {}", ascii));
         }
 
         // 캡처 저장
@@ -119,14 +124,14 @@ impl PacketLogger {
             .filter(|p| p.direction == PacketDirection::Recv)
             .count();
         let total_bytes: usize = self.packets.iter().map(|p| p.data.len()).sum();
-        crate::emu_log!("=== Packet Summary ===");
-        crate::emu_log!(
+        println!("=== Packet Summary ===");
+        println!(
             "Total packets: {} (Send: {}, Recv: {})",
             self.packets.len(),
             send_count,
             recv_count
         );
-        crate::emu_log!("Total bytes: {}", total_bytes);
-        crate::emu_log!("======================\n");
+        println!("Total bytes: {}", total_bytes);
+        println!("======================\n");
     }
 }
