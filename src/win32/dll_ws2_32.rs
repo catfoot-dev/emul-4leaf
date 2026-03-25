@@ -9,23 +9,19 @@ use crate::win32::{ApiHookResult, TokioSocket, Win32Context, callee_result};
 /// `WS2_32.dll` 프록시 구현 모듈
 ///
 /// Tokio 기반의 실제 TCP 소켓 I/O를 에뮬레이션합니다.
-/// 에뮬레이터 훅은 동기 컨텍스트이므로 `Handle::block_on()`으로 async 작동을 동기화합니다.
-pub struct DllWS2_32;
-
-/// WSAEWOULDBLOCK - 논블로킹 소켓의 '지금 바로 처리 불가' 오류 코드
+/// 에뮬레이터 훅은 동기 컨텍�/// WSAEWOULDBLOCK - 논블로킹 소켓의 '지금 바로 처리 불가' 오류 코드입니다.
 const WSAEWOULDBLOCK: u32 = 10035;
-/// WSAETIMEDOUT
+/// WSAETIMEDOUT - 연결 시간 초과 오류 코드입니다.
 const WSAETIMEDOUT: u32 = 10060;
-/// WSAECONNREFUSED
+/// WSAECONNREFUSED - 연결 거부 오류 코드입니다.
 const WSAECONNREFUSED: u32 = 10061;
-/// SOCKET_ERROR return value
+/// Winsock 표준 소켓 오류 반환값입니다.
 const SOCKET_ERROR: i32 = -1;
-/// ioctlsocket FIONBIO cmd
+/// ioctlsocket 함수용 FIONBIO 명령어 코드입니다.
 const FIONBIO: u32 = 0x8004667E;
 
-/// 소켓 I/O 전용 Tokio 런타임 (프로세스 수명 동안 유지)
-/// main()이 #[tokio::main]이 아니고 에뮬레이터가 std::thread::spawn으로 동작하므로
-/// Handle::current()를 쓸 수 없어 별도의 런타임을 생성합니다.
+/// 소켓 I/O 전용 Tokio 런타임을 반환합니다.
+/// 에뮬레이터 루프가 동기 스레드에서 작동하므로, 비동기 작업을 제어하기 위해 별도의 런타임을 유지합니다.
 fn get_runtime() -> &'static tokio::runtime::Runtime {
     static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RT.get_or_init(|| {
@@ -37,14 +33,18 @@ fn get_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// 전용 런타임에서 async 작업을 동기 컨텍스트로 실행하는 헬퍼
+/// 비동기 퓨처(Future)를 현재 스레드에서 동기적으로 실행합니다.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     get_runtime().block_on(f)
 }
 
+pub struct DllWS2_32 {}
+
 impl DllWS2_32 {
-    // API: SOCKET accept(SOCKET s, struct sockaddr* addr, int* addrlen)
-    // 역할: Ordinal_1 - 들어오는 연결 요청을 수락 (리스닝 소켓 미구현으로 INVALID_SOCKET 반환)
+    /// **Ordinal 1: accept**
+    ///
+    /// 들어오는 연결 요청을 수락합니다.
+    /// 현재 리스닝 소켓은 미구현 상태이므로 항상 `INVALID_SOCKET`을 반환합니다.
     pub fn accept(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let addr_ptr = uc.read_arg(1);
@@ -58,8 +58,9 @@ impl DllWS2_32 {
         Some((3, Some(-1i32))) // INVALID_SOCKET
     }
 
-    // API: int bind(SOCKET s, const struct sockaddr* name, int namelen)
-    // 역할: Ordinal_2 - 로컬 주소를 소켓에 연결 (에뮬레이션에서는 성공으로 처리)
+    /// **Ordinal 2: bind**
+    ///
+    /// 로컬 주소를 소켓에 연결합니다. 에뮬레이션 환경에서는 항상 성공으로 처리합니다.
     pub fn bind(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let addr_ptr = uc.read_arg(1);
@@ -74,8 +75,9 @@ impl DllWS2_32 {
         Some((3, Some(0)))
     }
 
-    // API: int closesocket(SOCKET s)
-    // 역할: Ordinal_3 - 소켓을 닫음 (TokioSocket 제거로 TcpStream 자동 Drop)
+    /// **Ordinal 3: closesocket**
+    ///
+    /// 소켓을 닫고 관련 리소스를 해제합니다.
     pub fn closesocket(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let ctx = uc.get_data();
@@ -85,13 +87,14 @@ impl DllWS2_32 {
         Some((1, Some(0)))
     }
 
-    // API: int connect(SOCKET s, const struct sockaddr* name, int namelen)
-    // 역할: Ordinal_4 - 실제 tokio::net::TcpStream::connect() 로 TCP 연결 수립
+    /// **Ordinal 4: connect**
+    ///
+    /// 실제 호스트의 `tokio::net::TcpStream::connect`를 호출하여 원격 주소와 연결을 수립합니다.
     pub fn connect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
         let sock = uc.read_arg(0);
         let addr_ptr = uc.read_arg(1);
 
-        // sockaddr_in: sin_family(2), sin_port(2 BE), sin_addr(4)
+        // sockaddr_in 구조체 파싱: family(2), port(2 BE), addr(4)
         let port_bytes = uc
             .mem_read_as_vec(addr_ptr as u64 + 2, 2)
             .unwrap_or_default();
@@ -118,7 +121,6 @@ impl DllWS2_32 {
         let ctx = uc.get_data();
         match result {
             Ok(Ok(stream)) => {
-                // 논블로킹 설정 여부는 별도로 관리 (ioctlsocket 에서 처리)
                 let non_blocking = ctx
                     .tcp_sockets
                     .lock()
@@ -126,6 +128,7 @@ impl DllWS2_32 {
                     .get(&sock)
                     .map(|s| s.non_blocking)
                     .unwrap_or(false);
+
                 ctx.tcp_sockets.lock().unwrap().insert(
                     sock,
                     TokioSocket {
@@ -138,7 +141,7 @@ impl DllWS2_32 {
                         remote_addr: Some(addr_str.clone()),
                     },
                 );
-                crate::emu_log!("[WS2_32] connect({}, \"{}\") -> int 0 (OK)", sock, addr_str);
+                crate::emu_log!("[WS2_32] connect({}, \"{}\") -> OK", sock, addr_str);
                 crate::push_socket_log(format!("[CONN] sock={} -> {} OK", sock, addr_str));
                 Some((3, Some(0)))
             }
@@ -150,20 +153,17 @@ impl DllWS2_32 {
                 };
                 ctx.last_error.store(code, Ordering::SeqCst);
                 crate::emu_log!(
-                    "[WS2_32] connect({}, \"{}\") -> SOCKET_ERROR ({})",
-                    sock, addr_str, e
+                    "[WS2_32] connect({}, \"{}\") -> FAIL: {}",
+                    sock,
+                    addr_str,
+                    e
                 );
                 crate::push_socket_log(format!("[CONN] sock={} -> {} FAIL: {}", sock, addr_str, e));
                 Some((3, Some(SOCKET_ERROR)))
             }
             Err(_) => {
-                // timeout
                 ctx.last_error.store(WSAETIMEDOUT, Ordering::SeqCst);
-                crate::emu_log!(
-                    "[WS2_32] connect({}, \"{}\") -> SOCKET_ERROR (timeout)",
-                    sock,
-                    addr_str
-                );
+                crate::emu_log!("[WS2_32] connect({}, \"{}\") -> TIMEOUT", sock, addr_str);
                 Some((3, Some(SOCKET_ERROR)))
             }
         }
@@ -724,11 +724,7 @@ impl DllWS2_32 {
         );
         crate::push_socket_log(format!(
             "[DNS] \"{}\" -> {}.{}.{}.{}",
-            name,
-            resolved_ip[0],
-            resolved_ip[1],
-            resolved_ip[2],
-            resolved_ip[3]
+            name, resolved_ip[0], resolved_ip[1], resolved_ip[2], resolved_ip[3]
         ));
 
         // hostent 구조체를 에뮬 메모리에 할당 (16 bytes)

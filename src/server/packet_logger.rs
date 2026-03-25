@@ -42,9 +42,9 @@ impl PacketLogger {
     /// 주어진 방향, 소켓 ID, 파일 데이터를 로거에 추가하고 터미널 버퍼(`println!`)에도 16진수/ASCII 포맷으로 보기 좋게 출력
     ///
     /// # 인자
-    /// - `direction`: `Send` 인지 `Recv` 인지 여부 (`PacketDirection`)
-    /// - `socket_id`: 관련된 소켓 핸들 번호 식별자
-    /// - `data`: 전송/수신된 바이트 슬라이스 (`&[u8]`)
+    /// * `direction`: `Send` 인지 `Recv` 인지 여부 (`PacketDirection`)
+    /// * `socket_id`: 관련된 소켓 핸들 번호 식별자
+    /// * `data`: 전송/수신된 바이트 슬라이스 (`&[u8]`)
     pub fn log(&mut self, direction: PacketDirection, socket_id: u32, data: &[u8]) {
         if !self.enabled {
             return;
@@ -77,11 +77,19 @@ impl PacketLogger {
 
         let log_line = format!(
             "[{}] t={}ms sock={} len={} | {}",
-            dir_str, timestamp_ms, socket_id, data.len(), hex
+            dir_str,
+            timestamp_ms,
+            socket_id,
+            data.len(),
+            hex
         );
         println!(
             "[PACKET][{}] t={:>8}ms | sock={:>5} | len={:>5} | {}",
-            dir_str, timestamp_ms, socket_id, data.len(), hex
+            dir_str,
+            timestamp_ms,
+            socket_id,
+            data.len(),
+            hex
         );
         if !data.is_empty() {
             println!("[PACKET][{}] ASCII: {}", dir_str, ascii);
