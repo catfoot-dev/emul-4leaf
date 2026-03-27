@@ -53,6 +53,7 @@ pub struct Debug {
     waiting_for_step: bool,
     auto_running: bool,
     last_log_count: usize,
+    last_socket_count: usize,
     log_scroll_offset: usize,
     input_buffer: String, // 서버로 보낼 Hex 데이터 입력 버퍼
     show_stack: bool,
@@ -69,6 +70,7 @@ impl Debug {
             waiting_for_step: false,
             auto_running: true,
             last_log_count: 0,
+            last_socket_count: 0,
             log_scroll_offset: 0,
             input_buffer: String::new(),
             show_stack: true,
@@ -117,14 +119,15 @@ impl Painter for Debug {
         // 로그 변경 확인
         let current_log_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
         if self.last_log_count != current_log_count {
+            self.last_log_count = current_log_count;
             needs_redraw = true;
         }
 
         // 소켓 로그 변경 확인
         let current_socket_count =
             crate::SOCKET_LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-        if current_socket_count > 0 {
-            // 소켓 로그가 있으면 항상 redraw (간단한 dirty 체크)
+        if self.last_socket_count != current_socket_count {
+            self.last_socket_count = current_socket_count;
             needs_redraw = true;
         }
 
@@ -212,14 +215,11 @@ impl Painter for Debug {
                                 Ok(bytes) => {
                                     if let Some(tx) = crate::server::SERVER_TX.get() {
                                         let _ = tx.send(bytes);
-                                        crate::push_socket_log(format!(
-                                            "[UI] Sent packet: {}",
-                                            trimmed
-                                        ));
+                                        crate::emu_socket_log!("[UI] Sent packet: {}", trimmed);
                                     }
                                 }
                                 Err(e) => {
-                                    crate::push_socket_log(format!("[UI] Hex Error: {}", e));
+                                    crate::emu_socket_log!("[UI] Hex Error: {}", e);
                                 }
                             }
                             self.input_buffer.clear();
@@ -340,7 +340,8 @@ impl Painter for Debug {
         // === 동적 레이아웃 계산 ===
         let header_h = 30i32;
         let usable_h = height as i32 - header_h;
-        let active_panels = (self.show_stack as i32) + (self.show_socket_log as i32) + (self.show_log as i32);
+        let active_panels =
+            (self.show_stack as i32) + (self.show_socket_log as i32) + (self.show_log as i32);
 
         if active_panels == 0 {
             return;
@@ -353,48 +354,82 @@ impl Painter for Debug {
         if self.show_stack {
             // 구분선
             for x in 10..width.saturating_sub(10) {
-                Pixel(Point::new(x as i32, current_y), Rgb888::new(80, 80, 40)).draw(&mut display).ok();
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(80, 80, 40))
+                    .draw(&mut display)
+                    .ok();
             }
             current_y += 10;
 
             if let Some(state) = self.cpu_state.as_ref() {
                 // 레지스터 출력
-                let reg_names = ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP"];
+                let reg_names = [
+                    "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP",
+                ];
                 let mut reg_y = current_y + 10;
-                Text::new("REGISTERS", Point::new(10, reg_y), style_y.clone()).draw(&mut display).ok();
+                Text::new("REGISTERS", Point::new(10, reg_y), style_y.clone())
+                    .draw(&mut display)
+                    .ok();
                 reg_y += 15;
 
                 for (i, val) in state.regs.iter().enumerate() {
-                    let style = if i == 8 { style_c.clone() } else { style_w.clone() };
+                    let style = if i == 8 {
+                        style_c.clone()
+                    } else {
+                        style_w.clone()
+                    };
                     let text = format!("{}: 0x{:08x}", reg_names[i], val);
-                    Text::new(&text, Point::new(10, reg_y), style).draw(&mut display).ok();
+                    Text::new(&text, Point::new(10, reg_y), style)
+                        .draw(&mut display)
+                        .ok();
                     reg_y += 13;
-                    if reg_y > current_y + panel_h - 20 { break; }
+                    if reg_y > current_y + panel_h - 20 {
+                        break;
+                    }
                 }
 
                 // 다음 명령어
                 reg_y += 10;
                 if reg_y < current_y + panel_h - 15 {
-                    Text::new("NEXT OP:", Point::new(10, reg_y), style_y.clone()).draw(&mut display).ok();
+                    Text::new("NEXT OP:", Point::new(10, reg_y), style_y.clone())
+                        .draw(&mut display)
+                        .ok();
                     reg_y += 15;
-                    Text::new(&state.next_instr, Point::new(10, reg_y), style_c.clone()).draw(&mut display).ok();
+                    Text::new(&state.next_instr, Point::new(10, reg_y), style_c.clone())
+                        .draw(&mut display)
+                        .ok();
                 }
 
                 // 스택 뷰 (오른쪽)
                 let stack_x = 200;
                 let mut stack_y = current_y + 10;
-                Text::new("STACK (TOP 10)", Point::new(stack_x, stack_y), style_y.clone()).draw(&mut display).ok();
+                Text::new(
+                    "STACK (TOP 10)",
+                    Point::new(stack_x, stack_y),
+                    style_y.clone(),
+                )
+                .draw(&mut display)
+                .ok();
                 stack_y += 15;
 
                 for (addr, val) in &state.stack {
                     let mark = if *addr == state.regs[7] { "<- ESP" } else { "" };
                     let text = format!("0x{:08x}: 0x{:08x} {}", addr, val, mark);
-                    Text::new(&text, Point::new(stack_x, stack_y), style_w.clone()).draw(&mut display).ok();
+                    Text::new(&text, Point::new(stack_x, stack_y), style_w.clone())
+                        .draw(&mut display)
+                        .ok();
                     stack_y += 13;
-                    if stack_y > current_y + panel_h - 15 { break; }
+                    if stack_y > current_y + panel_h - 15 {
+                        break;
+                    }
                 }
             } else {
-                Text::new("Waiting for CPU state...", Point::new(10, current_y + 10), style_w.clone()).draw(&mut display).ok();
+                Text::new(
+                    "Waiting for CPU state...",
+                    Point::new(10, current_y + 10),
+                    style_w.clone(),
+                )
+                .draw(&mut display)
+                .ok();
             }
             current_y += panel_h;
         }
@@ -403,7 +438,9 @@ impl Painter for Debug {
         if self.show_socket_log {
             // 구분선
             for x in 10..width.saturating_sub(10) {
-                Pixel(Point::new(x as i32, current_y), Rgb888::new(60, 120, 60)).draw(&mut display).ok();
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(60, 120, 60))
+                    .draw(&mut display)
+                    .ok();
             }
             current_y += 10;
 
@@ -413,7 +450,9 @@ impl Painter for Debug {
                 .anti_aliasing_color(Rgb888::BLACK)
                 .build();
 
-            Text::new("SOCKET LOG", Point::new(10, current_y), style_y.clone()).draw(&mut display).ok();
+            Text::new("SOCKET LOG", Point::new(10, current_y), style_y.clone())
+                .draw(&mut display)
+                .ok();
 
             let socket_content_h = panel_h - 40; // 제목 + 입력란 제외 높이
             let socket_lines_max = (socket_content_h / 13).max(1) as usize;
@@ -423,7 +462,9 @@ impl Painter for Debug {
                     let start = total.saturating_sub(socket_lines_max);
                     let mut sy = current_y + 15;
                     for line in b.iter().skip(start) {
-                        Text::new(line, Point::new(10, sy), style_g.clone()).draw(&mut display).ok();
+                        Text::new(line, Point::new(10, sy), style_g.clone())
+                            .draw(&mut display)
+                            .ok();
                         sy += 13;
                     }
                 }
@@ -445,11 +486,15 @@ impl Painter for Debug {
         if self.show_log {
             // 구분선
             for x in 10..width.saturating_sub(10) {
-                Pixel(Point::new(x as i32, current_y), Rgb888::new(100, 100, 100)).draw(&mut display).ok();
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(100, 100, 100))
+                    .draw(&mut display)
+                    .ok();
             }
             let log_y_start = current_y + 5;
 
-            if let Some(buf) = crate::LOG_BUFFER.get() && let Ok(b) = buf.try_lock() {
+            if let Some(buf) = crate::LOG_BUFFER.get()
+                && let Ok(b) = buf.try_lock()
+            {
                 let current_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
                 self.last_log_count = current_count;
 
@@ -465,18 +510,35 @@ impl Painter for Debug {
                 let start_idx = end_idx.saturating_sub(lines_to_show);
                 let row_count = end_idx - start_idx;
 
-                let mut log_y = log_y_start + (lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13);
+                let mut log_y = log_y_start
+                    + (lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13);
                 for line in b.iter().skip(start_idx).take(row_count) {
                     let text = line.clone();
-                    let no = if text.starts_with("[0x") { &text[1..9] } else { &text };
-                    let message = if text.starts_with("[0x") { format!("[             ] {}", &text[11..]) } else { "".to_string() };
+                    let no = if text.starts_with("[0x") {
+                        &text[1..9]
+                    } else {
+                        &text
+                    };
+                    let message = if text.starts_with("[0x") {
+                        format!("[             ] {}", &text[11..])
+                    } else {
+                        "".to_string()
+                    };
 
-                    let style = if message.contains("[!]") { style_r.clone() }
-                               else if message.contains("[*]") { style_c.clone() }
-                               else { style_w.clone() };
+                    let style = if message.contains("[!]") {
+                        style_r.clone()
+                    } else if message.contains("[*]") {
+                        style_c.clone()
+                    } else {
+                        style_w.clone()
+                    };
 
-                    Text::new(&message, Point::new(10, log_y), style).draw(&mut display).ok();
-                    Text::new(&no, Point::new(14, log_y), style_w.clone()).draw(&mut display).ok();
+                    Text::new(&message, Point::new(10, log_y), style)
+                        .draw(&mut display)
+                        .ok();
+                    Text::new(&no, Point::new(14, log_y), style_w.clone())
+                        .draw(&mut display)
+                        .ok();
                     log_y += 13;
                 }
             }

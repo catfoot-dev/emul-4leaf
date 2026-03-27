@@ -84,13 +84,11 @@ use std::sync::mpsc::Receiver;
 pub fn run_ui(
     ui_rx: Receiver<UiCommand>,
     initial_painters: Vec<Box<dyn Painter>>,
-    gdi_objects: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<u32, crate::win32::GdiObject>>,
-    >,
+    context: crate::win32::Win32Context,
 ) {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 
-    let mut app = win_frame::WinFrame::new(ui_rx, initial_painters, gdi_objects);
+    let mut app = win_frame::WinFrame::new(ui_rx, initial_painters, context);
     event_loop.run_app(&mut app).unwrap();
 }

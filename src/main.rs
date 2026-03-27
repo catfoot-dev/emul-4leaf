@@ -12,7 +12,7 @@ mod win32;
 
 use helper::{SHARED_MEM_BASE, UnicornHelper};
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
+use std::sync::{Arc, Mutex, OnceLock, atomic::AtomicUsize};
 use std::{
     any::Any,
     sync::mpsc::{Receiver, Sender, channel},
@@ -88,6 +88,17 @@ macro_rules! emu_log {
     }};
 }
 
+#[macro_export]
+macro_rules! emu_socket_log {
+    () => {
+        $crate::push_socket_log(String::new())
+    };
+    ($($arg:tt)*) => {{
+        let msg = std::format!($($arg)*);
+        $crate::push_socket_log(msg)
+    }};
+}
+
 use unicorn_engine::{
     Unicorn,
     unicorn_const::{Arch, Mode},
@@ -109,12 +120,13 @@ fn main() {
     let (ui_tx, ui_rx) = channel::<UiCommand>();
     let (splash_tx, splash_rx) = channel::<()>();
 
+    // 1. Win32 에뮬레이션 상태 컨텍스트 생성 (Arc로 내부 상태 공유 가능)
     let context = Win32Context::new(Some(ui_tx.clone()));
-    let gdi_objects = context.gdi_objects.clone();
 
+    let context_for_emu = context.clone();
     // 1. 에뮬레이션 코어 스레드 실행
     thread::spawn(move || {
-        if let Err(e) = emu_4leaf(state_tx, cmd_rx, ui_tx, context, splash_tx) {
+        if let Err(e) = emu_4leaf(state_tx, cmd_rx, ui_tx, context_for_emu, splash_tx) {
             eprintln!("[4leaf Emulator Error] {:?}", e);
         }
     });
@@ -143,7 +155,7 @@ fn main() {
     initial_painters.push(Box::new(debug_painter));
 
     // 4. UI 이벤트 루프 실행 (메인 스레드 점유)
-    ui::run_ui(ui_rx, initial_painters, gdi_objects);
+    ui::run_ui(ui_rx, initial_painters, context.clone());
 }
 
 /// Unicorn 엔진을 초기화하고 필수 DLL들을 로드한 뒤 메인 시뮬레이션을 시작합니다.
@@ -228,5 +240,5 @@ fn run_4leaf_main(uc: &mut Unicorn<Win32Context>) {
         Box::new("127.0.0.1"),
     ];
 
-    uc.run_dll_func(dll_name, func_name, args);
+    uc.run_emulator(dll_name, func_name, args);
 }

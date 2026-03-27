@@ -3,7 +3,8 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::Receiver;
 
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::keyboard::{Key, NamedKey};
 use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle};
 use winit::window::{Window, WindowId};
@@ -36,9 +37,9 @@ pub struct WinFrame {
     id_to_hwnd: HashMap<WindowId, u32>,
 
     /// softbuffer 컨텍스트
-    context: Option<SoftContext<DisplayHandle<'static>>>,
-    /// gdi_objects 가상 메모리 맵
-    pub gdi_objects: std::sync::Arc<std::sync::Mutex<HashMap<u32, crate::win32::GdiObject>>>,
+    sb_context: Option<SoftContext<DisplayHandle<'static>>>,
+    /// Win32 컨텍스트 (공유 상태)
+    pub emu_context: crate::win32::Win32Context,
 
     /// 초기 페인터 목록 (resumed에서 창 생성 후 painters로 이동)
     initial_painters: Vec<Box<dyn Painter>>,
@@ -48,7 +49,7 @@ impl WinFrame {
     pub fn new(
         ui_rx: Receiver<UiCommand>,
         initial_painters: Vec<Box<dyn Painter>>,
-        gdi_objects: std::sync::Arc<std::sync::Mutex<HashMap<u32, crate::win32::GdiObject>>>,
+        context: crate::win32::Win32Context,
     ) -> Self {
         Self {
             ui_rx,
@@ -56,8 +57,8 @@ impl WinFrame {
             painters: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             id_to_hwnd: HashMap::new(),
-            context: None,
-            gdi_objects,
+            sb_context: None,
+            emu_context: context,
             initial_painters,
         }
     }
@@ -74,13 +75,13 @@ impl WinFrame {
 
 impl ApplicationHandler for WinFrame {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.context.is_none() {
+        if self.sb_context.is_none() {
             let display_handle = unsafe {
                 std::mem::transmute::<DisplayHandle<'_>, DisplayHandle<'static>>(
                     event_loop.display_handle().unwrap(),
                 )
             };
-            self.context = Some(SoftContext::new(display_handle).unwrap());
+            self.sb_context = Some(SoftContext::new(display_handle).unwrap());
         }
 
         // 초기 페인터들을 위한 창 생성
@@ -144,7 +145,7 @@ impl ApplicationHandler for WinFrame {
                     // 에뮬레이션 윈도우용 기본 Painter
                     let painter = DefaultEmulatorPainter {
                         surface_bitmap,
-                        gdi_objects: self.gdi_objects.clone(),
+                        emu_context: self.emu_context.clone(),
                     };
                     self.painters.insert(id, Box::new(painter));
                     self.windows.insert(id, window);
@@ -253,7 +254,7 @@ impl ApplicationHandler for WinFrame {
                         if let Some(window) = self.windows.get(id) {
                             let mut cursor_applied = false;
                             {
-                                let gdi_objects = self.gdi_objects.lock().unwrap();
+                                let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
                                 if let Some(crate::win32::GdiObject::Cursor {
                                     resource_id,
                                     frames,
@@ -361,25 +362,46 @@ impl ApplicationHandler for WinFrame {
             Some(w) => w,
             None => return,
         };
-        let painter = match self.painters.get_mut(&id) {
-            Some(p) => p,
-            None => return,
+
+        // 윈도우별 자체 이벤트 처리 위임 및 필요한 정보 추출
+        let (handled, quit_on_close) = if let Some(painter) = self.painters.get_mut(&id) {
+            (
+                painter.handle_event(&event, event_loop),
+                painter.quit_on_close(),
+            )
+        } else {
+            (false, false)
         };
 
-        // 윈도우별 자체 이벤트 처리 위임
-        if painter.handle_event(&event, event_loop) {
+        if handled {
             window.request_redraw();
         }
 
         match event {
             WindowEvent::RedrawRequested => {
+                // 1. 게스트에게 그리기 요청 (더티 플래그 설정 및 메시지 큐 삽입)
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let mut win_event = self.emu_context.win_event.lock().unwrap();
+                    if let Some(state) = win_event.windows.get_mut(&hwnd) {
+                        state.needs_paint = true;
+                    }
+
+                    let mut q = self.emu_context.message_queue.lock().unwrap();
+                    // 이미 WM_PAINT가 큐에 있는지 확인하고 없으면 삽입 (메시지 중복 방지)
+                    if !q.iter().any(|m| m[0] == hwnd && m[1] == 0x000F) {
+                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        q.push_back([hwnd, 0x000F, 0, 0, time, 0, 0]); // WM_PAINT
+                    }
+                }
+
+                // 2. 호스트 화면에 현재 버퍼 출력 (실제 그리기)
                 let (width, height) = {
                     let size = window.inner_size();
                     (size.width, size.height)
                 };
 
                 let context = self
-                    .context
+                    .sb_context
                     .as_ref()
                     .expect("Context should be initialized");
                 let mut surface = Surface::new(context, window).unwrap();
@@ -390,20 +412,189 @@ impl ApplicationHandler for WinFrame {
                 let mut buffer = surface.buffer_mut().unwrap();
                 buffer.fill(0);
 
-                painter.paint(&mut buffer, width, height);
+                if let Some(painter) = self.painters.get_mut(&id) {
+                    painter.paint(&mut buffer, width, height);
+                }
 
                 buffer.present().unwrap();
             }
 
             WindowEvent::CloseRequested => {
-                if painter.quit_on_close() {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let mut q = self.emu_context.message_queue.lock().unwrap();
+                    q.push_back([hwnd, 0x0010, 0, 0, 0, 0, 0]); // WM_CLOSE
+                }
+
+                if quit_on_close {
                     event_loop.exit();
                 } else {
                     self.windows.remove(&id);
                     self.painters.remove(&id);
                     if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
                         self.hwnd_to_id.remove(&hwnd);
+
+                        let mut q = self.emu_context.message_queue.lock().unwrap();
+                        q.push_back([hwnd, 0x0002, 0, 0, 0, 0, 0]); // WM_DESTROY
+
+                        // 메인 윈도우라면 WM_QUIT 전송
+                        if quit_on_close {
+                            q.push_back([0, 0x0012, 0, 0, 0, 0, 0]); // WM_QUIT
+                        }
                     }
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                let x = position.x as u32;
+                let y = position.y as u32;
+
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    self.emu_context
+                        .mouse_x
+                        .store(x, std::sync::atomic::Ordering::SeqCst);
+                    self.emu_context
+                        .mouse_y
+                        .store(y, std::sync::atomic::Ordering::SeqCst);
+
+                    let lparam = (y << 16) | (x & 0xFFFF);
+                    let mut q = self.emu_context.message_queue.lock().unwrap();
+                    // WM_MOUSEMOVE(0x0200) 중복 제거: 이미 큐에 있으면 위치만 업데이트
+                    if let Some(m) = q.iter_mut().find(|m| m[0] == hwnd && m[1] == 0x0200) {
+                        m[3] = lparam;
+                        m[5] = x;
+                        m[6] = y;
+                    } else {
+                        q.push_back([hwnd, 0x0200, 0, lparam, 0, x, y]);
+                    }
+
+                    // 마우스 트래킹 (TrackMouseEvent) 처리
+                    let mut track_opt = self.emu_context.track_mouse_event.lock().unwrap();
+                    if let Some(track) = track_opt.clone() {
+                        if track.hwnd != hwnd && (track.flags & 0x00000002 != 0) {
+                            let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                            q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
+                            *track_opt = None;
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let mut track_opt = self.emu_context.track_mouse_event.lock().unwrap();
+                    if let Some(track) = track_opt.clone() {
+                        if track.hwnd == hwnd && (track.flags & 0x00000002 != 0) {
+                            let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                            let mut q = self.emu_context.message_queue.lock().unwrap();
+                            q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
+                            *track_opt = None;
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let x = self
+                        .emu_context
+                        .mouse_x
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let y = self
+                        .emu_context
+                        .mouse_y
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let lparam = (y << 16) | (x & 0xFFFF);
+
+                    let msg = match (button, state) {
+                        (MouseButton::Left, ElementState::Pressed) => 0x0201, // WM_LBUTTONDOWN
+                        (MouseButton::Left, ElementState::Released) => 0x0202, // WM_LBUTTONUP
+                        (MouseButton::Right, ElementState::Pressed) => 0x0204, // WM_RBUTTONDOWN
+                        (MouseButton::Right, ElementState::Released) => 0x0205, // WM_RBUTTONUP
+                        _ => 0,
+                    };
+
+                    if msg != 0 {
+                        let mut q = self.emu_context.message_queue.lock().unwrap();
+                        q.push_back([hwnd, msg, 0, lparam, 0, x, y]);
+                    }
+                }
+            }
+
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key, state, ..
+                    },
+                ..
+            } => {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let vk = match logical_key {
+                        Key::Named(NamedKey::ArrowLeft) => 0x25,
+                        Key::Named(NamedKey::ArrowUp) => 0x26,
+                        Key::Named(NamedKey::ArrowRight) => 0x27,
+                        Key::Named(NamedKey::ArrowDown) => 0x28,
+                        Key::Named(NamedKey::Enter) => 0x0D,
+                        Key::Named(NamedKey::Escape) => 0x1B,
+                        Key::Named(NamedKey::Space) => 0x20,
+                        Key::Named(NamedKey::Backspace) => 0x08,
+                        Key::Named(NamedKey::Tab) => 0x09,
+                        Key::Named(NamedKey::Shift) => 0x10,
+                        Key::Named(NamedKey::Control) => 0x11,
+                        Key::Named(NamedKey::Alt) => 0x12,
+                        Key::Character(s) => s.chars().next().unwrap_or('\0') as u32,
+                        _ => 0,
+                    };
+
+                    if vk != 0 {
+                        {
+                            let mut keys = self.emu_context.key_states.lock().unwrap();
+                            if vk < 256 {
+                                keys[vk as usize] = state == ElementState::Pressed;
+                            }
+                        }
+
+                        let msg = if state == ElementState::Pressed {
+                            0x0100 // WM_KEYDOWN
+                        } else {
+                            0x0101 // WM_KEYUP
+                        };
+                        let mut q = self.emu_context.message_queue.lock().unwrap();
+                        q.push_back([hwnd, msg, vk, 0, 0, 0, 0]);
+                    }
+                }
+            }
+
+            WindowEvent::Focused(focused) => {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let mut q = self.emu_context.message_queue.lock().unwrap();
+                    let wparam = if focused { 1 } else { 0 }; // WA_ACTIVE, WA_INACTIVE
+                    q.push_back([hwnd, 0x0006, wparam, 0, 0, 0, 0]); // WM_ACTIVATE
+
+                    if focused {
+                        self.emu_context
+                            .focus_hwnd
+                            .store(hwnd, std::sync::atomic::Ordering::SeqCst);
+                        self.emu_context
+                            .active_hwnd
+                            .store(hwnd, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+
+            WindowEvent::Resized(size) => {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let width = size.width;
+                    let height = size.height;
+                    let lparam = (height << 16) | (width & 0xFFFF);
+
+                    let mut q = self.emu_context.message_queue.lock().unwrap();
+                    q.push_back([hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
+
+                    self.emu_context
+                        .win_event
+                        .lock()
+                        .unwrap()
+                        .resize_window(hwnd, width, height);
                 }
             }
 
@@ -415,7 +606,7 @@ impl ApplicationHandler for WinFrame {
 /// 에뮬레이터 윈도우용 기본 페인터
 pub struct DefaultEmulatorPainter {
     surface_bitmap: u32,
-    gdi_objects: std::sync::Arc<std::sync::Mutex<HashMap<u32, crate::win32::GdiObject>>>,
+    emu_context: crate::win32::Win32Context,
 }
 impl Painter for DefaultEmulatorPainter {
     fn create_window(
@@ -430,7 +621,10 @@ impl Painter for DefaultEmulatorPainter {
     }
 
     fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
-        let gdi_objects = self.gdi_objects.lock().unwrap();
+        let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
+            Ok(g) => g,
+            Err(_) => return, // 락 획득 실패 시 이번 프레임은 건너뜀 (데드락 방지)
+        };
 
         let mut surface_pixels = None;
 

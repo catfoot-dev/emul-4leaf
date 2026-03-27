@@ -1,7 +1,7 @@
 use unicorn_engine::Unicorn;
 
 use crate::helper::UnicornHelper;
-use crate::win32::{ApiHookResult, Win32Context, callee_result, caller_result};
+use crate::win32::{ApiHookResult, Win32Context};
 
 /// `MSVCP60.dll` 프록시 구현 모듈
 ///
@@ -13,7 +13,7 @@ impl DllMSVCP60 {
     // 역할: std::string의 기본 생성자. 빈 문자열로 초기화
     pub fn basic_string_constructor(
         uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    ) -> Option<ApiHookResult> {
         // 기본 생성자: this->_Ptr = static empty string, this->_Len = 0, this->_Res = 0
         let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
         let allocator = uc.read_arg(0);
@@ -30,12 +30,12 @@ impl DllMSVCP60 {
             allocator,
             this_ptr
         );
-        Some((1, Some(this_ptr as i32)))
+        Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
     }
 
     // API: std::basic_string<char>::_Tidy(bool)
     // 역할: 문자열 버퍼를 해제하고 초기 상태로 되돌림
-    pub fn basic_string_tidy(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn basic_string_tidy(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
         let b = uc.read_arg(0);
         crate::emu_log!(
@@ -43,12 +43,12 @@ impl DllMSVCP60 {
             this_ptr,
             b
         );
-        Some((1, None))
+        Some(ApiHookResult::callee(1, None))
     }
 
     // API: std::basic_string<char>::_Grow(size_t, bool)
     // 역할: 문자열 버퍼 크기를 확장
-    pub fn basic_string_grow(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn basic_string_grow(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
         let n = uc.read_arg(0);
         let b = uc.read_arg(1);
@@ -58,14 +58,14 @@ impl DllMSVCP60 {
             n,
             b
         );
-        Some((2, Some(1))) // TRUE = 성공
+        Some(ApiHookResult::callee(2, Some(1))) // TRUE = 성공
     }
 
     // API: std::basic_string<char>::assign(const char*, size_t)
     // 역할: 문자열에 특정 포인터의 데이터를 버퍼만큼 할당
     pub fn basic_string_assign_param2(
         uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    ) -> Option<ApiHookResult> {
         let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
         let ptr = uc.read_arg(0);
         let len = uc.read_arg(1);
@@ -76,14 +76,14 @@ impl DllMSVCP60 {
             len,
             this_ptr
         );
-        Some((2, Some(this_ptr as i32)))
+        Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
     }
 
     // API: std::basic_string<char>::assign(const basic_string&, size_t, size_t)
     // 역할: 다른 string 객체의 일부를 할당
     pub fn basic_string_assign_param3(
         uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    ) -> Option<ApiHookResult> {
         let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
         let other_ptr = uc.read_arg(0);
         let offset = uc.read_arg(1);
@@ -96,12 +96,12 @@ impl DllMSVCP60 {
             count,
             this_ptr
         );
-        Some((3, Some(this_ptr as i32)))
+        Some(ApiHookResult::callee(3, Some(this_ptr as i32)))
     }
 
     // API: std::basic_string<char>::erase(size_t, size_t)
     // 역할: 문자열의 일부를 삭제
-    pub fn basic_string_erase(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn basic_string_erase(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
         let offset = uc.read_arg(0);
         let count = uc.read_arg(1);
@@ -112,7 +112,86 @@ impl DllMSVCP60 {
             count,
             this_ptr
         );
-        Some((2, Some(this_ptr as i32)))
+        Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
+    }
+
+    /// `MSVCP60.dll`에서 데이터로 취급되어야 할 심볼들을 메모리에 할당하고 주소를 반환합니다.
+    pub fn resolve_export(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<u32> {
+        match func_name {
+            // 정적 npos = static const size_t = 0xFFFFFFFF
+            "?npos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@2IB" => {
+                let addr = uc.malloc(4);
+                uc.write_u32(addr, 0xFFFFFFFF);
+                crate::emu_log!("[MSVCP60] basic_string::npos resolved to {:#x}", addr);
+                Some(addr as u32)
+            }
+            // _Nullstr
+            "?_C@?1??_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ@4DB" =>
+            {
+                let addr = uc.alloc_str("");
+                crate::emu_log!("[MSVCP60] basic_string::_Nullstr resolved to {:#x}", addr);
+                Some(addr as u32)
+            }
+            // static _Fpz (zero fpos)
+            "?_Fpz@std@@3_JB" => {
+                let addr = uc.malloc(8);
+                uc.write_u32(addr, 0);
+                uc.write_u32(addr + 4, 0);
+                crate::emu_log!("[MSVCP60] std::_Fpz resolved to {:#x}", addr);
+                Some(addr as u32)
+            }
+            // VTable / Vbtable pointers
+            name if name.starts_with("??_7") || name.starts_with("??_8") => {
+                let addr = uc.malloc(64); // Fake vtable
+                crate::emu_log!("[MSVCP60] vtable/vbtable {} resolved to {:#x}", name, addr);
+                Some(addr as u32)
+            }
+            // cin, cout, cerr, clog (Global objects)
+            "?cin@std@@3V?$basic_istream@DU?$char_traits@D@std@@@1@A"
+            | "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A"
+            | "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A"
+            | "?clog@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => {
+                let addr = uc.malloc(128); // Object size placeholder
+                crate::emu_log!(
+                    "[MSVCP60] Global object {} resolved to {:#x}",
+                    func_name,
+                    addr
+                );
+                Some(addr as u32)
+            }
+            // Global locale implementation pointer (important for 0xC3C3C3C7 fix)
+            "?_Global@_Locimp@locale@std@@0PAV123@A"
+            | "?_Clocptr@_Locimp@locale@std@@0PAV123@A" => {
+                let addr = uc.malloc(4);
+                uc.write_u32(addr, 0); // Initialize as NULL
+                crate::emu_log!(
+                    "[MSVCP60] Global locale ptr {} resolved to {:#x}",
+                    func_name,
+                    addr
+                );
+                Some(addr as u32)
+            }
+            // Facet ID counter
+            "?_Id_cnt@facet@locale@std@@0HA" => {
+                let addr = uc.malloc(4);
+                uc.write_u32(addr, 0);
+                crate::emu_log!(
+                    "[MSVCP60] Facet ID counter {} resolved to {:#x}",
+                    func_name,
+                    addr
+                );
+                Some(addr as u32)
+            }
+            // Static init flag in basic_filebuf::_Init
+            "?_Stinit@?1??_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@23@@Z@4HA" =>
+            {
+                let addr = uc.malloc(4);
+                uc.write_u32(addr, 0);
+                crate::emu_log!("[MSVCP60] Static init flag resolved to {:#x}", addr);
+                Some(addr as u32)
+            }
+            _ => None,
+        }
     }
 
     /// 함수명 기준 `MSVCP60.dll` API 구현체
@@ -121,18 +200,8 @@ impl DllMSVCP60 {
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
         // MSVCP60.dll은 Visual C++ 6.0의 C++ 표준 라이브러리 (STL)
         // mangled name 에서 호출 규약을 판별
-        // ??...QAE : thiscall (callee cleanup)
-        // ??...YA  : cdecl (caller cleanup)
-        // ??...YG  : stdcall (callee cleanup)
-
         let is_cdecl = func_name.contains("@YA") || func_name.contains("@Y?A");
-        let wrap = if is_cdecl {
-            caller_result
-        } else {
-            callee_result
-        };
-
-        wrap(match func_name {
+        let result = match func_name {
             // =========================================================
             // basic_string<char> (std::string)
             // =========================================================
@@ -155,31 +224,11 @@ impl DllMSVCP60 {
                 Self::basic_string_erase(uc)
             }
 
-            // 정적 npos
-            "?npos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@2IB" => {
+            // _Xoff
+            "?_Xoff@std@@YAXXZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                // npos = static const size_t = 0xFFFFFFFF
-                let addr = uc.malloc(4);
-                uc.write_u32(addr, 0xFFFFFFFF);
-                crate::emu_log!(
-                    "[MSVCP60] (this={:#x}) basic_string::npos -> {:#x}",
-                    this_ptr,
-                    addr
-                );
-                Some((0, Some(addr as i32)))
-            }
-
-            // _Nullstr
-            "?_C@?1??_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ@4DB" =>
-            {
-                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                let addr = uc.alloc_str("");
-                crate::emu_log!(
-                    "[MSVCP60] (this={:#x}) basic_string::_Nullstr -> {:#x}",
-                    this_ptr,
-                    addr
-                );
-                Some((0, Some(addr as i32)))
+                crate::emu_log!("[MSVCP60] (this={:#x}) std::_Xoff()", this_ptr);
+                Some(ApiHookResult::callee(0, None))
             }
 
             // _Xlen
@@ -189,25 +238,74 @@ impl DllMSVCP60 {
                     "[MSVCP60] (this={:#x}) std::_Xlen() [throw length_error]",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // =========================================================
             // iostream / fstream / streambuf
             // =========================================================
 
-            // API: std::basic_ostream<char>::operator<<(int)
+            // API: std::basic_ostream<char>& operator<<(int)
             // 역할: 정수 값을 출력 스트림에 삽입
             "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                let val = uc.read_arg(0);
+                let val = uc.read_arg(0) as i32;
                 crate::emu_log!(
                     "[MSVCP60] (this={:#x}) basic_ostream::operator<<({}) -> (this={:#x})",
                     this_ptr,
                     val,
                     this_ptr
                 );
-                Some((1, Some(this_ptr as i32)))
+                // 실제 스트림 버퍼에 쓰는 대신 로그에 출력하는 것으로 갈음
+                Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
+            }
+
+            // basic_ostream constructor (3 arguments)
+            "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N1@Z" =>
+            {
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let buf = uc.read_arg(0);
+                let b1 = uc.read_arg(1);
+                let b2 = uc.read_arg(2);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ostream::basic_ostream({:#x}, {}, {}) -> (this={:#x})",
+                    this_ptr,
+                    buf,
+                    b1,
+                    b2,
+                    this_ptr
+                );
+                Some(ApiHookResult::callee(3, Some(this_ptr as i32)))
+            }
+
+            // basic_ostream constructor (2 arguments)
+            "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z" =>
+            {
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let buf = uc.read_arg(0);
+                let b1 = uc.read_arg(1);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_ostream::basic_ostream({:#x}, {}) -> (this={:#x})",
+                    this_ptr,
+                    buf,
+                    b1,
+                    this_ptr
+                );
+                Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
+            }
+
+            // basic_string::operator=(const char*)
+            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBD@Z" =>
+            {
+                let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
+                let str_ptr = uc.read_arg(0);
+                crate::emu_log!(
+                    "[MSVCP60] (this={:#x}) basic_string::operator=({:#x}) -> (this={:#x})",
+                    this_ptr,
+                    str_ptr,
+                    this_ptr
+                );
+                Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
             }
 
             // API: std::basic_ios<char>::clear(iostate, bool)
@@ -215,14 +313,17 @@ impl DllMSVCP60 {
             "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 let state = uc.read_arg(0);
-                let b = uc.read_arg(1);
+                let _b = uc.read_arg(1);
                 crate::emu_log!(
-                    "[MSVCP60] (this={:#x}) basic_ios::clear({}, {}) -> VOID",
+                    "[MSVCP60] (this={:#x}) basic_ios::clear({})",
                     this_ptr,
-                    state,
-                    b
+                    state
                 );
-                Some((2, None))
+                // MSVC 6.0 basic_ios layout guess: iostate at +16
+                if this_ptr != 0 {
+                    uc.write_u32(this_ptr as u64 + 16, state);
+                }
+                Some(ApiHookResult::callee(2, None))
             }
 
             // basic_ios::init(streambuf*, bool)
@@ -230,14 +331,17 @@ impl DllMSVCP60 {
             {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 let buf = uc.read_arg(0);
-                let b = uc.read_arg(1);
+                let _b = uc.read_arg(1);
                 crate::emu_log!(
-                    "[MSVCP60] (this={:#x}) basic_ios::init({:#x}, {}) -> VOID",
+                    "[MSVCP60] (this={:#x}) basic_ios::init({:#x})",
                     this_ptr,
-                    buf,
-                    b
+                    buf
                 );
-                Some((2, None))
+                // MSVC 6.0 basic_ios: streambuf* at +4
+                if this_ptr != 0 {
+                    uc.write_u32(this_ptr as u64 + 4, buf);
+                }
+                Some(ApiHookResult::callee(2, None))
             }
 
             // API: void std::ios_base::_Init()
@@ -248,7 +352,7 @@ impl DllMSVCP60 {
                     "[MSVCRT] (this={:#x}) std::ios_base::_Init() -> void",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // API: _Locimp * __cdecl std::locale::_Init()
@@ -259,7 +363,7 @@ impl DllMSVCP60 {
                     "[MSVCRT] (this={:#x}) std::locale::_Init() -> void",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // API: void __thiscall std::strstreambuf::_Init(int, char* buffer, size_t size, char* end)
@@ -278,7 +382,7 @@ impl DllMSVCP60 {
                     arg3,
                     arg4
                 );
-                Some((4, None))
+                Some(ApiHookResult::callee(4, None))
             }
 
             // basic_fstream destructor sequence
@@ -288,7 +392,7 @@ impl DllMSVCP60 {
                     "[MSVCP60] (this={:#x}) basic_fstream::~basic_fstream() -> VOID",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // API: std::basic_ofstream<char>::basic_ofstream()
@@ -300,7 +404,7 @@ impl DllMSVCP60 {
                     this_ptr,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
 
             "??_D?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAEXXZ" => {
@@ -309,7 +413,7 @@ impl DllMSVCP60 {
                     "[MSVCP60] (this={:#x}) basic_ofstream::~basic_ofstream() -> VOID",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // API: std::basic_istream<char>::seekg(fpos)
@@ -323,25 +427,35 @@ impl DllMSVCP60 {
                     pos,
                     this_ptr
                 );
-                Some((1, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
             }
 
             // API: std::basic_istream<char>::getline(char*, int, char)
             // 역할: 입력 스트림에서 한 줄을 읽음
             "?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADHD@Z" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
-                let buf = uc.read_arg(0);
+                let buf_addr = uc.read_arg(0);
                 let count = uc.read_arg(1);
-                let delim = uc.read_arg(2);
+                let delim = uc.read_arg(2) as u8;
+
                 crate::emu_log!(
-                    "[MSVCP60] (this={:#x}) basic_istream::getline({:#x}, {}, {}) -> (this={:#x})",
+                    "[MSVCP60] (this={:#x}) basic_istream::getline({:#x}, {}, '{}')",
                     this_ptr,
-                    buf,
+                    buf_addr,
                     count,
-                    delim,
-                    this_ptr
+                    delim as char
                 );
-                Some((3, Some(this_ptr as i32)))
+
+                if buf_addr != 0 && count > 0 {
+                    // 현재는 실제 입력 장치가 없으므로 빈 문자열(또는 EOF 상태)로 처리
+                    // 버퍼를 NULL로 초기화
+                    uc.write_u8(buf_addr as u64, 0);
+
+                    // ios 상태를 조작하여 failbit/eofbit을 설정할 필요가 있을 수 있음
+                    // (this + offset)에 접근하여 상태 비트 업데이트 구현 가능
+                }
+
+                Some(ApiHookResult::callee(3, Some(this_ptr as i32)))
             }
 
             // basic_istream constructor
@@ -357,7 +471,7 @@ impl DllMSVCP60 {
                     b,
                     this_ptr
                 );
-                Some((2, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
             }
 
             // API: std::basic_filebuf<char>::open(const char*, int)
@@ -373,7 +487,7 @@ impl DllMSVCP60 {
                     mode,
                     this_ptr
                 );
-                Some((2, Some(this_ptr as i32))) // NULL = 실패
+                Some(ApiHookResult::callee(2, Some(this_ptr as i32))) // NULL = 실패
             }
 
             // basic_filebuf constructor
@@ -386,7 +500,7 @@ impl DllMSVCP60 {
                     file_ptr,
                     this_ptr
                 );
-                Some((1, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
             }
 
             // basic_filebuf destructor (virtual)
@@ -396,7 +510,7 @@ impl DllMSVCP60 {
                     "[MSVCP60] (this={:#x}) basic_filebuf::~basic_filebuf() -> VOID",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // basic_ostream destructor (virtual)
@@ -406,7 +520,7 @@ impl DllMSVCP60 {
                     "[MSVCP60] (this={:#x}) basic_ostream::~basic_ostream() -> VOID",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // basic_ios destructor (virtual)
@@ -416,7 +530,7 @@ impl DllMSVCP60 {
                     "[MSVCP60] (this={:#x}) basic_ios::~basic_ios() -> VOID",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // ios_base constructor / destructor
@@ -427,7 +541,7 @@ impl DllMSVCP60 {
                     this_ptr,
                     this_ptr
                 );
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
 
             "??1ios_base@std@@UAE@XZ" => {
@@ -436,7 +550,7 @@ impl DllMSVCP60 {
                     "[MSVCP60] (this={:#x}) ios_base::~ios_base() -> VOID",
                     this_ptr
                 );
-                Some((0, None))
+                Some(ApiHookResult::callee(0, None))
             }
 
             // ios_base::getloc()
@@ -449,7 +563,7 @@ impl DllMSVCP60 {
                     this_ptr,
                     addr
                 );
-                Some((1, Some(addr as i32)))
+                Some(ApiHookResult::callee(1, Some(addr as i32)))
             }
 
             // streambuf::imbue(const locale&)
@@ -461,43 +575,43 @@ impl DllMSVCP60 {
                     this_ptr,
                     locale_ptr
                 );
-                Some((1, None))
+                Some(ApiHookResult::callee(1, None))
             }
 
             // Init
             "??0Init@ios_base@std@@QAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 crate::emu_log!("[MSVCP60] (this={:#x}) ios_base::Init::Init()", this_ptr);
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
             "??1Init@ios_base@std@@QAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 crate::emu_log!("[MSVCP60] (this={:#x}) ios_base::Init::~Init()", this_ptr);
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
 
             // _Winit
             "??0_Winit@std@@QAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 crate::emu_log!("[MSVCP60] (this={:#x}) std::_Winit::_Winit()", this_ptr);
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
             "??1_Winit@std@@QAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 crate::emu_log!("[MSVCP60] (this={:#x}) std::_Winit::~_Winit()", this_ptr);
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
 
             // _Lockit
             "??0_Lockit@std@@QAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 crate::emu_log!("[MSVCP60] (this={:#x}) std::_Lockit::_Lockit()", this_ptr);
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
             "??1_Lockit@std@@QAE@XZ" => {
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap() as u32;
                 crate::emu_log!("[MSVCP60] (this={:#x}) std::_Lockit::~_Lockit()", this_ptr);
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
 
             // basic_iostream constructor
@@ -511,24 +625,7 @@ impl DllMSVCP60 {
                     sb_ptr,
                     this_ptr
                 );
-                Some((1, Some(this_ptr as i32)))
-            }
-
-            // VTable 포인터 (static 데이터)
-            name if name.starts_with("??_7") || name.starts_with("??_8") => {
-                // vtable/vbtable pointer - 가상 주소 반환
-                let addr = uc.malloc(64); // 가짜 vtable
-                crate::emu_log!("[MSVCP60] vtable/vbtable: {} -> {:#x}", name, addr);
-                Some((0, Some(addr as i32)))
-            }
-
-            // static _Fpz (zero fpos)
-            "?_Fpz@std@@3_JB" => {
-                let addr = uc.malloc(8);
-                uc.write_u32(addr, 0);
-                uc.write_u32(addr + 4, 0);
-                crate::emu_log!("[MSVCP60] std::_Fpz -> {:#x}", addr);
-                Some((0, Some(addr as i32)))
+                Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
             }
 
             // API: std::operator<<(std::ostream&, const char*)
@@ -550,7 +647,7 @@ impl DllMSVCP60 {
                     text,
                     os_ptr
                 );
-                Some((2, Some(os_ptr as i32))) // Return ostream&
+                Some(ApiHookResult::callee(2, Some(os_ptr as i32))) // Return ostream&
             }
 
             // API: std::flush(std::ostream&)
@@ -564,15 +661,26 @@ impl DllMSVCP60 {
                     os_ptr,
                     os_ptr
                 );
-                Some((1, Some(os_ptr as i32))) // Return ostream&
+                Some(ApiHookResult::callee(1, Some(os_ptr as i32))) // Return ostream&
             }
 
             _ => {
                 crate::emu_log!("[!] MSVCP60 Unhandled: {}", func_name);
                 // 대부분의 MSVCP60 함수는 thiscall. ECX 반환
                 let this_ptr = uc.reg_read(unicorn_engine::RegisterX86::ECX).unwrap_or(0) as u32;
-                Some((0, Some(this_ptr as i32)))
+                Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
             }
-        })
+        };
+
+        if is_cdecl {
+            if let Some(mut r) = result {
+                r.cleanup = crate::win32::StackCleanup::Caller;
+                Some(r)
+            } else {
+                None
+            }
+        } else {
+            result
+        }
     }
 }

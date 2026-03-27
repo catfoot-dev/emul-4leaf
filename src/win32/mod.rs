@@ -2,7 +2,7 @@ mod dll_advapi32;
 mod dll_comctl32;
 mod dll_gdi32;
 mod dll_imm32;
-mod dll_kernel32;
+pub(crate) mod dll_kernel32;
 mod dll_msvcp60;
 mod dll_msvcrt;
 mod dll_ole32;
@@ -14,12 +14,61 @@ mod dll_ws2_32;
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU32, Ordering},
         mpsc::Sender,
     },
     time::Instant,
 };
+
+/// 소켓 I/O 전용 Tokio 런타임을 반환합니다.
+/// WS2_32와 KERNEL32 양쪽에서 동일한 런타임을 공유해야 TcpStream이 올바르게 작동합니다.
+pub fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("Failed to create shared Tokio runtime")
+    })
+}
+
+/// WSA 이벤트 핸들과 소켓을 연결하는 상태 구조체입니다.
+#[derive(Debug, Clone)]
+pub struct WsaEventEntry {
+    /// 이 이벤트와 연결된 소켓 핸들
+    pub socket: u32,
+    /// WSAEventSelect에서 등록한 관심 이벤트 마스크 (FD_READ 등)
+    pub interest: u32,
+    /// 발생했지만 아직 소비되지 않은 이벤트 (WSAEnumNetworkEvents가 읽고 클리어)
+    pub pending: u32,
+}
+
+/// 에뮬레이션되는 가상 스레드의 상태를 저장하는 구조체
+#[derive(Debug, Clone)]
+pub struct EmulatedThread {
+    pub handle: u32,
+    pub thread_id: u32,
+    /// 스레드 스택 블록의 시작 주소 (힙에서 할당)
+    pub stack_alloc: u32,
+    pub stack_size: u32,
+    // 저장된 CPU 레지스터
+    pub eax: u32,
+    pub ecx: u32,
+    pub edx: u32,
+    pub ebx: u32,
+    pub esp: u32,
+    pub ebp: u32,
+    pub esi: u32,
+    pub edi: u32,
+    pub eip: u32,
+    pub alive: bool,
+    /// _endthreadex / _endthread 에 의해 종료가 요청된 경우 true
+    pub terminate_requested: bool,
+    /// 스레드가 다시 실행될 수 있는 최소 시각 (Yield/Sleep 용)
+    pub resume_time: Option<Instant>,
+}
 
 use unicorn_engine::Unicorn;
 
@@ -52,6 +101,8 @@ pub struct ApiHookResult {
     pub cleanup: StackCleanup,
     /// EAX 레지스터에 기록될 리턴값 (None일 경우 레지스터를 변경하지 않음)
     pub return_value: Option<i32>,
+    /// true일 경우 리턴 처리를 하지 않고 동일한 API 호출을 재시도하도록 유도 (yield용)
+    pub retry: bool,
 }
 
 impl ApiHookResult {
@@ -60,6 +111,16 @@ impl ApiHookResult {
         Self {
             cleanup: StackCleanup::Caller,
             return_value,
+            retry: false,
+        }
+    }
+
+    /// 재시도(yield)를 요청하는 결과를 생성합니다.
+    pub const fn retry() -> Self {
+        Self {
+            cleanup: StackCleanup::Caller,
+            return_value: None,
+            retry: true,
         }
     }
 
@@ -68,6 +129,7 @@ impl ApiHookResult {
         Self {
             cleanup: StackCleanup::Callee(arg_count),
             return_value,
+            retry: false,
         }
     }
 }
@@ -78,15 +140,6 @@ impl From<(usize, Option<i32>)> for ApiHookResult {
     }
 }
 
-/// `stdcall` 결과 생성을 돕는 유틸리티 함수입니다.
-pub fn callee_result(result: Option<(usize, Option<i32>)>) -> Option<ApiHookResult> {
-    result.map(ApiHookResult::from)
-}
-
-/// `cdecl` 결과 생성을 돕는 유틸리티 함수입니다.
-pub fn caller_result(result: Option<(usize, Option<i32>)>) -> Option<ApiHookResult> {
-    result.map(|(_, return_value)| ApiHookResult::caller(return_value))
-}
 
 /// 메모리에 로드되어 에뮬레이팅될 준비가 끝난 프록시 DLL의 메타데이터 구조체
 #[derive(Debug, Clone)]
@@ -256,6 +309,24 @@ pub struct WindowClass {
     pub menu_name: String,
 }
 
+/// 가상 타이머(Timer) 정보를 저장합니다.
+#[derive(Debug, Clone)]
+pub struct Timer {
+    pub hwnd: u32,
+    pub id: u32,
+    pub elapse: u32,
+    pub timer_proc: u32,
+    pub last_tick: std::time::Instant,
+}
+
+/// 가상 마우스 트래킹(TrackMouseEvent) 상태를 저장합니다.
+#[derive(Debug, Clone)]
+pub struct TrackMouseEventState {
+    pub hwnd: u32,
+    pub flags: u32,
+    pub hover_time: u32,
+}
+
 /// 가상 윈도우(HWND)의 현재 상태를 저장합니다.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -280,6 +351,8 @@ pub struct WindowState {
     pub surface_bitmap: u32,
     /// 윈도우의 가시 영역(Region) 핸들
     pub window_rgn: u32,
+    /// 윈도우가 다시 그려져야 하는지 여부 (WM_PAINT 생성용)
+    pub needs_paint: bool,
 }
 
 /// Unicorn 엔진의 `User Data`에 적재되어, 모든 Win32 가상 OS 환경의 전역 상태를
@@ -296,9 +369,9 @@ pub struct Win32Context {
     pub address_map: Arc<Mutex<HashMap<u64, String>>>,
 
     /// Win32 에러 코드 (GetLastError / SetLastError)
-    pub last_error: AtomicU32,
+    pub last_error: Arc<AtomicU32>,
     /// 가상 핸들(HWND, HDC, SOCKET 등) 발급을 위한 전역 카운터
-    pub handle_counter: AtomicU32,
+    pub handle_counter: Arc<AtomicU32>,
     /// 실제 TCP 통신을 담당하는 Tokio 기반 소켓 맵
     pub tcp_sockets: Arc<Mutex<HashMap<u32, TokioSocket>>>,
     /// 소켓의 논리적 상태를 추적하는 맵
@@ -311,8 +384,8 @@ pub struct Win32Context {
     pub gdi_objects: Arc<Mutex<HashMap<u32, GdiObject>>>,
     /// 가상 동기화 이벤트 맵
     pub events: Arc<Mutex<HashMap<u32, EventState>>>,
-    /// TLS(Thread Local Storage) 슬롯 데이터
-    pub tls_slots: Arc<Mutex<HashMap<u32, u32>>>,
+    /// TLS(Thread Local Storage) 슬롯 데이터 (outer key = thread_id, inner = tls_index → value)
+    pub tls_slots: Arc<Mutex<HashMap<u32, HashMap<u32, u32>>>>,
     /// TLS 슬롯 할당을 위한 카운터
     pub tls_counter: AtomicU32,
     /// 가상 레지스트리 데이터 (키 경로 -> 값 데이터)
@@ -327,20 +400,25 @@ pub struct Win32Context {
     pub packet_logger: Arc<Mutex<PacketLogger>>,
     /// 가상 파일 핸들 맵 (HFILE -> 호스트 파일 객체)
     pub files: Arc<Mutex<HashMap<u32, std::fs::File>>>,
+    /// WSA 이벤트 핸들 맵 (event_handle → WsaEventEntry)
+    /// WSAEventSelect / WSAEnumNetworkEvents / WaitForSingleObject 구현에 사용
+    pub wsa_event_map: Arc<Mutex<HashMap<u32, WsaEventEntry>>>,
 
     /// 포커스를 가진 윈도우 핸들
-    pub focus_hwnd: AtomicU32,
+    pub focus_hwnd: Arc<AtomicU32>,
     /// 현재 활성(Active) 상태인 윈도우 핸들
-    pub active_hwnd: AtomicU32,
+    pub active_hwnd: Arc<AtomicU32>,
     /// 최상위 전면(Foreground) 윈도우 핸들
-    pub foreground_hwnd: AtomicU32,
+    pub foreground_hwnd: Arc<AtomicU32>,
     /// 마우스 캡처를 보유한 윈도우 핸들
-    pub capture_hwnd: AtomicU32,
+    pub capture_hwnd: Arc<AtomicU32>,
+    /// 마우스 트래킹 상태 (_TrackMouseEvent 용)
+    pub track_mouse_event: Arc<Mutex<Option<TrackMouseEventState>>>,
 
     /// 애플리케이션용 가상 메시지 큐
     pub message_queue: Arc<Mutex<std::collections::VecDeque<[u32; 7]>>>,
-    /// 활성화된 타이머 맵 (ID -> 간격)
-    pub timers: Arc<Mutex<HashMap<u32, u32>>>,
+    /// 활성화된 타이머 맵 (ID -> Timer 객체)
+    pub timers: Arc<Mutex<HashMap<u32, Timer>>>,
     /// 가상 키보드 키 상태 배열 (256키)
     pub key_states: Arc<Mutex<[bool; 256]>>,
 
@@ -355,11 +433,17 @@ pub struct Win32Context {
     /// 현재 표시되는 커서의 핸들
     pub current_cursor: AtomicU32,
     /// 마우스 현재 X 좌표
-    pub mouse_x: AtomicU32,
+    pub mouse_x: Arc<AtomicU32>,
     /// 마우스 현재 Y 좌표
-    pub mouse_y: AtomicU32,
+    pub mouse_y: Arc<AtomicU32>,
     /// CRT 종료 핸들러 리스트
     pub onexit_handlers: Arc<Mutex<Vec<u32>>>,
+    /// 에뮬레이션된 가상 스레드 목록
+    pub threads: Arc<Mutex<Vec<EmulatedThread>>>,
+    /// 현재 실행 중인 스레드 ID (0 = 메인 스레드)
+    pub current_thread_idx: Arc<AtomicU32>,
+    /// 메인 스레드(tid=0)용 재실행 대기 시각
+    pub main_resume_time: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Win32Context {
@@ -373,8 +457,8 @@ impl Win32Context {
             import_address: AtomicU32::new(FAKE_IMPORT_BASE as u32),
             dll_modules: Arc::new(Mutex::new(HashMap::new())),
             address_map: Arc::new(Mutex::new(HashMap::new())),
-            last_error: AtomicU32::new(0),
-            handle_counter: AtomicU32::new(0x1000),
+            last_error: Arc::new(AtomicU32::new(0)),
+            handle_counter: Arc::new(AtomicU32::new(0x1000)),
             tcp_sockets: Arc::new(Mutex::new(HashMap::new())),
             sockets: Arc::new(Mutex::new(HashMap::new())),
             win_event: Arc::new(Mutex::new(WinEvent::new(ui_tx))),
@@ -396,10 +480,12 @@ impl Win32Context {
             rand_state: AtomicU32::new(12345),
             packet_logger: Arc::new(Mutex::new(PacketLogger::new())),
             files: Arc::new(Mutex::new(HashMap::new())),
-            focus_hwnd: AtomicU32::new(0),
-            active_hwnd: AtomicU32::new(0),
-            foreground_hwnd: AtomicU32::new(0),
-            capture_hwnd: AtomicU32::new(0),
+            wsa_event_map: Arc::new(Mutex::new(HashMap::new())),
+            focus_hwnd: Arc::new(AtomicU32::new(0)),
+            active_hwnd: Arc::new(AtomicU32::new(0)),
+            foreground_hwnd: Arc::new(AtomicU32::new(0)),
+            capture_hwnd: Arc::new(AtomicU32::new(0)),
+            track_mouse_event: Arc::new(Mutex::new(None)),
             message_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             timers: Arc::new(Mutex::new(HashMap::new())),
             key_states: Arc::new(Mutex::new([false; 256])),
@@ -408,9 +494,12 @@ impl Win32Context {
             tm_struct_ptr: AtomicU32::new(0),
             desktop_hwnd: AtomicU32::new(0),
             current_cursor: AtomicU32::new(0),
-            mouse_x: AtomicU32::new(320),
-            mouse_y: AtomicU32::new(240),
+            mouse_x: Arc::new(AtomicU32::new(320)),
+            mouse_y: Arc::new(AtomicU32::new(240)),
             onexit_handlers: Arc::new(Mutex::new(Vec::new())),
+            threads: Arc::new(Mutex::new(Vec::new())),
+            current_thread_idx: Arc::new(AtomicU32::new(0)),
+            main_resume_time: Arc::new(Mutex::new(None)),
         };
 
         // 데스크톱 핸들 선행 할당
@@ -479,6 +568,19 @@ impl Win32Context {
             }
         }
     }
+
+    /// DLL의 임포트 해소(Resolve) 과정에서 프록시 DLL이 특수하게 관리하는 데이터 주소 등이 있는지 확인합니다.
+    pub fn resolve_proxy_export(
+        uc: &mut Unicorn<Win32Context>,
+        dll_name: &str,
+        func_name: &str,
+    ) -> Option<u32> {
+        match dll_name {
+            "MSVCRT.dll" => DllMSVCRT::resolve_export(uc, func_name),
+            "MSVCP60.dll" => DllMSVCP60::resolve_export(uc, func_name),
+            _ => None,
+        }
+    }
 }
 
 impl Clone for Win32Context {
@@ -488,8 +590,8 @@ impl Clone for Win32Context {
             import_address: AtomicU32::new(self.import_address.load(Ordering::SeqCst)),
             dll_modules: self.dll_modules.clone(),
             address_map: self.address_map.clone(),
-            last_error: AtomicU32::new(self.last_error.load(Ordering::SeqCst)),
-            handle_counter: AtomicU32::new(self.handle_counter.load(Ordering::SeqCst)),
+            last_error: self.last_error.clone(),
+            handle_counter: self.handle_counter.clone(),
             tcp_sockets: self.tcp_sockets.clone(),
             sockets: self.sockets.clone(),
             win_event: self.win_event.clone(),
@@ -504,10 +606,12 @@ impl Clone for Win32Context {
             rand_state: AtomicU32::new(self.rand_state.load(Ordering::SeqCst)),
             packet_logger: self.packet_logger.clone(),
             files: self.files.clone(),
-            focus_hwnd: AtomicU32::new(self.focus_hwnd.load(Ordering::SeqCst)),
-            active_hwnd: AtomicU32::new(self.active_hwnd.load(Ordering::SeqCst)),
-            foreground_hwnd: AtomicU32::new(self.foreground_hwnd.load(Ordering::SeqCst)),
-            capture_hwnd: AtomicU32::new(self.capture_hwnd.load(Ordering::SeqCst)),
+            wsa_event_map: self.wsa_event_map.clone(),
+            focus_hwnd: self.focus_hwnd.clone(),
+            active_hwnd: self.active_hwnd.clone(),
+            foreground_hwnd: self.foreground_hwnd.clone(),
+            capture_hwnd: self.capture_hwnd.clone(),
+            track_mouse_event: self.track_mouse_event.clone(),
             message_queue: self.message_queue.clone(),
             timers: self.timers.clone(),
             key_states: self.key_states.clone(),
@@ -516,9 +620,12 @@ impl Clone for Win32Context {
             tm_struct_ptr: AtomicU32::new(self.tm_struct_ptr.load(Ordering::SeqCst)),
             desktop_hwnd: AtomicU32::new(self.desktop_hwnd.load(Ordering::SeqCst)),
             current_cursor: AtomicU32::new(self.current_cursor.load(Ordering::SeqCst)),
-            mouse_x: AtomicU32::new(self.mouse_x.load(Ordering::SeqCst)),
-            mouse_y: AtomicU32::new(self.mouse_y.load(Ordering::SeqCst)),
+            mouse_x: self.mouse_x.clone(),
+            mouse_y: self.mouse_y.clone(),
             onexit_handlers: self.onexit_handlers.clone(),
+            threads: self.threads.clone(),
+            current_thread_idx: self.current_thread_idx.clone(),
+            main_resume_time: self.main_resume_time.clone(),
         }
     }
 }

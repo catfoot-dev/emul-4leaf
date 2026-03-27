@@ -1,7 +1,7 @@
 use unicorn_engine::Unicorn;
 
 use crate::helper::UnicornHelper;
-use crate::win32::{ApiHookResult, Win32Context, callee_result};
+use crate::win32::{ApiHookResult, Win32Context};
 
 /// `ADVAPI32.dll` 프록시 구현 모듈
 ///
@@ -11,7 +11,7 @@ pub struct DllADVAPI32;
 impl DllADVAPI32 {
     // API: LONG RegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData)
     // 역할: 레지스트리 키의 값을 읽어오는 함수
-    pub fn reg_query_value_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn reg_query_value_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hkey = uc.read_arg(0);
         let name_addr = uc.read_arg(1);
         let reserved = uc.read_arg(2);
@@ -63,12 +63,12 @@ impl DllADVAPI32 {
             lpcb_data,
             ret
         );
-        Some((6, Some(ret)))
+        Some(ApiHookResult::callee(6, Some(ret)))
     }
 
     // API: LONG RegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Reserved, LPSTR lpClass, DWORD dwOptions, REGSAM samDesired, LPSECURITY_ATTRIBUTES lpSecurityAttributes, PHKEY phkResult, LPDWORD lpdwDisposition)
     // 역할: 레지스트리 키를 생성하거나 여는 함수
-    pub fn reg_create_key_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn reg_create_key_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hkey = uc.read_arg(0);
         let subkey_addr = uc.read_arg(1);
         let subkey = if subkey_addr != 0 {
@@ -119,12 +119,12 @@ impl DllADVAPI32 {
             new_handle,
             new_path
         );
-        Some((9, Some(0))) // ERROR_SUCCESS
+        Some(ApiHookResult::callee(9, Some(0))) // ERROR_SUCCESS
     }
 
     // API: LONG RegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOptions, REGSAM samDesired, PHKEY phkResult)
     // 역할: 레지스트리 키를 여는 함수
-    pub fn reg_open_key_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn reg_open_key_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hkey = uc.read_arg(0);
         let subkey_addr = uc.read_arg(1);
         let subkey = if subkey_addr != 0 {
@@ -167,21 +167,21 @@ impl DllADVAPI32 {
             new_handle,
             new_path
         );
-        Some((5, Some(0))) // ERROR_SUCCESS
+        Some(ApiHookResult::callee(5, Some(0))) // ERROR_SUCCESS
     }
 
     // API: LONG RegCloseKey(HKEY hKey)
     // 역할: 열려 있는 레지스트리 키를 닫는 함수
-    pub fn reg_close_key(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn reg_close_key(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hkey = uc.read_arg(0);
         uc.get_data().registry_handles.lock().unwrap().remove(&hkey);
         crate::emu_log!("[ADVAPI32] RegCloseKey({:#x}) -> LONG 0", hkey);
-        Some((1, Some(0))) // ERROR_SUCCESS
+        Some(ApiHookResult::callee(1, Some(0))) // ERROR_SUCCESS
     }
 
     // API: LONG RegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD Reserved, DWORD dwType, const BYTE *lpData, DWORD cbData)
     // 역할: 레지스트리 키에 값을 설정하는 함수
-    pub fn reg_set_value_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn reg_set_value_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hkey = uc.read_arg(0);
         let name_addr = uc.read_arg(1);
         let reserved = uc.read_arg(2);
@@ -233,12 +233,12 @@ impl DllADVAPI32 {
             cb_data,
             ret
         );
-        Some((6, Some(ret)))
+        Some(ApiHookResult::callee(6, Some(ret)))
     }
 
     /// 함수명 기준 `ADVAPI32.dll` API 구현체
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
-        callee_result(match func_name {
+        match func_name {
             "RegQueryValueExA" => Self::reg_query_value_ex_a(uc),
             "RegOpenKeyExA" => Self::reg_open_key_ex_a(uc),
             "RegCloseKey" => Self::reg_close_key(uc),
@@ -248,6 +248,6 @@ impl DllADVAPI32 {
                 crate::emu_log!("[!] ADVAPI32 Unhandled: {}", func_name);
                 None
             }
-        })
+        }
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     debug::common::{CpuContext, DebugCommand},
-    win32::{LoadedDll, StackCleanup, Win32Context},
+    win32::{LoadedDll, StackCleanup, Win32Context, dll_kernel32::DllKERNEL32},
 };
 use chardetng::EncodingDetector;
 use encoding_rs::EUC_KR;
@@ -14,6 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, Sender},
     },
+    time::{Duration, Instant},
     u8, vec,
 };
 use unicorn_engine::{HookType, Prot, RegisterX86, Unicorn};
@@ -115,6 +116,12 @@ pub trait UnicornHelper {
     /// * `args`: 함수에 전달될 인자들 모음(`Any` 박스 형태)
     fn run_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>);
 
+    /// 메인 에뮬레이터 루프를 실행 (tid=0과 백그라운드 스레드를 교차 실행)
+    fn run_emulator(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>);
+
+    /// 함수 호출을 위한 스택 및 EIP 환경을 준비 (실제 에뮬레이션은 시작하지 않음)
+    fn prepare_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>);
+
     // === 메모리 읽기/쓰기 (Heap/General) ===
 
     /// 특정 메모리 주소에서 32비트(4바이트) 정수를 리틀 엔디안(Little Endian)으로 읽음
@@ -124,6 +131,7 @@ pub trait UnicornHelper {
     /// # 반환
     /// * `u32`: 해당 주소에 저장된 32비트 값
     fn read_u32(&self, addr: u64) -> u32;
+    fn read_i32(&self, addr: u64) -> i32;
 
     /// 특정 메모리 주소에서 16비트(2바이트) 정수를 리틀 엔디안(Little Endian)으로 읽음
     ///
@@ -156,6 +164,8 @@ pub trait UnicornHelper {
     /// # 인자
     /// * `addr`: 문자열 처리가 시작될 메모리 주소
     fn read_string(&self, addr: u64) -> String;
+    fn read_u8(&self, addr: u64) -> u8;
+    fn write_u8(&mut self, addr: u64, value: u8);
 
     /// 대상 메모리에서 페이지 경계를 고려하여 지정된 최대 길이까지 바이트 배열을 읽어옴
     ///
@@ -293,13 +303,19 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 let import_func = {
                     let context = uc.get_data();
                     let address_map = context.address_map.lock().unwrap();
-                    address_map.get(&addr).cloned()
+                    let info = address_map.get(&addr).cloned();
+                    // if let Some(ref name) = info {
+                    //     let cur_tid = context.current_thread_idx.load(Ordering::SeqCst);
+                    //     let ret_addr = uc.read_u32(uc.reg_read(RegisterX86::ESP).unwrap_or(0));
+                    //     crate::emu_log!("[*] API Dispatch: {:<20} at EIP={:#x} (ret={:#x}, tid={})", name, addr, ret_addr, cur_tid);
+                    // }
+                    info
                 };
 
                 if let Some(import_func) = import_func {
                     let splits: Vec<&str> = import_func.split('!').collect();
                     if splits.len() < 2 {
-                        crate::emu_log!("[!] Invalid import function format: {}", import_func);
+                        // crate::emu_log!("[!] Invalid import function format: {}", import_func);
                         return;
                     }
                     let dll_name = splits[0];
@@ -329,6 +345,12 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
                     // 2. DLL 핸들러(Proxy DLL)에 정의된 함수인지 확인
                     if let Some(hook_result) = Win32Context::handle(uc, dll_name, func_name) {
+                        if hook_result.retry {
+                            // 재시도 요청 시: EIP를 현재 후킹 지점으로 유지하고 실행 중단 (멀티태스킹 양보)
+                            uc.emu_stop().unwrap_or_default();
+                            return;
+                        }
+
                         if let Some(eax) = hook_result.return_value {
                             uc.reg_write(RegisterX86::EAX, eax as u64)
                                 .unwrap_or_default();
@@ -356,6 +378,17 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         self.add_code_hook(0, -1i64 as u64, move |uc, addr, size| {
             inst_count += 1;
             let is_auto = auto_run_hook.load(Ordering::Relaxed);
+
+            // 약 10만 명령어마다 타 스레드에게 실행 양보 및 진행 상황 로그
+            if inst_count % 100000 == 0 {
+                let eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
+                crate::emu_log!(
+                    "[*] Main thread running at EIP={:#x} (inst_count={})",
+                    eip,
+                    inst_count
+                );
+                DllKERNEL32::schedule_threads(uc);
+            }
 
             // CPU 레지스터 읽기 (EAX ~ EIP)
             let regs = [
@@ -463,13 +496,17 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 | HookType::MEM_FETCH_UNMAPPED,
             0,
             -1i64 as u64,
-            |_uc, access, addr, size, value| {
+            |uc, access, addr, size, value| {
+                let eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
+                let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
                 crate::emu_log!(
-                    "[!] Unmapped memory access: {:?} at {:#x} (Size: {}, Val: {:#x})",
+                    "[!] Unmapped memory access: {:?} at {:#x} (Size: {}, Val: {:#x}) EIP={:#x} ESP={:#x}",
                     access,
                     addr,
                     size,
-                    value
+                    value,
+                    eip,
+                    esp
                 );
                 false // 중단
             },
@@ -735,7 +772,16 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                         }
                     }
 
-                    // 2단계: 못 찾았다면 Fake Address (Hooking 용) 할당
+                    // 2단계: 못 찾았다면 프록시 DLL(Rust)에서 특수하게 처리하는 데이터 주소 등이 있는지 확인
+                    let mut final_addr = if final_addr == 0 {
+                        Win32Context::resolve_proxy_export(self, &dll_name, &func_name)
+                            .map(|a| a as u64)
+                            .unwrap_or(0)
+                    } else {
+                        final_addr
+                    };
+
+                    // 3단계: 여전히 못 찾았다면 Fake Address (Hooking 용) 할당
                     let context = self.get_data();
                     if final_addr == 0 {
                         final_addr = context.import_address.fetch_add(4, Ordering::SeqCst) as u64;
@@ -816,6 +862,68 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
     /// * `func_name`: 호출할 대상 함수 이름
     /// * `args`: 함수에 전달될 인자들 모음
     fn run_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>) {
+        self.prepare_dll_func(dll_name, func_name, args);
+        let eip = self.reg_read(RegisterX86::EIP).unwrap_or(0);
+
+        if let Err(e) = self.emu_start(eip, EXIT_ADDRESS as u64, 0, 0) {
+            crate::emu_log!(
+                "[!] Execution of {}!{} failed: {:?}",
+                dll_name,
+                func_name,
+                e
+            );
+        }
+    }
+
+    fn run_emulator(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>) {
+        self.prepare_dll_func(dll_name, func_name, args);
+
+        loop {
+            let eip = self.reg_read(RegisterX86::EIP).unwrap_or(0);
+            if eip == EXIT_ADDRESS {
+                break;
+            }
+
+            // 메인 스레드(tid=0) 실행
+            const QUANTUM: usize = 200_000;
+            let _ = self.emu_start(eip, EXIT_ADDRESS as u64, 0, QUANTUM);
+
+            // 백그라운드 스레드 스케줄링
+            DllKERNEL32::schedule_threads(self);
+
+            // 모든 스레드(메인 포함)가 대기 중인 경우 호스트 측에서 대기하여 CPU 점유율 조절
+            let earliest_resume = {
+                let context = self.get_data();
+                let mut min_time = *context.main_resume_time.lock().unwrap();
+
+                let threads = context.threads.lock().unwrap();
+                for t in threads.iter().filter(|t| t.alive) {
+                    if let Some(t_res) = t.resume_time {
+                        if min_time.is_none() || t_res < min_time.unwrap() {
+                            min_time = Some(t_res);
+                        }
+                    } else {
+                        min_time = None;
+                        break;
+                    }
+                }
+                min_time
+            };
+
+            if let Some(res_time) = earliest_resume {
+                let now = Instant::now();
+                if res_time > now {
+                    let diff = res_time.duration_since(now);
+                    std::thread::sleep(diff.min(Duration::from_millis(10)));
+                }
+            }
+        }
+
+        crate::emu_log!("[*] Main emulator loop finished.");
+    }
+
+    /// 함수 호출을 위한 스택 및 EIP 환경을 준비 (실제 에뮬레이션은 시작하지 않음)
+    fn prepare_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>) {
         let func_address = {
             let context = self.get_data();
             context
@@ -827,8 +935,6 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         };
 
         if let Some(func_address) = func_address {
-            let esp = self.reg_read(RegisterX86::ESP).unwrap_or(0);
-
             // 인자 처리 및 역순 push
             let mut push_values: Vec<u32> = Vec::new();
             for arg in args {
@@ -848,29 +954,13 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             self.push_u32(EXIT_ADDRESS as u32); // 리턴 주소
 
             crate::emu_log!(
-                "[*] Calling {}!{}(...) at {:#x}",
+                "[*] Prepared {}!{}(...) at {:#x}",
                 dll_name,
                 func_name,
                 func_address
             );
 
-            if let Err(e) = self.emu_start(func_address, EXIT_ADDRESS as u64, 0, 0) {
-                crate::emu_log!(
-                    "[!] Execution of {}!{} failed: {:?}",
-                    dll_name,
-                    func_name,
-                    e
-                );
-            }
-
-            // 스택 복구
-            let _ = self.reg_write(RegisterX86::ESP, esp);
-        } else {
-            crate::emu_log!(
-                "[!] Function not found for manual call: {}!{}",
-                dll_name,
-                func_name
-            );
+            let _ = self.reg_write(RegisterX86::EIP, func_address as u64);
         }
     }
 
@@ -881,6 +971,10 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         } else {
             0
         }
+    }
+
+    fn read_i32(&self, addr: u64) -> i32 {
+        self.read_u32(addr) as i32
     }
 
     fn read_u16(&self, addr: u64) -> u16 {
@@ -1010,6 +1104,16 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         for (i, &val) in data.iter().enumerate() {
             self.write_u32(addr + (i * 4) as u64, val as u32);
         }
+    }
+
+    fn read_u8(&self, addr: u64) -> u8 {
+        let mut buf = [0u8; 1];
+        self.mem_read(addr, &mut buf).unwrap();
+        buf[0]
+    }
+
+    fn write_u8(&mut self, addr: u64, value: u8) {
+        self.mem_write(addr, &[value]).unwrap();
     }
 }
 

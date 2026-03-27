@@ -1,72 +1,216 @@
 pub mod packet_logger;
+pub mod protocol;
 
+use self::protocol::{ControlMessage, DNetPacket, ProtocolPacket};
+use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-use std::sync::OnceLock;
-
-/// 서버의 브로드캐스트 송신단 (UI 등 다른 모듈에서 접근 가능하도록 전역 설정)
+/// 서버의 브로드캐스트 송신단
 pub static SERVER_TX: OnceLock<broadcast::Sender<Vec<u8>>> = OnceLock::new();
 
 #[tokio::main]
 pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:33000";
     let listener = TcpListener::bind(addr).await?;
-    crate::push_socket_log(format!("[*] Server running on {}", addr));
-    crate::push_socket_log(format!("[*] Type HEX in Debug Window to send to clients."));
+    crate::emu_socket_log!("[*] Protocol-aware Server running on {}", addr);
 
-    // 1. 브로드캐스트 채널 생성
-    // UI 입력 등을 연결된 모든 클라이언트에게 전달하기 위한 채널
     let (tx, _rx) = broadcast::channel::<Vec<u8>>(10);
     SERVER_TX.set(tx.clone()).ok();
 
-    // 2. 메인 루프: 클라이언트 연결 수락
     loop {
         let (socket, client_addr) = listener.accept().await?;
-        crate::push_socket_log(format!("[*] New Client Connected: {}", client_addr));
+        crate::emu_socket_log!("[*] New Client Connected: {}", client_addr);
 
-        // 채널 구독 (Stdin에서 오는 데이터를 받기 위함)
         let mut rx = tx.subscribe();
-
-        // 소켓을 Read 부분과 Write 부분으로 분리
         let (reader, mut writer) = socket.into_split();
+        let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
-        // 2-1. 수신 태스크 (Client -> Server Screen)
+        // 서버는 초기 패킷을 먼저 보내지 않습니다.
+        // 클라이언트가 CTRL_OPEN(1) 제어 메시지로 채널 개방을 먼저 요청합니다.
+
+        // 1. 수신 및 프로토콜 처리 태스크
+        // ─ DNet 전송 계층 ──────────────────────────────────────────────────
+        // 헤더: [channel_id: u16 LE][body_len: u16 LE]
+        // ch=0: 제어 메시지 4B → [msg_type: u16 LE][target_channel_id: u16 LE]
+        // ch=1-15: 데이터 패킷 → [main_type: u8][sub_type: u8][payload...]
         let mut buf_reader = BufReader::new(reader);
         tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
             loop {
-                match buf_reader.read(&mut buf).await {
-                    Ok(0) => {
-                        crate::push_socket_log(format!("[*] Client Disconnected: {}", client_addr));
+                // ── 4바이트 DNet 헤더 읽기 ──────────────────────────────────
+                let mut header = [0u8; 4];
+                match buf_reader.read_exact(&mut header).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        crate::emu_socket_log!("[*] Client Disconnected: {}", client_addr);
                         break;
-                    }
-                    Ok(n) => {
-                        // 수신된 데이터 표시 (Hex + UTF-8 시도)
-                        let data = &buf[0..n];
-                        let hex_dump = hex::encode(data);
-                        let text = String::from_utf8_lossy(data);
-                        crate::push_socket_log(format!(
-                            "[From {}]: {} (Hex: {})",
-                            client_addr, text, hex_dump
-                        ));
                     }
                     Err(e) => {
-                        crate::push_socket_log(format!("[!] Error reading from socket: {}", e));
+                        crate::emu_socket_log!("[!] Header read error: {}", e);
                         break;
+                    }
+                }
+
+                // 유효성 검사 (channel_id 0-15, body_len 0-0x1FFC, ch0→len==4)
+                let (channel_id, body_len) = match DNetPacket::parse_header(&header) {
+                    Some(v) => v,
+                    None => {
+                        crate::emu_socket_log!(
+                            "[!] Invalid DNet header from {}: {}",
+                            client_addr,
+                            hex::encode(&header)
+                        );
+                        break;
+                    }
+                };
+
+                // ── body_len 바이트 본문 읽기 ────────────────────────────────
+                let mut body = vec![0u8; body_len as usize];
+                match buf_reader.read_exact(&mut body).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        crate::emu_socket_log!(
+                            "[*] Client Disconnected (mid-packet): {}",
+                            client_addr
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        crate::emu_socket_log!("[!] Body read error: {}", e);
+                        break;
+                    }
+                }
+
+                // ── 채널별 라우팅 ────────────────────────────────────────────
+                if channel_id == 0 {
+                    // ── 채널 0: 제어 메시지 [msg_type: u16 LE][대상 채널: u16 LE] ──
+                    // SendControlMessage(this, msg, ch): HIWORD(a2)=채널번호, LOWORD(a2)=메시지타입
+                    let ctrl = match ControlMessage::from_bytes(&body) {
+                        Some(c) => c,
+                        None => {
+                            crate::emu_socket_log!(
+                                "[!] Malformed control body: {}",
+                                hex::encode(&body)
+                            );
+                            break;
+                        }
+                    };
+
+                    crate::emu_socket_log!(
+                        "[CTRL] msg={} target_ch={}",
+                        ctrl.msg_type,
+                        ctrl.channel_id
+                    );
+
+                    // 채널 상태 기계 (서버 측, TConnection::ProcessControlMessage 역공학)
+                    let resp = match ctrl.msg_type {
+                        protocol::CTRL_OPEN => {
+                            // 클라이언트가 채널 N 개방 요청
+                            // 서버는 LISTENING(1) 상태 → OPEN_ACK(2) 응답 + CONNECTED로 전환
+                            crate::emu_socket_log!(
+                                "[CTRL] Ch={} open request → accepting",
+                                ctrl.channel_id
+                            );
+                            Some(protocol::create_control_message(
+                                protocol::CTRL_OPEN_ACK,
+                                ctrl.channel_id,
+                            ))
+                        }
+                        protocol::CTRL_OPEN_ACK => {
+                            // 상대방이 채널 개방 확인 (서버 측 CONNECTING(0) 시나리오)
+                            crate::emu_socket_log!(
+                                "[CTRL] Ch={} open acknowledged",
+                                ctrl.channel_id
+                            );
+                            None
+                        }
+                        protocol::CTRL_CLOSE => {
+                            // 클라이언트가 채널 N 종료 요청
+                            // CONNECTED(2) 상태: OnClosed 처리 후 CLOSE_ACK(4) 전송
+                            crate::emu_socket_log!(
+                                "[CTRL] Ch={} close request → sending ack",
+                                ctrl.channel_id
+                            );
+                            Some(protocol::create_control_message(
+                                protocol::CTRL_CLOSE_ACK,
+                                ctrl.channel_id,
+                            ))
+                        }
+                        protocol::CTRL_CLOSE_ACK => {
+                            // 종료 확인 수신 (CLOSING(3) → 완전 종료)
+                            crate::emu_socket_log!("[CTRL] Ch={} fully closed", ctrl.channel_id);
+                            None
+                        }
+                        unknown => {
+                            crate::emu_socket_log!(
+                                "[CTRL] Unknown msg_type={} ch={}",
+                                unknown,
+                                ctrl.channel_id
+                            );
+                            None
+                        }
+                    };
+
+                    if let Some(pkt) = resp {
+                        crate::emu_socket_log!("[SEND] {}", protocol::hex_dump("CTRL", &pkt));
+                        if direct_tx.send(pkt).is_err() {
+                            crate::emu_socket_log!("[!] Failed to queue control response");
+                        }
+                    }
+                } else {
+                    // ── 채널 1-15: 데이터 패킷 [main_type: u8][sub_type: u8][payload...] ──
+                    // ProcessPacket: 채널이 CONNECTED(2) 상태여야 하며, 아닐 경우 CTRL_CLOSE(3) 전송
+                    if let Some(pkt) = ProtocolPacket::from_bytes(&body) {
+                        crate::emu_socket_log!(
+                            "[RECV] ch={} main=0x{:02x} sub=0x{:02x} payload={}B",
+                            channel_id,
+                            pkt.main_type,
+                            pkt.sub_type,
+                            pkt.payload.len()
+                        );
+                        if pkt.main_type == 0x0b {
+                            crate::emu_socket_log!("[*] ChatTown (sub=0x{:02x})", pkt.sub_type);
+                        }
+                    } else {
+                        // 채널이 없거나 연결 안 됨 → CTRL_CLOSE(3) 전송 (ProcessPacket 동작)
+                        crate::emu_socket_log!(
+                            "[!] No handler for ch={} from {} → sending CLOSE",
+                            channel_id,
+                            client_addr
+                        );
+                        let close =
+                            protocol::create_control_message(protocol::CTRL_CLOSE, channel_id);
+                        direct_tx.send(close).ok();
                     }
                 }
             }
         });
 
-        // 2-2. 송신 태스크 (Server Stdin Channel -> Client Socket)
+        // 2. 송신 태스크 (직접 응답 + 브로드캐스트)
         tokio::spawn(async move {
-            while let Ok(msg) = rx.recv().await {
-                // 채널에서 데이터가 오면 소켓으로 전송
-                if let Err(e) = writer.write_all(&msg).await {
-                    crate::push_socket_log(format!("[!] Failed to write to client: {}", e));
-                    break;
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(msg) = direct_rx.recv() => {
+                        crate::emu_socket_log!("[SEND] {}", protocol::hex_dump("Pkt", &msg));
+                        if let Err(e) = writer.write_all(&msg).await {
+                            crate::emu_socket_log!("[!] Failed to write direct response: {}", e);
+                            break;
+                        }
+                    }
+                    res = rx.recv() => {
+                        match res {
+                            Ok(msg) => {
+                                crate::emu_socket_log!("[SEND] {}", protocol::hex_dump("Bcast", &msg));
+                                if let Err(e) = writer.write_all(&msg).await {
+                                    crate::emu_socket_log!("[!] Failed to write broadcast message: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
         });

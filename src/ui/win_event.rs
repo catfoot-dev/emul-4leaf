@@ -61,6 +61,14 @@ impl WinEvent {
         }
     }
 
+    /// 윈도우 크기 변경 시 상태 업데이트
+    pub fn resize_window(&mut self, hwnd: u32, width: u32, height: u32) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.width = width as i32;
+            state.height = height as i32;
+        }
+    }
+
     /// 특정 핸들의 윈도우 상태 가져오기
     pub fn get_window_mut(&mut self, hwnd: u32) -> Option<&mut WindowState> {
         self.windows.get_mut(&hwnd)
@@ -136,6 +144,13 @@ impl WinEvent {
         }
         if let Some(tx) = &self.ui_tx {
             let _ = tx.send(UiCommand::SetWindowText { hwnd, text });
+        }
+    }
+
+    /// 윈도우의 특정 영역을 무효화하여 다시 그리도록 요청 (needs_paint 플래그 설정)
+    pub fn invalidate_rect(&mut self, hwnd: u32, _rect: *mut std::ffi::c_void) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.needs_paint = true;
         }
     }
 

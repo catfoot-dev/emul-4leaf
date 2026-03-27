@@ -75,14 +75,6 @@ impl PacketLogger {
             })
             .collect();
 
-        let log_line = format!(
-            "[{}] t={}ms sock={} len={} | {}",
-            dir_str,
-            timestamp_ms,
-            socket_id,
-            data.len(),
-            hex
-        );
         println!(
             "[PACKET][{}] t={:>8}ms | sock={:>5} | len={:>5} | {}",
             dir_str,
@@ -95,9 +87,16 @@ impl PacketLogger {
             println!("[PACKET][{}] ASCII: {}", dir_str, ascii);
         }
         // 소켓 전용 로그 버퍼에도 기록
-        crate::push_socket_log(log_line);
+        crate::emu_socket_log!(
+            "[{}] t={}ms sock={} len={} | {}",
+            dir_str,
+            timestamp_ms,
+            socket_id,
+            data.len(),
+            hex
+        );
         if !data.is_empty() {
-            crate::push_socket_log(format!("  ASCII: {}", ascii));
+            crate::emu_socket_log!("  ASCII: {}", ascii);
         }
 
         // 캡처 저장

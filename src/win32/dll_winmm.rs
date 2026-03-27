@@ -1,6 +1,6 @@
 use unicorn_engine::Unicorn;
 
-use crate::win32::{ApiHookResult, Win32Context, callee_result};
+use crate::win32::{ApiHookResult, Win32Context};
 
 /// `WINMM.dll` 프록시 구현 모듈
 ///
@@ -10,20 +10,20 @@ pub struct DllWINMM;
 impl DllWINMM {
     // API: DWORD timeGetTime(void)
     // 역할: 시스템 시간이 시작된 후 경과된 시간을 밀리초 단위로 검색
-    pub fn time_get_time(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn time_get_time(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let elapsed = uc.get_data().start_time.elapsed().as_millis() as u32;
         crate::emu_log!("[WINMM] timeGetTime() -> DWORD {}", elapsed);
-        Some((0, Some(elapsed as i32)))
+        Some(ApiHookResult::callee(0, Some(elapsed as i32)))
     }
 
     /// 함수명 기준 `WINMM.dll` API 구현체
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
-        callee_result(match func_name {
+        match func_name {
             "timeGetTime" => Self::time_get_time(uc),
             _ => {
                 crate::emu_log!("[!] WINMM Unhandled: {}", func_name);
                 None
             }
-        })
+        }
     }
 }

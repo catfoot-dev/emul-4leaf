@@ -2,7 +2,7 @@ use unicorn_engine::{RegisterX86, Unicorn};
 
 use crate::helper::{EXIT_ADDRESS, UnicornHelper};
 use crate::win32::{
-    ApiHookResult, Win32Context, WindowClass, WindowState, callee_result, caller_result,
+    ApiHookResult, Win32Context, WindowClass, WindowState, dll_kernel32::DllKERNEL32,
 };
 
 /// `USER32.dll` 프록시 구현 모듈
@@ -13,7 +13,7 @@ pub struct DllUSER32;
 impl DllUSER32 {
     // API: int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType)
     // 역할: 메시지 박스를 화면에 표시
-    pub fn message_box_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn message_box_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let text_addr = uc.read_arg(1);
         let caption_addr = uc.read_arg(2);
@@ -35,12 +35,12 @@ impl DllUSER32 {
             u_type,
             result
         );
-        Some((4, Some(result)))
+        Some(ApiHookResult::callee(4, Some(result)))
     }
 
     // API: ATOM RegisterClassExA(const WNDCLASSEXA* lpwcx)
     // 역할: 창 클래스를 등록
-    pub fn register_class_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn register_class_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         // WNDCLASSEX는 48 bytes
         let class_addr = uc.read_arg(0);
         let style = uc.read_u32(class_addr as u64 + 4);
@@ -83,12 +83,12 @@ impl DllUSER32 {
             class_name,
             atom
         );
-        Some((1, Some(atom as i32)))
+        Some(ApiHookResult::callee(1, Some(atom as i32)))
     }
 
     // API: ATOM RegisterClassA(const WNDCLASSA* lpWndClass)
     // 역할: 창 클래스를 등록
-    pub fn register_class_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn register_class_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let class_addr = uc.read_arg(0);
         let style = uc.read_u32(class_addr as u64 + 0);
         let wnd_proc = uc.read_u32(class_addr as u64 + 4);
@@ -130,12 +130,12 @@ impl DllUSER32 {
             class_name,
             atom
         );
-        Some((1, Some(atom as i32)))
+        Some(ApiHookResult::callee(1, Some(atom as i32)))
     }
 
     // API: HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
     // 역할: 확장 스타일을 포함한 창을 생성
-    pub fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ex_style = uc.read_arg(0);
         let class_addr = uc.read_arg(1);
         let title_addr = uc.read_arg(2);
@@ -167,6 +167,15 @@ impl DllUSER32 {
             String::new()
         };
 
+        let (class_wnd_proc, hinstance) = {
+            let ctx = uc.get_data();
+            let classes = ctx.window_classes.lock().unwrap();
+            classes
+                .get(&class_name)
+                .map(|c| (c.wnd_proc, c.hinstance))
+                .unwrap_or((0, 0))
+        };
+
         let surface_bitmap = uc.get_data().create_surface_bitmap(width, height);
 
         let window_state = WindowState {
@@ -184,21 +193,44 @@ impl DllUSER32 {
             enabled: true,
             zoomed: false,
             iconic: false,
-            wnd_proc: 0,
+            wnd_proc: class_wnd_proc,
             user_data: 0,
             surface_bitmap,
             window_rgn: 0,
+            needs_paint: true,
         };
 
-        let ctx = uc.get_data();
-        ctx.win_event
-            .lock()
-            .unwrap()
-            .create_window(hwnd, window_state);
+        {
+            let ctx = uc.get_data();
+            ctx.win_event
+                .lock()
+                .unwrap()
+                .create_window(hwnd, window_state);
+        }
+
+        // WM_CREATE (0x0001) 전송
+        if class_wnd_proc != 0 {
+            let cs_ptr = uc.malloc(48);
+            uc.write_u32(cs_ptr + 0, param); // lpCreateParams
+            uc.write_u32(cs_ptr + 4, hinstance); // hInstance
+            uc.write_u32(cs_ptr + 8, menu_or_id); // hMenu
+            uc.write_u32(cs_ptr + 12, parent); // hwndParent
+            uc.write_u32(cs_ptr + 16, height); // cy
+            uc.write_u32(cs_ptr + 20, width); // cx
+            uc.write_u32(cs_ptr + 24, y as u32); // y
+            uc.write_u32(cs_ptr + 28, x as u32); // x
+            uc.write_u32(cs_ptr + 32, style); // style
+            uc.write_u32(cs_ptr + 36, title_addr); // lpszName
+            uc.write_u32(cs_ptr + 40, class_addr); // lpszClass
+            uc.write_u32(cs_ptr + 44, ex_style); // dwExStyle
+
+            Self::dispatch_to_wndproc(uc, class_wnd_proc, hwnd, 0x0001, 0, cs_ptr as u32);
+        }
 
         // 최상위 창이라면 활성화 및 포커스 설정
         if parent == 0 {
             use std::sync::atomic::Ordering;
+            let ctx = uc.get_data();
             ctx.active_hwnd.store(hwnd, Ordering::SeqCst);
             ctx.foreground_hwnd.store(hwnd, Ordering::SeqCst);
             ctx.focus_hwnd.store(hwnd, Ordering::SeqCst);
@@ -223,12 +255,12 @@ impl DllUSER32 {
             param,
             hwnd
         );
-        Some((12, Some(hwnd as i32)))
+        Some(ApiHookResult::callee(12, Some(hwnd as i32)))
     }
 
     // API: BOOL ShowWindow(HWND hWnd, int nCmdShow)
     // 역할: 창의 표시 상태를 설정
-    pub fn show_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn show_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let n_cmd_show = uc.read_arg(1);
         // SW_HIDE = 0, 그 외는 대부분 표시
@@ -243,39 +275,39 @@ impl DllUSER32 {
             hwnd,
             n_cmd_show
         );
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: BOOL UpdateWindow(HWND hWnd)
     // 역할: 창의 클라이언트 영역을 강제로 업데이트
-    pub fn update_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn update_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         uc.get_data().win_event.lock().unwrap().update_window(hwnd);
         crate::emu_log!("[USER32] UpdateWindow({:#x}) -> BOOL 1", hwnd);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: BOOL DestroyWindow(HWND hWnd)
     // 역할: 지정된 창을 파괴
-    pub fn destroy_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn destroy_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         uc.get_data().win_event.lock().unwrap().destroy_window(hwnd);
         crate::emu_log!("[USER32] DestroyWindow({:#x}) -> BOOL 1", hwnd);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: BOOL CloseWindow(HWND hWnd)
     // 역할: 지정된 창을 최소화
-    pub fn close_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn close_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         uc.get_data().win_event.lock().unwrap().close_window(hwnd);
         crate::emu_log!("[USER32] CloseWindow({:#x}) -> BOOL 1", hwnd);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: BOOL EnableWindow(HWND hWnd, BOOL bEnable)
     // 역할: 창의 마우스 및 키보드 입력을 활성화 또는 비활성화
-    pub fn enable_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn enable_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let b_enable = uc.read_arg(1);
         uc.get_data()
@@ -288,12 +320,12 @@ impl DllUSER32 {
             hwnd,
             b_enable
         );
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: BOOL IsWindowEnabled(HWND hWnd)
     // 역할: 창이 활성화되어 있는지 확인
-    pub fn is_window_enabled(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn is_window_enabled(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let enabled = uc
             .get_data()
@@ -303,12 +335,12 @@ impl DllUSER32 {
             .is_window_enabled(hwnd);
         let ret = if enabled { 1 } else { 0 };
         crate::emu_log!("[USER32] IsWindowEnabled({:#x}) -> BOOL {}", hwnd, ret);
-        Some((1, Some(ret)))
+        Some(ApiHookResult::callee(1, Some(ret)))
     }
 
     // API: BOOL IsWindowVisible(HWND hWnd)
     // 역할: 창의 가시성 상태를 확인
-    pub fn is_window_visible(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn is_window_visible(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let visible = uc
             .get_data()
@@ -318,20 +350,21 @@ impl DllUSER32 {
             .is_window_visible(hwnd);
         let ret = if visible { 1 } else { 0 };
         crate::emu_log!("[USER32] IsWindowVisible({:#x}) -> BOOL {}", hwnd, ret);
-        Some((1, Some(ret)))
+        Some(ApiHookResult::callee(1, Some(ret)))
     }
 
     // API: DWORD MsgWaitForMultipleObjects(DWORD nCount, const HANDLE* pHandles, BOOL fWaitAll, DWORD dwMilliseconds, DWORD dwWakeMask)
     // 역할: 하나 이상의 개체 또는 메시지가 큐에 도착할 때까지 대기
     // 구현 생략 사유: 다중 스레드 동기화 객체 대기 함수. 에뮬레이터 특성상 스레드를 멈추면 전체 엔진이 멈추므로 즉각 리턴(Timeout) 처리함.
-    pub fn msg_wait_for_multiple_objects(
-        uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    pub fn msg_wait_for_multiple_objects(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let n_count = uc.read_arg(0);
         let p_handles = uc.read_arg(1);
         let f_wait_all = uc.read_arg(2);
         let dw_milliseconds = uc.read_arg(3);
         let dw_wake_mask = uc.read_arg(4);
+        // 타 스레드 스케줄링
+        DllKERNEL32::schedule_threads(uc);
+
         crate::emu_log!(
             "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> DWORD 0",
             n_count,
@@ -340,12 +373,12 @@ impl DllUSER32 {
             dw_milliseconds,
             dw_wake_mask
         );
-        Some((5, Some(0)))
+        Some(ApiHookResult::callee(5, Some(0)))
     }
 
     // API: HWND GetWindow(HWND hWnd, UINT uCmd)
     // 역할: 지정된 창과 관계가 있는 창의 핸들을 가져옴
-    pub fn get_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let cmd = uc.read_arg(1);
         // Minimal stub: GW_OWNER = 4
@@ -362,32 +395,32 @@ impl DllUSER32 {
             cmd,
             parent
         );
-        Some((2, Some(parent as i32)))
+        Some(ApiHookResult::callee(2, Some(parent as i32)))
     }
 
     // API: HWND GetParent(HWND hWnd)
     // 역할: 지정된 창의 부모 또는 소유자 창의 핸들을 가져옴
-    pub fn get_parent(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_parent(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
         let parent = win_event.windows.get(&hwnd).map(|w| w.parent).unwrap_or(0);
         crate::emu_log!("[USER32] GetParent({:#x}) -> HWND {:#x}", hwnd, parent);
-        Some((1, Some(parent as i32)))
+        Some(ApiHookResult::callee(1, Some(parent as i32)))
     }
 
     // API: HWND GetDesktopWindow(void)
     // 역할: 데스크톱 창의 핸들을 가져옴
-    pub fn get_desktop_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_desktop_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         let hwnd = ctx.desktop_hwnd.load(std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] GetDesktopWindow() -> HWND {:#x}", hwnd);
-        Some((0, Some(hwnd as i32)))
+        Some(ApiHookResult::callee(0, Some(hwnd as i32)))
     }
 
     // API: HWND SetActiveWindow(HWND hWnd)
     // 역할: 지정된 창을 활성화함
-    pub fn set_active_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_active_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let old = ctx
@@ -401,32 +434,32 @@ impl DllUSER32 {
         ctx.win_event.lock().unwrap().activate_window(hwnd);
 
         crate::emu_log!("[USER32] SetActiveWindow({:#x}) -> {:#x}", hwnd, old);
-        Some((1, Some(old as i32)))
+        Some(ApiHookResult::callee(1, Some(old as i32)))
     }
 
     // API: HWND GetActiveWindow(void)
     // 역할: 현재 스레드와 연결된 활성 창의 핸들을 가져옴
-    pub fn get_active_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_active_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         let hwnd = ctx.active_hwnd.load(std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] GetActiveWindow() -> HWND {:#x}", hwnd);
-        Some((0, Some(hwnd as i32)))
+        Some(ApiHookResult::callee(0, Some(hwnd as i32)))
     }
 
     // API: HWND GetForegroundWindow(void)
     // 역할: 포그라운드(전면) 창의 핸들을 가져옴
-    pub fn get_foreground_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_foreground_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         let hwnd = ctx
             .foreground_hwnd
             .load(std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] GetForegroundWindow() -> HWND {:#x}", hwnd);
-        Some((0, Some(hwnd as i32)))
+        Some(ApiHookResult::callee(0, Some(hwnd as i32)))
     }
 
     // API: BOOL SetForegroundWindow(HWND hWnd)
     // 역할: 지정된 창을 포그라운드로 설정하고 활성화함
-    pub fn set_foreground_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_foreground_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         ctx.foreground_hwnd
@@ -440,13 +473,13 @@ impl DllUSER32 {
         ctx.win_event.lock().unwrap().activate_window(hwnd);
 
         crate::emu_log!("[USER32] SetForegroundWindow({:#x}) -> 1", hwnd);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: HWND GetLastActivePopup(HWND hWnd)
     // 역할: 지정된 창에서 마지막으로 활성화된 팝업 창을 확인
     // 구현 생략 사유: 다중 창 환경의 포커스 관리용. 팝업 창을 사용하지 않으므로 무시함.
-    pub fn get_last_active_popup(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_last_active_popup(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         // 에뮬레이터에서는 활성 팝업을 별도로 추적하지 않으므로, 윈도우가 존재하면 해당 윈도우를 반환
         let ctx = uc.get_data();
@@ -461,13 +494,13 @@ impl DllUSER32 {
             hwnd,
             ret
         );
-        Some((1, Some(ret as i32)))
+        Some(ApiHookResult::callee(1, Some(ret as i32)))
     }
 
     // API: BOOL GetMenuItemInfoA(HMENU hMenu, UINT item, BOOL fByPos, LPMENUITEMINFOA lpmii)
     // 역할: 메뉴 항목에 대한 정보를 가져옴
     // 구현 생략 사유: 메뉴 아이템 속성 조회. 에뮬레이터에서는 렌더링 가능한 시스템 메뉴 바를 그리지 않으므로 무시함.
-    pub fn get_menu_item_info_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_menu_item_info_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hmenu = uc.read_arg(0);
         let item = uc.read_arg(1);
         let f_by_pos = uc.read_arg(2);
@@ -479,13 +512,13 @@ impl DllUSER32 {
             f_by_pos,
             lpmii
         );
-        Some((4, Some(0)))
+        Some(ApiHookResult::callee(4, Some(0)))
     }
 
     // API: BOOL DeleteMenu(HMENU hMenu, UINT uPosition, UINT uFlags)
     // 역할: 메뉴에서 항목을 삭제
     // 구현 생략 사유: 메뉴를 렌더링하지 않으므로 항목을 삭제할 필요 없음.
-    pub fn delete_menu(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn delete_menu(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hmenu = uc.read_arg(0);
         let u_position = uc.read_arg(1);
         let u_flags = uc.read_arg(2);
@@ -495,13 +528,13 @@ impl DllUSER32 {
             u_position,
             u_flags
         );
-        Some((3, Some(1)))
+        Some(ApiHookResult::callee(3, Some(1)))
     }
 
     // API: BOOL RemoveMenu(HMENU hMenu, UINT uPosition, UINT uFlags)
     // 역할: 메뉴 항목을 제거 (파괴하지 않음)
     // 구현 생략 사유: 위와 동일.
-    pub fn remove_menu(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn remove_menu(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hmenu = uc.read_arg(0);
         let u_position = uc.read_arg(1);
         let u_flags = uc.read_arg(2);
@@ -511,12 +544,12 @@ impl DllUSER32 {
             u_position,
             u_flags
         );
-        Some((3, Some(1)))
+        Some(ApiHookResult::callee(3, Some(1)))
     }
 
     // API: HMENU GetSystemMenu(HWND hWnd, BOOL bRevert)
     // 역할: 복사/수정용 시스템 메뉴 핸들을 가져옴
-    pub fn get_system_menu(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_system_menu(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let b_revert = uc.read_arg(1);
         let handle = uc.get_data().alloc_handle();
@@ -526,22 +559,22 @@ impl DllUSER32 {
             b_revert,
             handle
         );
-        Some((2, Some(handle as i32)))
+        Some(ApiHookResult::callee(2, Some(handle as i32)))
     }
 
     // API: HMENU GetMenu(HWND hWnd)
     // 역할: 지정된 창의 메뉴 핸들을 가져옴
-    pub fn get_menu(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_menu(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let handle = uc.get_data().alloc_handle();
         crate::emu_log!("[USER32] GetMenu({:#x}) -> HMENU {:#x}", hwnd, handle);
-        Some((1, Some(handle as i32)))
+        Some(ApiHookResult::callee(1, Some(handle as i32)))
     }
 
     // API: BOOL AppendMenuA(HMENU hMenu, UINT uFlags, UINT_PTR uIDNewItem, LPCSTR lpNewItem)
     // 역할: 메뉴 끝에 새 항목을 추가
     // 구현 생략 사유: 시스템 메뉴 확장을 요청하지만 렌더링하지 않으므로 No-op.
-    pub fn append_menu_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn append_menu_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hmenu = uc.read_arg(0);
         let u_flags = uc.read_arg(1);
         let u_id_new_item = uc.read_arg(2);
@@ -553,30 +586,30 @@ impl DllUSER32 {
             u_id_new_item,
             lp_new_item
         );
-        Some((4, Some(1)))
+        Some(ApiHookResult::callee(4, Some(1)))
     }
 
     // API: HMENU CreateMenu(void)
     // 역할: 메뉴를 생성
-    pub fn create_menu(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_menu(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         let hmenu = ctx.alloc_handle();
         crate::emu_log!("[USER32] CreateMenu() -> HMENU {:#x}", hmenu);
-        Some((0, Some(hmenu as i32)))
+        Some(ApiHookResult::callee(0, Some(hmenu as i32)))
     }
 
     // API: BOOL DestroyMenu(HMENU hMenu)
     // 역할: 메뉴를 파괴
     // 구현 생략 사유: 메뉴 객체를 시뮬레이션하지 않으므로 리소스 해제도 불필요함.
-    pub fn destroy_menu(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn destroy_menu(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hmenu = uc.read_arg(0);
         crate::emu_log!("[USER32] DestroyMenu({:#x}) -> BOOL 1", hmenu);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: BOOL MoveWindow(HWND hWnd, int X, int Y, int nWidth, int nHeight, BOOL bRepaint)
     // 역할: 창의 위치와 크기를 변경
-    pub fn move_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn move_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let x = uc.read_arg(1) as i32;
         let y = uc.read_arg(2) as i32;
@@ -597,12 +630,12 @@ impl DllUSER32 {
             height,
             repaint
         );
-        Some((6, Some(1)))
+        Some(ApiHookResult::callee(6, Some(1)))
     }
 
     // API: BOOL SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags)
     // 역할: 창의 크기, 위치 및 Z 순서를 변경
-    pub fn set_window_pos(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_window_pos(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let insert_after = uc.read_arg(1);
         let x = uc.read_arg(2);
@@ -629,12 +662,12 @@ impl DllUSER32 {
             cy,
             flags
         );
-        Some((7, Some(1)))
+        Some(ApiHookResult::callee(7, Some(1)))
     }
 
     // API: BOOL GetWindowRect(HWND hWnd, LPRECT lpRect)
     // 역할: 창의 화면 좌표상의 경계 사각형 좌표를 가져옴
-    pub fn get_window_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_window_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let rect_addr = uc.read_arg(1);
         let (x, y, w, h) = {
@@ -656,12 +689,12 @@ impl DllUSER32 {
             hwnd,
             rect_addr
         );
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: BOOL GetClientRect(HWND hWnd, LPRECT lpRect)
     // 역할: 창의 클라이언트 영역 좌표를 가져옴
-    pub fn get_client_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_client_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let rect_addr = uc.read_arg(1);
         let (w, h) = {
@@ -683,13 +716,12 @@ impl DllUSER32 {
             hwnd,
             rect_addr
         );
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: BOOL AdjustWindowRectEx(LPRECT lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle)
     // 역할: 클라이언트 영역의 크기를 기준으로 원하는 창의 크기를 계산
-    // 구현 생략 사유: 클라이언트 영역을 기반으로 전체 창 크기를 계산하는 보조 함수. 에뮬레이터에서는 창 크기를 정밀하게 다루지 않으므로 성공(1)만 반환함.
-    pub fn adjust_window_rect_ex(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn adjust_window_rect_ex(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let rect_addr = uc.read_arg(0);
         let style = uc.read_arg(1);
         let menu = uc.read_arg(2);
@@ -701,25 +733,34 @@ impl DllUSER32 {
         let mut bottom = uc.read_u32(rect_addr as u64 + 12) as i32;
 
         // WS_CAPTION = 0x00C00000
-        if style & 0x00C00000 != 0 {
-            top -= 23; // Caption height estimate
+        if style & 0x00C00000 == 0x00C00000 {
+            top -= 23; // SM_CYCAPTION (Standard)
         }
+
         // WS_THICKFRAME = 0x00040000
         if style & 0x00040000 != 0 {
-            left -= 4;
-            top -= 4;
+            left -= 4; // SM_CXFRAME
+            top -= 4; // SM_CYFRAME
             right += 4;
             bottom += 4;
         } else if style & 0x00800000 != 0 {
             // WS_BORDER
-            left -= 1;
-            top -= 1;
+            left -= 1; // SM_CXBORDER
+            top -= 1; // SM_CYBORDER
             right += 1;
             bottom += 1;
         }
 
         if menu != 0 {
-            top -= 19; // Menu height estimate
+            top -= 19; // SM_CYMENU
+        }
+
+        // WS_EX_CLIENTEDGE = 0x00000200
+        if ex_style & 0x00000200 != 0 {
+            left -= 2; // SM_CXEDGE
+            top -= 2;
+            right += 2;
+            bottom += 2;
         }
 
         uc.write_u32(rect_addr as u64, left as u32);
@@ -734,105 +775,30 @@ impl DllUSER32 {
             menu,
             ex_style
         );
-        Some((4, Some(1)))
-    }
-
-    // API: HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint)
-    // 역할: 그리기를 위해 창을 준비
-    pub fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let hwnd = uc.read_arg(0);
-        let ps_addr = uc.read_arg(1);
-        let ctx = uc.get_data();
-        let hdc = ctx.alloc_handle();
-        let (w, h, surface_bitmap) = {
-            let win_event = ctx.win_event.lock().unwrap();
-            win_event
-                .windows
-                .get(&hwnd)
-                .map(|win| (win.width, win.height, win.surface_bitmap))
-                .unwrap_or((640, 480, 0))
-        };
-        ctx.gdi_objects.lock().unwrap().insert(
-            hdc,
-            crate::win32::GdiObject::Dc {
-                associated_window: hwnd,
-                width: w as i32,
-                height: h as i32,
-                selected_bitmap: surface_bitmap,
-                selected_font: 0,
-                selected_brush: 0,
-                selected_pen: 0,
-                selected_region: 0,
-                selected_palette: 0,
-                bk_mode: 0,
-                bk_color: 0,
-                text_color: 0,
-                rop2_mode: 0,
-                current_x: 0,
-                current_y: 0,
-            },
-        );
-        // PAINTSTRUCT: HDC at offset 0
-        uc.write_u32(ps_addr as u64, hdc);
-        crate::emu_log!(
-            "[USER32] BeginPaint({:#x}, {:#x}) -> HDC {:#x}",
-            hwnd,
-            ps_addr,
-            hdc
-        );
-        Some((2, Some(hdc as i32)))
-    }
-
-    // API: BOOL EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint)
-    // 역할: 그리기가 완료되었음을 알림
-    pub fn end_paint(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let hwnd = uc.read_arg(0);
-        let ps_addr = uc.read_arg(1);
-        let hdc = uc.read_u32(ps_addr as u64);
-        let ctx = uc.get_data();
-        ctx.gdi_objects.lock().unwrap().remove(&hdc);
-        ctx.win_event.lock().unwrap().update_window(hwnd);
-        crate::emu_log!("[USER32] EndPaint({:#x}, {:#x}) -> BOOL 1", hwnd, ps_addr);
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(4, Some(1)))
     }
 
     // API: int ScrollWindowEx(HWND hWnd, int dx, int dy, const RECT* prcScroll, const RECT* prcClip, HRGN hrgnUpdate, LPRECT prcUpdate, UINT flags)
     // 역할: 창의 클라이언트 영역 내용을 스크롤
     // 구현 생략 사유: 클라이언트 영역 픽셀을 물리적으로 스크롤하는 보조 함수. 게임은 자체 루프나 BitBlt을 사용하므로 생략함.
-    pub fn scroll_window_ex(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn scroll_window_ex(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] ScrollWindowEx({:#x}) stubbed", hwnd);
-        Some((8, Some(0)))
-    }
-
-    // API: BOOL InvalidateRect(HWND hWnd, const RECT* lpRect, BOOL bErase)
-    // 역할: 창의 클라이언트 영역 중 일부를 갱신 대상으로 설정
-    pub fn invalidate_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let hwnd = uc.read_arg(0);
-        let rect_addr = uc.read_arg(1);
-        let erase = uc.read_arg(2);
-        uc.get_data().win_event.lock().unwrap().update_window(hwnd);
-        crate::emu_log!(
-            "[USER32] InvalidateRect({:#x}, {:#x}, {:#x}) -> BOOL 1",
-            hwnd,
-            rect_addr,
-            erase
-        );
-        Some((3, Some(1)))
+        Some(ApiHookResult::callee(8, Some(0)))
     }
 
     // API: int SetScrollInfo(HWND hWnd, int nBar, LPCSCROLLINFO lpsi, BOOL redraw)
     // 역할: 스크롤 바의 매개변수를 설정
     // 구현 생략 사유: 네이티브 스크롤바 컴포넌트는 사용하지 않음.
-    pub fn set_scroll_info(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_scroll_info(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] SetScrollInfo({:#x}) stubbed", hwnd);
-        Some((4, Some(0)))
+        Some(ApiHookResult::callee(4, Some(0)))
     }
 
     // API: BOOL SetWindowTextA(HWND hWnd, LPCSTR lpString)
     // 역할: 창의 제목 표시줄 텍스트 또는 컨트롤의 텍스트를 변경
-    pub fn set_window_text_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_window_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let text_addr = uc.read_arg(1);
         let text = uc.read_euc_kr(text_addr as u64);
@@ -846,12 +812,12 @@ impl DllUSER32 {
             hwnd,
             text
         );
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: int GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount)
     // 역할: 창의 제목 표시줄 텍스트 또는 컨트롤의 텍스트를 가져옴
-    pub fn get_window_text_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_window_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let buf_addr = uc.read_arg(1);
         let max_count = uc.read_arg(2);
@@ -877,33 +843,34 @@ impl DllUSER32 {
             max_count,
             ret
         );
-        Some((3, Some(ret)))
-    }
-
-    // API: BOOL KillTimer(HWND hWnd, UINT_PTR uIDEvent)
-    // 역할: 타이머를 중지
-    pub fn kill_timer(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let _hwnd = uc.read_arg(0);
-        let id = uc.read_arg(1);
-        let ctx = uc.get_data();
-        ctx.timers.lock().unwrap().remove(&id);
-        crate::emu_log!("[USER32] KillTimer({:#x}, {:#x}) -> BOOL 1", _hwnd, id);
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(3, Some(ret)))
     }
 
     // API: UINT_PTR SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse, TIMERPROC lpTimerFunc)
     // 역할: 타이머를 생성
-    pub fn set_timer(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_timer(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let mut id = uc.read_arg(1);
         let elapse = uc.read_arg(2);
         let lp_timer_func = uc.read_arg(3);
+
         let ctx = uc.get_data();
         let mut timers = ctx.timers.lock().unwrap();
         if id == 0 {
             id = ctx.alloc_handle();
         }
-        timers.insert(id, elapse);
+
+        timers.insert(
+            id,
+            crate::win32::Timer {
+                hwnd,
+                id,
+                elapse,
+                timer_proc: lp_timer_func,
+                last_tick: std::time::Instant::now(),
+            },
+        );
+
         crate::emu_log!(
             "[USER32] SetTimer({:#x}, {:#x}, {:#x}, {:#x}) -> UINT_PTR {:#x}",
             hwnd,
@@ -912,12 +879,91 @@ impl DllUSER32 {
             lp_timer_func,
             id
         );
-        Some((4, Some(id as i32)))
+        Some(ApiHookResult::callee(4, Some(id as i32)))
     }
 
-    // API: HDC GetDC(HWND hWnd)
+    // API: BOOL KillTimer(HWND hWnd, UINT_PTR uIDEvent)
+    // 역할: 타이머를 제거함
+    pub fn kill_timer(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let hwnd = uc.read_arg(0);
+        let id = uc.read_arg(1);
+
+        let ctx = uc.get_data();
+        let mut timers = ctx.timers.lock().unwrap();
+        let removed = timers.remove(&id).is_some();
+
+        crate::emu_log!("[USER32] KillTimer({:#x}, {:#x}) -> {}", hwnd, id, removed);
+        Some(ApiHookResult::callee(2, Some(if removed { 1 } else { 0 })))
+    }
+
+    // API: HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint)
+    // 역할: 그리기를 준비하고 PAINTSTRUCT를 채움. WM_PAINT 처리 시 사용됨.
+    pub fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let hwnd = uc.read_arg(0);
+        let lp_paint = uc.read_arg(1);
+
+        let (width, height, hdc) = {
+            let ctx = uc.get_data();
+            let mut win_event = ctx.win_event.lock().unwrap();
+            if let Some(state) = win_event.windows.get_mut(&hwnd) {
+                state.needs_paint = false; // 그리기 시작했으므로 무효 영역 해제
+                (state.width as u32, state.height as u32, ctx.alloc_handle())
+            } else {
+                return Some(ApiHookResult::callee(2, Some(0)));
+            }
+        };
+
+        // PAINTSTRUCT 채우기
+        uc.write_u32(lp_paint as u64 + 0, hdc); // hdc
+        uc.write_u32(lp_paint as u64 + 4, 0); // fErase
+        uc.write_u32(lp_paint as u64 + 8, 0); // rcPaint.left
+        uc.write_u32(lp_paint as u64 + 12, 0); // rcPaint.top
+        uc.write_u32(lp_paint as u64 + 16, width); // rcPaint.right
+        uc.write_u32(lp_paint as u64 + 20, height); // rcPaint.bottom
+
+        crate::emu_log!("[USER32] BeginPaint({:#x}) -> HDC {:#x}", hwnd, hdc);
+        Some(ApiHookResult::callee(2, Some(hdc as i32)))
+    }
+
+    // API: BOOL EndPaint(HWND hWnd, const PAINTSTRUCT *lpPaint)
+    // 역할: 그리기를 종료함
+    pub fn end_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let hwnd = uc.read_arg(0);
+        crate::emu_log!("[USER32] EndPaint({:#x}) -> 1", hwnd);
+        Some(ApiHookResult::callee(2, Some(1)))
+    }
+
+    // API: BOOL InvalidateRect(HWND hWnd, const RECT *lpRect, BOOL bErase)
+    // 역할: 창의 특정 영역을 무효화하여 WM_PAINT가 발생하도록 함
+    pub fn invalidate_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let hwnd = uc.read_arg(0);
+        let ctx = uc.get_data();
+        let mut win_event = ctx.win_event.lock().unwrap();
+        if let Some(state) = win_event.windows.get_mut(&hwnd) {
+            state.needs_paint = true;
+            crate::emu_log!("[USER32] InvalidateRect({:#x}) -> 1", hwnd);
+            Some(ApiHookResult::callee(3, Some(1)))
+        } else {
+            Some(ApiHookResult::callee(3, Some(0)))
+        }
+    }
+
+    // API: BOOL ValidateRect(HWND hWnd, const RECT *lpRect)
+    // 역할: 창의 특정 영역을 유효화함
+    pub fn validate_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let hwnd = uc.read_arg(0);
+        let ctx = uc.get_data();
+        let mut win_event = ctx.win_event.lock().unwrap();
+        if let Some(state) = win_event.windows.get_mut(&hwnd) {
+            state.needs_paint = false;
+            crate::emu_log!("[USER32] ValidateRect({:#x}) -> 1", hwnd);
+            Some(ApiHookResult::callee(2, Some(1)))
+        } else {
+            Some(ApiHookResult::callee(2, Some(0)))
+        }
+    }
     // 역할: 지정된 창의 클라이언트 영역에 대한 DC를 가져옴
-    pub fn get_dc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let hdc = ctx.alloc_handle();
@@ -950,12 +996,12 @@ impl DllUSER32 {
             },
         );
         crate::emu_log!("[USER32] GetDC({:#x}) -> HDC {:#x}", hwnd, hdc);
-        Some((1, Some(hdc as i32)))
+        Some(ApiHookResult::callee(1, Some(hdc as i32)))
     }
 
     // API: HDC GetWindowDC(HWND hWnd)
     // 역할: 지정된 창 전체(비클라이언트 영역 포함)에 대한 DC를 가져옴
-    pub fn get_window_dc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_window_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let hdc = ctx.alloc_handle();
@@ -988,24 +1034,24 @@ impl DllUSER32 {
             },
         );
         crate::emu_log!("[USER32] GetWindowDC({:#x}) -> HDC {:#x}", hwnd, hdc);
-        Some((1, Some(hdc as i32)))
+        Some(ApiHookResult::callee(1, Some(hdc as i32)))
     }
 
     // API: int ReleaseDC(HWND hWnd, HDC hDC)
     // 역할: DC를 해제
-    pub fn release_dc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn release_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let hdc = uc.read_arg(1);
         let ctx = uc.get_data();
         ctx.gdi_objects.lock().unwrap().remove(&hdc);
         ctx.win_event.lock().unwrap().update_window(hwnd);
         crate::emu_log!("[USER32] ReleaseDC({:#x}, {:#x}) -> INT 1", hwnd, hdc);
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     // 역할: 지정된 창에 메시지를 전송하고 처리가 완료될 때까지 대기
-    pub fn send_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn send_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let msg = uc.read_arg(1);
         let wparam = uc.read_arg(2);
@@ -1053,6 +1099,10 @@ impl DllUSER32 {
                 // WM_GETFONT
                 ret = 0; // Default system font
             }
+            0x0700 => {
+                // WM_USER
+                ret = 1;
+            }
             _ => {}
         }
         crate::emu_log!(
@@ -1063,12 +1113,12 @@ impl DllUSER32 {
             lparam,
             ret
         );
-        Some((4, Some(ret)))
+        Some(ApiHookResult::callee(4, Some(ret)))
     }
 
     // API: BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     // 역할: 지정된 창의 메시지 큐에 메시지를 배치
-    pub fn post_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn post_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let msg = uc.read_arg(1);
         let wparam = uc.read_arg(2);
@@ -1086,12 +1136,12 @@ impl DllUSER32 {
             wparam,
             lparam
         );
-        Some((4, Some(1)))
+        Some(ApiHookResult::callee(4, Some(1)))
     }
 
     // API: HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName)
     // 역할: 커서 리소스를 로드
-    pub fn load_cursor_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn load_cursor_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let instance = uc.read_arg(0);
         let lpcursorname = uc.read_arg(1);
         let ctx = uc.get_data();
@@ -1123,12 +1173,12 @@ impl DllUSER32 {
             },
             handle
         );
-        Some((2, Some(handle as i32)))
+        Some(ApiHookResult::callee(2, Some(handle as i32)))
     }
 
     // API: HCURSOR LoadCursorFromFileA(LPCSTR lpFileName)
     // 역할: 파일에서 커서를 로드
-    pub fn load_cursor_from_file_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn load_cursor_from_file_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let lpfilename = uc.read_arg(0);
         let filename = uc.read_string(lpfilename as u64);
         let ctx = uc.get_data();
@@ -1199,12 +1249,12 @@ impl DllUSER32 {
             frames_len,
             is_animated
         );
-        Some((1, Some(handle as i32)))
+        Some(ApiHookResult::callee(1, Some(handle as i32)))
     }
 
     // API: HICON LoadIconA(HINSTANCE hInstance, LPCSTR lpIconName)
     // 역할: 아이콘 리소스를 로드
-    pub fn load_icon_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn load_icon_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let instance = uc.read_arg(0);
         let lpiconname = uc.read_arg(1);
         let ctx = uc.get_data();
@@ -1235,7 +1285,7 @@ impl DllUSER32 {
             },
             handle
         );
-        Some((2, Some(handle as i32)))
+        Some(ApiHookResult::callee(2, Some(handle as i32)))
     }
 
     fn parse_cur_data(data: &[u8]) -> Option<crate::win32::CursorFrame> {
@@ -1317,7 +1367,7 @@ impl DllUSER32 {
 
     // API: HCURSOR SetCursor(HCURSOR hCursor)
     // 역할: 마우스 커서를 설정
-    pub fn set_cursor(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_cursor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hcursor = uc.read_arg(0);
         let ctx = uc.get_data();
         let old = ctx
@@ -1334,22 +1384,22 @@ impl DllUSER32 {
         }
 
         crate::emu_log!("[USER32] SetCursor({:#x}) -> HCURSOR {:#x}", hcursor, old);
-        Some((1, Some(old as i32)))
+        Some(ApiHookResult::callee(1, Some(old as i32)))
     }
 
     // API: BOOL DestroyCursor(HCURSOR hCursor)
     // 역할: 커서를 파괴하고 사용된 메모리를 해제
-    pub fn destroy_cursor(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn destroy_cursor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hcursor = uc.read_arg(0);
         let ctx = uc.get_data();
         ctx.gdi_objects.lock().unwrap().remove(&hcursor);
         crate::emu_log!("[USER32] DestroyCursor({:#x}) -> BOOL 1", hcursor);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: int MapWindowPoints(HWND hWndFrom, HWND hWndTo, LPPOINT lpPoints, UINT cPoints)
     // 역할: 한 창의 상대 좌표를 다른 창의 상대 좌표로 변환
-    pub fn map_window_points(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn map_window_points(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd_from = uc.read_arg(0);
         let hwnd_to = uc.read_arg(1);
         let lp_points = uc.read_arg(2);
@@ -1398,14 +1448,12 @@ impl DllUSER32 {
             c_points,
             ret
         );
-        Some((4, Some(ret as i32)))
+        Some(ApiHookResult::callee(4, Some(ret as i32)))
     }
 
     // API: BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni)
     // 역할: 시스템 전체의 매개변수를 가져오거나 설정
-    pub fn system_parameters_info_a(
-        uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    pub fn system_parameters_info_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ui_action = uc.read_arg(0);
         let ui_param = uc.read_arg(1);
         let pv_param = uc.read_arg(2);
@@ -1429,12 +1477,12 @@ impl DllUSER32 {
             pv_param,
             f_win_ini
         );
-        Some((4, Some(1)))
+        Some(ApiHookResult::callee(4, Some(1)))
     }
 
     // API: BOOL TranslateMDISysAccel(HWND hWndClient, LPMSG lpMsg)
     // 역할: MDI 자식 창의 바로 가기 키 메시지를 처리
-    pub fn translate_mdi_sys_accel(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn translate_mdi_sys_accel(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd_client = uc.read_arg(0);
         let lp_msg = uc.read_arg(1);
         // MSG: hwnd(0), message(4), wParam(8), lParam(12), time(16), pt(20)
@@ -1451,12 +1499,12 @@ impl DllUSER32 {
             lp_msg,
             ret
         );
-        Some((2, Some(ret)))
+        Some(ApiHookResult::callee(2, Some(ret)))
     }
 
     // API: int DrawTextA(HDC hDC, LPCSTR lpchText, int nCount, LPRECT lpRect, UINT uFormat)
     // 역할: 서식화된 텍스트를 사각형 내에 그림
-    pub fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let lpch_text = uc.read_arg(1);
         let n_count = uc.read_arg(2);
@@ -1488,12 +1536,12 @@ impl DllUSER32 {
             lp_rect,
             u_format
         );
-        Some((5, Some(16))) // Return line height
+        Some(ApiHookResult::callee(5, Some(16))) // Return line height
     }
 
     // API: BOOL GetCursorPos(LPPOINT lpPoint)
     // 역할: 마우스 커서의 현재 위치를 화면 좌표로 가져옴
-    pub fn get_cursor_pos(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_cursor_pos(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let pt_addr = uc.read_arg(0);
         let ctx = uc.get_data();
         let x = ctx.mouse_x.load(std::sync::atomic::Ordering::SeqCst);
@@ -1501,12 +1549,12 @@ impl DllUSER32 {
         uc.write_u32(pt_addr as u64, x);
         uc.write_u32(pt_addr as u64 + 4, y);
         crate::emu_log!("[USER32] GetCursorPos({:#x}) -> BOOL 1", pt_addr);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: BOOL PtInRect(const RECT* lprc, POINT pt)
     // 역할: 점이 사각형 내부에 있는지 확인
-    pub fn pt_in_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn pt_in_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let rect_addr = uc.read_arg(0);
         let pt_x = uc.read_arg(1) as i32;
         let pt_y = uc.read_arg(2) as i32;
@@ -1523,12 +1571,12 @@ impl DllUSER32 {
             pt_y,
             ret
         );
-        Some((3, Some(ret)))
+        Some(ApiHookResult::callee(3, Some(ret)))
     }
 
     // API: BOOL SetRect(LPRECT lprc, int xLeft, int yTop, int xRight, int yBottom)
     // 역할: 사각형의 좌표를 설정
-    pub fn set_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let rect_addr = uc.read_arg(0);
         let left = uc.read_arg(1) as i32;
         let top = uc.read_arg(2) as i32;
@@ -1546,12 +1594,12 @@ impl DllUSER32 {
             right,
             bottom
         );
-        Some((5, Some(1)))
+        Some(ApiHookResult::callee(5, Some(1)))
     }
 
     // API: BOOL EqualRect(const RECT* lprc1, const RECT* lprc2)
     // 역할: 두 사각형이 동일한지 확인
-    pub fn equal_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn equal_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let r1 = uc.read_arg(0);
         let r2 = uc.read_arg(1);
         let mut eq = true;
@@ -1563,12 +1611,12 @@ impl DllUSER32 {
         }
         let ret = if eq { 1 } else { 0 };
         crate::emu_log!("[USER32] EqualRect({:#x}, {:#x}) -> BOOL {}", r1, r2, ret);
-        Some((2, Some(ret)))
+        Some(ApiHookResult::callee(2, Some(ret)))
     }
 
     // API: BOOL UnionRect(LPRECT lprcDst, const RECT* lprcSrc1, const RECT* lprcSrc2)
     // 역할: 두 사각형을 모두 포함하는 최소 사각형을 계산
-    pub fn union_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn union_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let dst = uc.read_arg(0);
         let src1 = uc.read_arg(1);
         let src2 = uc.read_arg(2);
@@ -1594,12 +1642,12 @@ impl DllUSER32 {
             src1,
             src2
         );
-        Some((3, Some(1)))
+        Some(ApiHookResult::callee(3, Some(1)))
     }
 
     // API: BOOL IntersectRect(LPRECT lprcDst, const RECT* lprcSrc1, const RECT* lprcSrc2)
     // 역할: 두 사각형의 교집합 사각형을 계산
-    pub fn intersect_rect(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn intersect_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let dst = uc.read_arg(0);
         let src1 = uc.read_arg(1);
         let src2 = uc.read_arg(2);
@@ -1635,12 +1683,12 @@ impl DllUSER32 {
             src2,
             ret
         );
-        Some((3, Some(ret)))
+        Some(ApiHookResult::callee(3, Some(ret)))
     }
 
     // API: HANDLE GetClipboardData(UINT uFormat)
     // 역할: 클립보드에서 데이터를 가져옴
-    pub fn get_clipboard_data(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_clipboard_data(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let format = uc.read_arg(0);
         if format == 1 {
             let (ptr, data) = {
@@ -1659,16 +1707,16 @@ impl DllUSER32 {
                 uc.mem_write(ptr as u64, &data).unwrap();
                 uc.mem_write(ptr as u64 + data.len() as u64, &[0]).unwrap();
                 crate::emu_log!("[USER32] GetClipboardData({:#x}) -> int {:#x}", format, ptr);
-                return Some((1, Some(ptr as i32)));
+                return Some(ApiHookResult::callee(1, Some(ptr as i32)));
             }
         }
         crate::emu_log!("[USER32] GetClipboardData({:#x}) -> int 0", format);
-        Some((1, Some(0)))
+        Some(ApiHookResult::callee(1, Some(0)))
     }
 
     // API: BOOL OpenClipboard(HWND hWndNewOwner)
     // 역할: 클립보드를 엶
-    pub fn open_clipboard(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn open_clipboard(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let opened = ctx
@@ -1679,31 +1727,34 @@ impl DllUSER32 {
             hwnd,
             if opened == 0 { 1 } else { 0 }
         );
-        Some((1, Some(if opened == 0 { 1 } else { 0 })))
+        Some(ApiHookResult::callee(
+            1,
+            Some(if opened == 0 { 1 } else { 0 }),
+        ))
     }
 
     // API: BOOL CloseClipboard(void)
     // 역할: 클립보드를 닫음
-    pub fn close_clipboard(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn close_clipboard(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         ctx.clipboard_open
             .store(0, std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] CloseClipboard() -> BOOL 1");
-        Some((0, Some(1)))
+        Some(ApiHookResult::callee(0, Some(1)))
     }
 
     // API: BOOL EmptyClipboard(void)
     // 역할: 클립보드 비우기
-    pub fn empty_clipboard(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn empty_clipboard(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         ctx.clipboard_data.lock().unwrap().clear();
         crate::emu_log!("[USER32] EmptyClipboard() -> BOOL 1");
-        Some((0, Some(1)))
+        Some(ApiHookResult::callee(0, Some(1)))
     }
 
     // API: HANDLE SetClipboardData(UINT uFormat, HANDLE hMem)
     // 역할: 클립보드 데이터 설정
-    pub fn set_clipboard_data(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_clipboard_data(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let format = uc.read_arg(0);
         let hmem = uc.read_arg(1);
         if format == 1 && hmem != 0 {
@@ -1725,16 +1776,14 @@ impl DllUSER32 {
                 format,
                 hmem
             );
-            return Some((2, Some(hmem as i32)));
+            return Some(ApiHookResult::callee(2, Some(hmem as i32)));
         }
-        Some((2, Some(0)))
+        Some(ApiHookResult::callee(2, Some(0)))
     }
 
     // API: BOOL IsClipboardFormatAvailable(UINT format)
     // 역할: 클립보드 포맷 확인
-    pub fn is_clipboard_format_available(
-        uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    pub fn is_clipboard_format_available(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let format = uc.read_arg(0);
         let available = if format == 1 {
             let ctx = uc.get_data();
@@ -1751,43 +1800,43 @@ impl DllUSER32 {
             format,
             available
         );
-        Some((1, Some(available)))
+        Some(ApiHookResult::callee(1, Some(available)))
     }
 
     // API: HWND SetCapture(HWND hWnd)
     // 역할: 마우스 캡처 설정
-    pub fn set_capture(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_capture(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let old = ctx
             .capture_hwnd
             .swap(hwnd, std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] SetCapture({:#x}) -> HWND {:#x}", hwnd, old);
-        Some((1, Some(old as i32)))
+        Some(ApiHookResult::callee(1, Some(old as i32)))
     }
 
     // API: HWND GetCapture(void)
     // 역할: 마우스 캡처 창 핸들
-    pub fn get_capture(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_capture(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         let hwnd = ctx.capture_hwnd.load(std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] GetCapture() -> HWND {:#x}", hwnd);
-        Some((0, Some(hwnd as i32)))
+        Some(ApiHookResult::callee(0, Some(hwnd as i32)))
     }
 
     // API: BOOL ReleaseCapture(void)
     // 역할: 마우스 캡처 해제
-    pub fn release_capture(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn release_capture(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         ctx.capture_hwnd
             .store(0, std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] ReleaseCapture() -> BOOL 1");
-        Some((0, Some(1)))
+        Some(ApiHookResult::callee(0, Some(1)))
     }
 
     // API: BOOL ScreenToClient(HWND hWnd, LPPOINT lpPoint)
     // 역할: 화면 좌표를 클라이언트 좌표로
-    pub fn screen_to_client(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn screen_to_client(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let pt_addr = uc.read_arg(1);
         let (win_x, win_y) = {
@@ -1808,12 +1857,12 @@ impl DllUSER32 {
             hwnd,
             pt_addr
         );
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: BOOL ClientToScreen(HWND hWnd, LPPOINT lpPoint)
     // 역할: 클라이언트 좌표를 화면 좌표로
-    pub fn client_to_screen(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn client_to_screen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let pt_addr = uc.read_arg(1);
         let (win_x, win_y) = {
@@ -1830,12 +1879,12 @@ impl DllUSER32 {
         uc.write_u32(pt_addr as u64, (x + win_x) as u32);
         uc.write_u32(pt_addr as u64 + 4, (y + win_y) as u32);
         crate::emu_log!("[USER32] ClientToScreen({:#x}) -> BOOL 1", hwnd);
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: BOOL CreateCaret(HWND hWnd, HBITMAP hBitmap, int nWidth, int nHeight)
     // 역할: 캐럿 생성
-    pub fn create_caret(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_caret(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let hbitmap = uc.read_arg(1);
         let nwidth = uc.read_arg(2);
@@ -1847,44 +1896,44 @@ impl DllUSER32 {
             nwidth,
             nheight
         );
-        Some((4, Some(1)))
+        Some(ApiHookResult::callee(4, Some(1)))
     }
 
     // API: BOOL DestroyCaret(void)
     // 역할: 캐럿 파괴
-    pub fn destroy_caret(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn destroy_caret(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] DestroyCaret({:#x}) -> BOOL 1", hwnd);
-        Some((0, Some(1)))
+        Some(ApiHookResult::callee(0, Some(1)))
     }
 
     // API: BOOL ShowCaret(HWND hWnd)
     // 역할: 캐럿 표시
-    pub fn show_caret(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn show_caret(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] ShowCaret({:#x}) -> BOOL 1", hwnd);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: BOOL HideCaret(HWND hWnd)
     // 역할: 캐럿 숨김
-    pub fn hide_caret(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn hide_caret(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] HideCaret({:#x}) -> BOOL 1", hwnd);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: BOOL SetCaretPos(int X, int Y)
     // 역할: 캐럿 위치 설정
-    pub fn set_caret_pos(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_caret_pos(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let x = uc.read_arg(0);
         let y = uc.read_arg(1);
         crate::emu_log!("[USER32] SetCaretPos({:#x}, {:#x}) -> BOOL 1", x, y);
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
     // API: SHORT GetAsyncKeyState(int vKey)
     // 역할: 가상 키 상태 확인
-    pub fn get_async_key_state(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_async_key_state(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let vkey = uc.read_arg(0) as usize;
         let ctx = uc.get_data();
         let ks = ctx.key_states.lock().unwrap();
@@ -1897,12 +1946,12 @@ impl DllUSER32 {
             vkey,
             state
         );
-        Some((1, Some(state)))
+        Some(ApiHookResult::callee(1, Some(state)))
     }
 
     // API: SHORT GetKeyState(int nVirtKey)
     // 역할: 가상 키 상태 확인
-    pub fn get_key_state(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_key_state(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let vkey = uc.read_arg(0) as usize;
         let ctx = uc.get_data();
         let ks = ctx.key_states.lock().unwrap();
@@ -1911,12 +1960,12 @@ impl DllUSER32 {
             state = -32768; // 0x8000
         }
         crate::emu_log!("[USER32] GetKeyState({:#x}) -> SHORT {:#x}", vkey, state);
-        Some((1, Some(state)))
+        Some(ApiHookResult::callee(1, Some(state)))
     }
 
     // API: DWORD GetSysColor(int nIndex)
     // 역할: 시스템 색상 가져오기
-    pub fn get_sys_color(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_sys_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let index = uc.read_arg(0);
         let color = match index {
             5 => 0x00FFFFFF,  // COLOR_WINDOW
@@ -1925,12 +1974,12 @@ impl DllUSER32 {
             _ => 0x00808080,
         };
         crate::emu_log!("[USER32] GetSysColor({:#x}) -> COLOR {:#x}", index, color);
-        Some((1, Some(color as i32)))
+        Some(ApiHookResult::callee(1, Some(color as i32)))
     }
 
     // API: int SetWindowRgn(HWND hWnd, HRGN hRgn, BOOL bRedraw)
     // 역할: 윈도우 영역 설정
-    pub fn set_window_rgn(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_window_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let h_rgn = uc.read_arg(1);
         let b_redraw = uc.read_arg(2);
@@ -1955,12 +2004,12 @@ impl DllUSER32 {
             b_redraw,
             ret
         );
-        Some((3, Some(ret)))
+        Some(ApiHookResult::callee(3, Some(ret)))
     }
 
     // API: BOOL GetClassInfoExA(HINSTANCE hinst, LPCSTR lpszClass, PWNDCLASSEXA lpwcx)
     // 역할: 윈도우 클래스 정보 가져오기
-    pub fn get_class_info_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_class_info_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let _hinst = uc.read_arg(0);
         let class_name_ptr = uc.read_arg(1);
         let class_name = if class_name_ptr < 0x10000 {
@@ -1977,16 +2026,16 @@ impl DllUSER32 {
         if let Some(proc) = wnd_proc {
             uc.write_u32(wcx_addr as u64 + 8, proc);
             crate::emu_log!("[USER32] GetClassInfoExA(\"{}\") -> BOOL 1", class_name);
-            Some((3, Some(1)))
+            Some(ApiHookResult::callee(3, Some(1)))
         } else {
             crate::emu_log!("[USER32] GetClassInfoExA(\"{}\") -> BOOL 0", class_name);
-            Some((3, Some(0)))
+            Some(ApiHookResult::callee(3, Some(0)))
         }
     }
 
     // API: BOOL GetClassInfoA(HINSTANCE hinst, LPCSTR lpszClass, PWNDCLASSA lpwc)
     // 역할: 윈도우 클래스 정보 가져오기
-    pub fn get_class_info_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_class_info_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let _hinst = uc.read_arg(0);
         let class_name_ptr = uc.read_arg(1);
         let lpwc = uc.read_arg(2);
@@ -2016,16 +2065,16 @@ impl DllUSER32 {
             uc.write_u32(lpwc as u64 + 36, class_name_ptr); // lpszClassName
 
             crate::emu_log!("[USER32] GetClassInfoA(\"{}\") -> BOOL 1", class_name);
-            Some((3, Some(1)))
+            Some(ApiHookResult::callee(3, Some(1)))
         } else {
             crate::emu_log!("[USER32] GetClassInfoA(\"{}\") -> BOOL 0", class_name);
-            Some((3, Some(0)))
+            Some(ApiHookResult::callee(3, Some(0)))
         }
     }
 
     // API: BOOL IsZoomed(HWND hWnd)
     // 역할: 윈도우가 최대화되어 있는지 확인
-    pub fn is_zoomed(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn is_zoomed(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
@@ -2035,12 +2084,12 @@ impl DllUSER32 {
             .map(|w| w.zoomed)
             .unwrap_or(false);
         crate::emu_log!("[USER32] IsZoomed({:#x}) -> BOOL {}", hwnd, zoomed);
-        Some((1, Some(if zoomed { 1 } else { 0 })))
+        Some(ApiHookResult::callee(1, Some(if zoomed { 1 } else { 0 })))
     }
 
     // API: BOOL IsIconic(HWND hWnd)
     // 역할: 윈도우가 아이콘화되어 있는지 확인
-    pub fn is_iconic(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn is_iconic(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
@@ -2050,12 +2099,12 @@ impl DllUSER32 {
             .map(|w| w.iconic)
             .unwrap_or(false);
         crate::emu_log!("[USER32] IsIconic({:#x}) -> BOOL {}", hwnd, iconic);
-        Some((1, Some(if iconic { 1 } else { 0 })))
+        Some(ApiHookResult::callee(1, Some(if iconic { 1 } else { 0 })))
     }
 
     // API: int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...)
     // 역할: 문자열을 포맷팅하여 출력
-    pub fn wsprintf_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn wsprintf_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let buf_addr = uc.read_arg(0);
         let fmt_addr = uc.read_arg(1);
         if buf_addr != 0 && fmt_addr != 0 {
@@ -2123,15 +2172,15 @@ impl DllUSER32 {
                 fmt_addr,
                 formatted.len()
             );
-            Some((arg_idx, Some(formatted.len() as i32)))
+            Some(ApiHookResult::callee(arg_idx, Some(formatted.len() as i32)))
         } else {
-            Some((2, Some(0)))
+            Some(ApiHookResult::callee(2, Some(0)))
         }
     }
 
     // API: BOOL EndDialog(HWND hDlg, INT_PTR nResult)
     // 역할: 다이얼로그를 닫음
-    pub fn end_dialog(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn end_dialog(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let h_dlg = uc.read_arg(0);
         let n_result = uc.read_arg(1);
 
@@ -2147,12 +2196,45 @@ impl DllUSER32 {
             h_dlg,
             n_result as i32
         );
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: LRESULT DefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     // 역할: 윈도우 프로시저를 호출
-    pub fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    /// 지정된 윈도우 프로시저를 호출합니다. (SendMessage, DispatchMessage 등에서 공통으로 사용)
+    fn dispatch_to_wndproc(
+        uc: &mut Unicorn<Win32Context>,
+        wnd_proc: u32,
+        hwnd: u32,
+        msg: u32,
+        wparam: u32,
+        lparam: u32,
+    ) -> i32 {
+        if wnd_proc == 0 {
+            return 0;
+        }
+
+        // Call Wnd assignment: HWND, UINT, WPARAM, LPARAM
+        uc.push_u32(lparam);
+        uc.push_u32(wparam);
+        uc.push_u32(msg);
+        uc.push_u32(hwnd);
+        uc.push_u32(EXIT_ADDRESS as u32);
+
+        if let Err(e) = uc.emu_start(wnd_proc as u64, EXIT_ADDRESS, 0, 0) {
+            crate::emu_log!(
+                "[USER32] dispatch_to_wndproc: execution failed at {:#x} (msg={:#x}): {:?}",
+                wnd_proc,
+                msg,
+                e
+            );
+            return 0;
+        }
+
+        uc.reg_read(RegisterX86::EAX).unwrap() as i32
+    }
+
+    pub fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let msg = uc.read_arg(1);
         let w_param = uc.read_arg(2);
@@ -2164,12 +2246,12 @@ impl DllUSER32 {
             w_param,
             l_param
         );
-        Some((4, Some(0)))
+        Some(ApiHookResult::callee(4, Some(0)))
     }
 
     // API: LRESULT DefMDIChildProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     // 역할: MDI 자식 윈도우 프로시저를 호출
-    pub fn def_mdi_child_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn def_mdi_child_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let msg = uc.read_arg(1);
         let w_param = uc.read_arg(2);
@@ -2181,12 +2263,12 @@ impl DllUSER32 {
             w_param,
             l_param
         );
-        Some((4, Some(0)))
+        Some(ApiHookResult::callee(4, Some(0)))
     }
 
     // API: LRESULT DefFrameProcA(HWND hWnd, HWND hWndMDIClient, UINT Msg, WPARAM wParam, LPARAM lParam)
     // 역할: 프레임 윈도우 프로시저를 호출
-    pub fn def_frame_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn def_frame_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let mdi_client = uc.read_arg(1);
         let msg = uc.read_arg(2);
@@ -2200,12 +2282,12 @@ impl DllUSER32 {
             w_param,
             l_param
         );
-        Some((5, Some(0)))
+        Some(ApiHookResult::callee(5, Some(0)))
     }
 
     // API: LONG SetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong)
     // 역할: 윈도우의 롱을 설정
-    pub fn set_window_long_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_window_long_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let index = uc.read_arg(1) as i32;
         let new_val = uc.read_arg(2);
@@ -2221,6 +2303,11 @@ impl DllUSER32 {
                         old = win.wnd_proc;
                         win.wnd_proc = new_val;
                     }
+                    -12 => {
+                        // GWL_ID (GW_ID)
+                        old = win.id;
+                        win.id = new_val;
+                    }
                     -16 => {
                         // GWL_STYLE
                         old = win.style;
@@ -2235,11 +2322,6 @@ impl DllUSER32 {
                         // GWL_USERDATA
                         old = win.user_data;
                         win.user_data = new_val;
-                    }
-                    -12 => {
-                        // GWL_ID (GW_ID)
-                        old = win.id;
-                        win.id = new_val;
                     }
                     _ => {
                         crate::emu_log!("[USER32] SetWindowLongA index {} not implemented", index);
@@ -2259,7 +2341,7 @@ impl DllUSER32 {
                 new_val,
                 old
             );
-            Some((3, Some(old as i32)))
+            Some(ApiHookResult::callee(3, Some(old as i32)))
         } else {
             crate::emu_log!(
                 "[USER32] SetWindowLongA({:#x}, {}, {:#x}) -> Window not found",
@@ -2267,13 +2349,13 @@ impl DllUSER32 {
                 index,
                 new_val
             );
-            Some((3, Some(0)))
+            Some(ApiHookResult::callee(3, Some(0)))
         }
     }
 
     // API: LONG GetWindowLongA(HWND hWnd, int nIndex)
     // 역할: 윈도우의 롱을 가져옴
-    pub fn get_window_long_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_window_long_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let index = uc.read_arg(1) as i32;
 
@@ -2284,10 +2366,10 @@ impl DllUSER32 {
             if let Some(win) = win_event.windows.get(&hwnd) {
                 match index {
                     -4 => val = win.wnd_proc,
+                    -12 => val = win.id,
                     -16 => val = win.style,
                     -20 => val = win.ex_style,
                     -21 => val = win.user_data,
-                    -12 => val = win.id,
                     _ => {
                         crate::emu_log!("[USER32] GetWindowLongA index {} not implemented", index);
                     }
@@ -2305,47 +2387,55 @@ impl DllUSER32 {
                 index,
                 val
             );
-            Some((2, Some(val as i32)))
+            Some(ApiHookResult::callee(2, Some(val as i32)))
         } else {
             crate::emu_log!(
                 "[USER32] GetWindowLongA({:#x}, idx={}) -> Window not found",
                 hwnd,
                 index
             );
-            Some((2, Some(0)))
+            Some(ApiHookResult::callee(2, Some(0)))
         }
     }
 
     // API: LONG_PTR SetWindowLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong)
     // 역할: 윈도우의 롱 포인터를 설정
-    pub fn set_window_long_ptr_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_window_long_ptr_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         Self::set_window_long_a(uc) // reuse SetWindowLongA for now
     }
 
     // API: LONG_PTR GetWindowLongPtrA(HWND hWnd, int nIndex)
     // 역할: 윈도우의 롱 포인터를 가져옴
-    pub fn get_window_long_ptr_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_window_long_ptr_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         Self::get_window_long_a(uc) // reuse GetWindowLongA for now
     }
 
     // API: LRESULT CallWindowProcA(WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     // 역할: 윈도우 프로시저를 호출
-    pub fn call_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
-        let proc = uc.read_arg(0);
+    pub fn call_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let lp_prev_wnd_func = uc.read_arg(0);
         let hwnd = uc.read_arg(1);
         let msg = uc.read_arg(2);
+        let w_param = uc.read_arg(3);
+        let l_param = uc.read_arg(4);
+
+        let ret = Self::dispatch_to_wndproc(uc, lp_prev_wnd_func, hwnd, msg, w_param, l_param);
+
         crate::emu_log!(
-            "[USER32] CallWindowProcA({:#x}, {:#x}, {:#x}) -> LRESULT 0",
-            proc,
+            "[USER32] CallWindowProcA({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> LRESULT {:#x}",
+            lp_prev_wnd_func,
             hwnd,
-            msg
+            msg,
+            w_param,
+            l_param,
+            ret
         );
-        Some((5, Some(0)))
+        Some(ApiHookResult::callee(5, Some(ret)))
     }
 
     // API: BOOL PostThreadMessageA(DWORD idThread, UINT Msg, WPARAM wParam, LPARAM lParam)
     // 역할: 스레드에 메시지를 보냄
-    pub fn post_thread_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn post_thread_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let thread_id = uc.read_arg(0);
         let msg = uc.read_arg(1);
         let w_param = uc.read_arg(2);
@@ -2363,12 +2453,12 @@ impl DllUSER32 {
             w_param,
             l_param
         );
-        Some((4, Some(1)))
+        Some(ApiHookResult::callee(4, Some(1)))
     }
 
     // API: BOOL IsDialogMessageA(HWND hDlg, LPMSG lpMsg)
     // 역할: 다이얼로그 메시지를 번역
-    pub fn is_dialog_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn is_dialog_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let h_dlg = uc.read_arg(0);
         let lp_msg = uc.read_arg(1);
         crate::emu_log!(
@@ -2376,20 +2466,20 @@ impl DllUSER32 {
             h_dlg,
             lp_msg
         );
-        Some((2, Some(0)))
+        Some(ApiHookResult::callee(2, Some(0)))
     }
 
     // API: void PostQuitMessage(int nExitCode)
     // 역할: 프로그램 종료 메시지를 보냄
-    pub fn post_quit_message(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn post_quit_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let n_exit_code = uc.read_arg(0);
         crate::emu_log!("[USER32] PostQuitMessage({}) -> void", n_exit_code);
-        Some((1, None))
+        Some(ApiHookResult::callee(1, None))
     }
 
     // API: HWND SetFocus(HWND hWnd)
     // 역할: 포커스된 윈도우를 설정
-    pub fn set_focus(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_focus(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let old = ctx
@@ -2404,21 +2494,21 @@ impl DllUSER32 {
         ctx.win_event.lock().unwrap().activate_window(hwnd);
 
         crate::emu_log!("[USER32] SetFocus({:#x}) -> HWND {:#x}", hwnd, old);
-        Some((1, Some(old as i32)))
+        Some(ApiHookResult::callee(1, Some(old as i32)))
     }
 
     // API: HWND GetFocus(void)
     // 역할: 포커스된 윈도우를 가져옴
-    pub fn get_focus(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_focus(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let ctx = uc.get_data();
         let focus = ctx.focus_hwnd.load(std::sync::atomic::Ordering::SeqCst);
         crate::emu_log!("[USER32] GetFocus() -> HWND {:#x}", focus);
-        Some((0, Some(focus as i32)))
+        Some(ApiHookResult::callee(0, Some(focus as i32)))
     }
 
     // API: LRESULT DispatchMessageA(const MSG* lpMsg)
     // 역할: 메시지를 디스패치
-    pub fn dispatch_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn dispatch_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let lp_msg = uc.read_arg(0);
         let hwnd = uc.read_u32(lp_msg as u64);
         let msg = uc.read_u32(lp_msg as u64 + 4);
@@ -2428,173 +2518,342 @@ impl DllUSER32 {
         let wnd_proc = {
             let ctx = uc.get_data();
             let win_event = ctx.win_event.lock().unwrap();
-            win_event.windows.get(&hwnd).map(|win| win.wnd_proc)
+            win_event
+                .windows
+                .get(&hwnd)
+                .map(|win| win.wnd_proc)
+                .unwrap_or(0)
         };
 
-        if let Some(proc) = wnd_proc {
-            if proc != 0 {
-                // Call Wnd achievement: HWND, UINT, WPARAM, LPARAM
-                uc.push_u32(l_param);
-                uc.push_u32(w_param);
-                uc.push_u32(msg);
-                uc.push_u32(hwnd);
-                uc.push_u32(EXIT_ADDRESS as u32);
+        let ret = Self::dispatch_to_wndproc(uc, wnd_proc, hwnd, msg, w_param, l_param);
 
-                if let Err(e) = uc.emu_start(proc as u64, EXIT_ADDRESS, 0, 0) {
-                    crate::emu_log!(
-                        "[USER32] DispatchMessageA: wnd_proc execution failed at {:#x}: {:?}",
-                        proc,
-                        e
-                    );
-                }
-                let ret = uc.reg_read(RegisterX86::EAX).unwrap() as i32;
-                crate::emu_log!(
-                    "[USER32] DispatchMessageA({:#x}) -> LRESULT {}",
-                    lp_msg,
-                    ret
-                );
-                return Some((1, Some(ret)));
-            }
-        }
-
-        crate::emu_log!("[USER32] DispatchMessageA({:#x}) -> Default 0", lp_msg);
-        Some((1, Some(0)))
+        Some(ApiHookResult::callee(1, Some(ret)))
     }
 
     // API: BOOL TranslateMessage(const MSG* lpMsg)
     // 역할: 메시지를 번역
-    pub fn translate_message(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn translate_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let lp_msg = uc.read_arg(0);
+        let hwnd = uc.read_u32(lp_msg as u64 + 0);
         let msg = uc.read_u32(lp_msg as u64 + 4);
+        let vk = uc.read_u32(lp_msg as u64 + 8);
+        let l_param = uc.read_u32(lp_msg as u64 + 12);
 
-        // WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105
-        let ret = if msg == 0x0100 || msg == 0x0101 || msg == 0x0104 || msg == 0x0105 {
-            1 // Translated (simplified)
-        } else {
-            0
-        };
+        // WM_KEYDOWN(0x0100) 또는 WM_SYSKEYDOWN(0x0104)인 경우에만 번역 시도
+        if msg == 0x100 || msg == 0x104 {
+            let mut char_code = 0;
 
-        crate::emu_log!(
-            "[USER32] TranslateMessage({:#x}) -> BOOL {} (msg={:#?})",
-            lp_msg,
-            ret,
-            msg
-        );
-        Some((1, Some(ret)))
+            // 단순 VK -> ASCII 매핑 (Shift 고려)
+            let shifted = {
+                let ctx = uc.get_data();
+                let keys = ctx.key_states.lock().unwrap();
+                keys[0x10] // VK_SHIFT
+            };
+
+            if (0x30..=0x39).contains(&vk) {
+                // 숫자 키
+                char_code = if shifted {
+                    match vk {
+                        0x30 => 0x29, // )
+                        0x31 => 0x21, // !
+                        0x32 => 0x40, // @
+                        0x33 => 0x23, // #
+                        0x34 => 0x24, // $
+                        0x35 => 0x25, // %
+                        0x36 => 0x5e, // ^
+                        0x37 => 0x26, // &
+                        0x38 => 0x2a, // *
+                        0x39 => 0x28, // (
+                        _ => vk,
+                    }
+                } else {
+                    vk
+                };
+            } else if (0x41..=0x5A).contains(&vk) {
+                // 알파벳 (A-Z)
+                char_code = if shifted { vk } else { vk + 0x20 }; // 대문자 or 소문자
+            } else if vk == 0x20 {
+                // Space
+                char_code = 0x20;
+            } else if vk == 0x0D {
+                // Enter
+                char_code = 0x0D;
+            } else if vk == 0x08 {
+                // Backspace
+                char_code = 0x08;
+            } else if vk == 0x09 {
+                // Tab
+                char_code = 0x09;
+            } else if vk == 0x1B {
+                // Escape
+                char_code = 0x1B;
+            }
+
+            if char_code != 0 {
+                let ctx = uc.get_data();
+                let mut q = ctx.message_queue.lock().unwrap();
+                // WM_CHAR(0x0102) 또는 WM_SYSCHAR(0x0106) 추가
+                let char_msg = if msg == 0x0100 { 0x0102 } else { 0x0106 };
+                q.push_back([hwnd, char_msg, char_code, l_param, 0, 0, 0]);
+
+                crate::emu_log!(
+                    "[USER32] TranslateMessage: Generated char {:#x} ('{}') for VK {:#x}",
+                    char_code,
+                    (char_code as u8 as char),
+                    vk
+                );
+                return Some(ApiHookResult::callee(1, Some(1)));
+            }
+        }
+
+        crate::emu_log!("[USER32] TranslateMessage({:#x}) -> BOOL 0", lp_msg);
+        Some(ApiHookResult::callee(1, Some(0)))
     }
 
     // API: BOOL PeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
     // 역할: 메시지 큐에서 메시지를 가져옴
-    pub fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let lp_msg = uc.read_arg(0);
-        let hwnd = uc.read_arg(1);
-        let min = uc.read_arg(2);
-        let max = uc.read_arg(3);
-        let remove = uc.read_arg(4);
+        let hwnd_filter = uc.read_arg(1);
+        let msg_min = uc.read_arg(2);
+        let msg_max = uc.read_arg(3);
+        let remove_flag = uc.read_arg(4);
+
+        // 타 스레드 스케줄링 (협력적 멀티태스킹 유도)
+        DllKERNEL32::schedule_threads(uc);
 
         let msg = {
             let ctx = uc.get_data();
+
+            // 1. 타이머 체크 및 WM_TIMER 생성
+            {
+                let mut timers = ctx.timers.lock().unwrap();
+                let mut q = ctx.message_queue.lock().unwrap();
+                let now = std::time::Instant::now();
+                for timer in timers.values_mut() {
+                    if now.duration_since(timer.last_tick).as_millis() >= timer.elapse as u128 {
+                        timer.last_tick = now;
+                        // WM_TIMER(0x0113): wParam=id, lParam=timer_proc
+                        q.push_back([timer.hwnd, 0x0113, timer.id, timer.timer_proc, 0, 0, 0]);
+                    }
+                }
+            }
+
             let mut q = ctx.message_queue.lock().unwrap();
-            q.pop_front()
+
+            let mut found_idx = None;
+            for (i, m) in q.iter().enumerate() {
+                let m_hwnd = m[0];
+                let m_type = m[1];
+
+                // HWND 필터링: filter가 0이면 모든 창, 아니면 특정 창만
+                if hwnd_filter != 0 && m_hwnd != hwnd_filter {
+                    continue;
+                }
+
+                // 메시지 범위 필터링: min/max가 0이면 모든 메시지
+                if msg_min != 0 || msg_max != 0 {
+                    if m_type < msg_min || m_type > msg_max {
+                        continue;
+                    }
+                }
+
+                found_idx = Some(i);
+                break;
+            }
+
+            if let Some(idx) = found_idx {
+                if (remove_flag & 0x0001) != 0 {
+                    q.remove(idx)
+                } else {
+                    Some(q[idx])
+                }
+            } else {
+                // 2. WM_PAINT 합성 (큐가 비어있는 경우)
+                drop(q); // win_event 락을 잡기 위해 q 락 해제
+                let mut synthesized = None;
+                {
+                    let ctx = uc.get_data();
+                    let mut win_event = ctx.win_event.lock().unwrap();
+                    for (hwnd, state) in win_event.windows.iter_mut() {
+                        if state.needs_paint {
+                            if hwnd_filter != 0 && *hwnd != hwnd_filter {
+                                continue;
+                            }
+                            if (msg_min != 0 || msg_max != 0)
+                                && (0x000F < msg_min || 0x000F > msg_max)
+                            {
+                                continue;
+                            }
+                            synthesized = Some([*hwnd, 0x000F, 0, 0, 0, 0, 0]);
+                            break;
+                        }
+                    }
+                }
+                synthesized
+            }
+        };
+
+        let (time, pt_x, pt_y) = {
+            let ctx = uc.get_data();
+            let time = ctx.start_time.elapsed().as_millis() as u32;
+            let x = ctx.mouse_x.load(std::sync::atomic::Ordering::SeqCst);
+            let y = ctx.mouse_y.load(std::sync::atomic::Ordering::SeqCst);
+            (time, x, y)
         };
 
         let ret = if let Some(m) = msg {
-            for i in 0..7 {
-                uc.write_u32(lp_msg as u64 + i * 4, m[i as usize]);
-            }
+            // MSG 구조체 채우기
+            uc.write_u32(lp_msg as u64 + 0, m[0]); // hwnd
+            uc.write_u32(lp_msg as u64 + 4, m[1]); // message
+            uc.write_u32(lp_msg as u64 + 8, m[2]); // wParam
+            uc.write_u32(lp_msg as u64 + 12, m[3]); // lParam
+            uc.write_u32(lp_msg as u64 + 16, time); // time
+            uc.write_u32(lp_msg as u64 + 20, m[5].max(pt_x)); // pt.x (큐 메시지 좌표 or 현재 좌표)
+            uc.write_u32(lp_msg as u64 + 24, m[6].max(pt_y)); // pt.y
             1
         } else {
             0
         };
-        crate::emu_log!(
-            "[USER32] PeekMessageA({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> BOOL {}",
-            lp_msg,
-            hwnd,
-            min,
-            max,
-            remove,
-            ret
-        );
-        Some((5, Some(ret)))
+
+        // if ret != 0 {
+        //     let m = msg.unwrap();
+        //     crate::emu_log!(
+        //         "[USER32] PeekMessageA({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> FOUND msg={:#x}",
+        //         lp_msg,
+        //         hwnd_filter,
+        //         msg_min,
+        //         msg_max,
+        //         remove_flag,
+        //         m[1]
+        //     );
+        // }
+
+        // crate::emu_log!("[USER32] Returning from PeekMessageA -> {}", ret);
+        Some(ApiHookResult::callee(5, Some(ret)))
     }
 
     // API: BOOL GetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
     // 역할: 메시지 큐에서 메시지를 가져옴
-    pub fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let lp_msg = uc.read_arg(0);
-        let hwnd = uc.read_arg(1);
-        let min = uc.read_arg(2);
-        let max = uc.read_arg(3);
+        let _hwnd_filter = uc.read_arg(1);
+        let _min = uc.read_arg(2);
+        let _max = uc.read_arg(3);
 
         let msg = {
-            let ctx = uc.get_data();
+            let ctx = uc.get_data(); // Immutable borrow of ctx
             let mut q = ctx.message_queue.lock().unwrap();
+
+            if q.is_empty() {
+                // Synthesize WM_PAINT if needed
+                let mut paint_hwnd = 0;
+                let win_event = ctx.win_event.lock().unwrap(); // Immutable borrow of win_event
+                for (&h, win) in win_event.windows.iter() {
+                    if win.needs_paint {
+                        paint_hwnd = h;
+                        break;
+                    }
+                }
+                if paint_hwnd != 0 {
+                    let time = ctx.start_time.elapsed().as_millis() as u32;
+                    q.push_back([paint_hwnd, 0x000F, 0, 0, time, 0, 0]);
+                }
+            }
+
             q.pop_front()
         };
 
-        let message = if let Some(m) = msg {
-            for i in 0..7 {
-                uc.write_u32(lp_msg as u64 + i * 4, m[i as usize]);
+        // 메시지가 없으면 타 스레드에게 기회를 준 뒤 재시도 (GetMessage는 블로킹 API)
+        if msg.is_none() {
+            DllKERNEL32::schedule_threads(uc);
+            // 재귀 호출 대신 루프로 구현하는 것이 좋으나, Unicorn 환경에서는 루프 내에서 emu_stop/start 제어가 복잡하므로
+            // 현재는 1회 스케줄링 후 메시지가 여전히 없으면 WM_NULL을 반환하거나 짧게 대기합니다.
+            // 여기서는 안정성을 위해 10ms 대기 후 다시 큐를 확인합니다.
+            let mut retry_count = 0;
+            let mut final_msg = msg;
+            while final_msg.is_none() && retry_count < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                DllKERNEL32::schedule_threads(uc);
+                final_msg = {
+                    let ctx = uc.get_data();
+                    let mut q = ctx.message_queue.lock().unwrap();
+                    q.pop_front()
+                };
+                retry_count += 1;
             }
-            format!("(msg={:#x})", m[1])
+
+            if let Some(m) = final_msg {
+                for i in 0..7 {
+                    uc.write_u32(lp_msg as u64 + (i * 4) as u64, m[i as usize]);
+                }
+                let is_quit = m[1] == 0x0012;
+                return Some(ApiHookResult::callee(4, Some(if is_quit { 0 } else { 1 })));
+            }
+        }
+
+        if let Some(m) = msg {
+            for i in 0..7 {
+                uc.write_u32(lp_msg as u64 + (i * 4) as u64, m[i as usize]);
+            }
+            let is_quit = m[1] == 0x0012;
+            Some(ApiHookResult::callee(4, Some(if is_quit { 0 } else { 1 })))
         } else {
-            // Return WM_NULL
-            uc.write_u32(lp_msg as u64 + 4, 0); // message = 0
-            "(WM_NULL)".to_string()
-        };
-        crate::emu_log!(
-            "[USER32] GetMessageA({:#x}, {:#x}, {:#x}, {:#x}) -> 1 {message}",
-            lp_msg,
-            hwnd,
-            min,
-            max
-        );
-        Some((4, Some(1)))
+            // No message (Note: native GetMessage blocks, but for now we return WM_NULL)
+            uc.write_u32(lp_msg as u64 + 4, 0); // message = 0 (WM_NULL)
+            Some(ApiHookResult::callee(4, Some(1)))
+        }
     }
 
     // API: BOOL GetPropA(HWND hWnd, LPCSTR lpString)
     // 역할: 윈도우에서 프로퍼티를 가져옴
-    pub fn get_prop_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_prop_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] GetPropA({:#x}) -> 0", hwnd);
-        Some((2, Some(0)))
+        Some(ApiHookResult::callee(2, Some(0)))
     }
 
     // API: BOOL SetPropA(HWND hWnd, LPCSTR lpString, HANDLE hData)
     // 역할: 윈도우에 프로퍼티를 설정
-    pub fn set_prop_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_prop_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] SetPropA({:#x}) -> 1", hwnd);
-        Some((3, Some(1)))
+        Some(ApiHookResult::callee(3, Some(1)))
     }
 
     // API: HANDLE RemovePropA(HWND hWnd, LPCSTR lpString)
     // 역할: 윈도우에서 프로퍼티를 제거
-    pub fn remove_prop_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn remove_prop_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         crate::emu_log!("[USER32] RemovePropA({:#x}) -> 0", hwnd);
-        Some((2, Some(0)))
+        Some(ApiHookResult::callee(2, Some(0)))
     }
 
     // API: BOOL IsWindow(HWND hWnd)
     // 역할: 윈도우 핸들이 유효한지 확인
-    pub fn is_window(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn is_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
         let exists = win_event.windows.contains_key(&hwnd);
         crate::emu_log!("[USER32] IsWindow({:#x}) -> {}", hwnd, exists);
-        Some((1, Some(if exists { 1 } else { 0 })))
+        Some(ApiHookResult::callee(1, Some(if exists { 1 } else { 0 })))
     }
 
-    fn wrap_result(func_name: &str, result: Option<(usize, Option<i32>)>) -> Option<ApiHookResult> {
+    fn wrap_result(func_name: &str, result: Option<ApiHookResult>) -> Option<ApiHookResult> {
         match func_name {
-            "wsprintfA" => caller_result(result),
-            _ => callee_result(result),
+            "wsprintfA" => {
+                if let Some(mut res) = result {
+                    res.cleanup = crate::win32::StackCleanup::Caller;
+                    Some(res)
+                } else {
+                    None
+                }
+            }
+            _ => result,
         }
     }
 
-    /// 함수명 기준 `USER32.dll` API 구현체
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
         DllUSER32::wrap_result(
             func_name,
@@ -2663,6 +2922,7 @@ impl DllUSER32 {
                 "EndPaint" => Self::end_paint(uc),
                 "ScrollWindowEx" => Self::scroll_window_ex(uc),
                 "InvalidateRect" => Self::invalidate_rect(uc),
+                "ValidateRect" => Self::validate_rect(uc),
                 "SetScrollInfo" => Self::set_scroll_info(uc),
                 "SetWindowTextA" => Self::set_window_text_a(uc),
                 "GetWindowTextA" => Self::get_window_text_a(uc),
@@ -2724,13 +2984,15 @@ mod tests {
 
     #[test]
     fn wsprintf_uses_caller_cleanup() {
-        let result = DllUSER32::wrap_result("wsprintfA", Some((2, Some(0)))).unwrap();
+        let result =
+            DllUSER32::wrap_result("wsprintfA", Some(ApiHookResult::callee(2, Some(0)))).unwrap();
         assert_eq!(result.cleanup, StackCleanup::Caller);
     }
 
     #[test]
     fn message_box_keeps_callee_cleanup() {
-        let result = DllUSER32::wrap_result("MessageBoxA", Some((4, Some(1)))).unwrap();
+        let result =
+            DllUSER32::wrap_result("MessageBoxA", Some(ApiHookResult::callee(4, Some(1)))).unwrap();
         assert_eq!(result.cleanup, StackCleanup::Callee(4));
     }
 }

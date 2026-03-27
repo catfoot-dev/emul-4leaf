@@ -3,7 +3,7 @@ use unicorn_engine::Unicorn;
 
 use crate::helper::UnicornHelper;
 use crate::ui::gdi_renderer::GdiRenderer;
-use crate::win32::{ApiHookResult, GdiObject, Win32Context, callee_result};
+use crate::win32::{ApiHookResult, GdiObject, Win32Context};
 
 /// `GDI32.dll` 프록시 구현 모듈
 ///
@@ -13,16 +13,27 @@ pub struct DllGDI32;
 impl DllGDI32 {
     // API: HDC CreateCompatibleDC(HDC hdc)
     // 역할: 지정된 디바이스와 호환되는 메모리 디바이스 컨텍스트(DC)를 만듦
-    pub fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let ctx = uc.get_data();
         let new_hdc = ctx.alloc_handle();
+
+        // 참조 DC가 있으면 해당 크기를 상속, 없으면 기본값 사용
+        let (width, height) = {
+            let gdi_objects = ctx.gdi_objects.lock().unwrap();
+            if let Some(GdiObject::Dc { width, height, .. }) = gdi_objects.get(&hdc) {
+                (*width, *height)
+            } else {
+                (640, 480)
+            }
+        };
+
         ctx.gdi_objects.lock().unwrap().insert(
             new_hdc,
             GdiObject::Dc {
                 associated_window: 0,
-                width: 640,
-                height: 480,
+                width,
+                height,
                 selected_bitmap: 0,
                 selected_font: 0,
                 selected_brush: 0,
@@ -42,21 +53,21 @@ impl DllGDI32 {
             hdc,
             new_hdc
         );
-        Some((1, Some(new_hdc as i32)))
+        Some(ApiHookResult::callee(1, Some(new_hdc as i32)))
     }
 
     // API: BOOL DeleteDC(HDC hdc)
     // 역할: 지정된 디바이스 컨텍스트(DC)를 삭제
-    pub fn delete_dc(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn delete_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         uc.get_data().gdi_objects.lock().unwrap().remove(&hdc);
         crate::emu_log!("[GDI32] DeleteDC({:#x}) -> BOOL 1", hdc);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: HBITMAP CreateDIBSection(HDC hdc, const BITMAPINFO *pbmi, UINT usage, VOID **ppvBits, HANDLE hSection, DWORD offset)
     // 역할: 애플리케이션이 직접 쓸 수 있는 DIB(장치 독립적 비트맵)를 생성
-    pub fn create_dib_section(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_dib_section(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let bmi_addr = uc.read_arg(1);
         let usage = uc.read_arg(2);
@@ -94,14 +105,14 @@ impl DllGDI32 {
             offset,
             hbmp
         );
-        Some((6, Some(hbmp as i32)))
+        Some(ApiHookResult::callee(6, Some(hbmp as i32)))
     }
 
     // API: HBITMAP CreateCompatibleBitmap(HDC hdc, int cx, int cy)
     // 역할: 지정된 디바이스 컨텍스트의 현재 설정과 호환되는 비트맵을 만듦
     pub fn create_compatible_bitmap(
         uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    ) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let width = uc.read_arg(1);
         let height = uc.read_arg(2);
@@ -123,12 +134,12 @@ impl DllGDI32 {
             height,
             hbmp
         );
-        Some((3, Some(hbmp as i32)))
+        Some(ApiHookResult::callee(3, Some(hbmp as i32)))
     }
 
     // API: HGDIOBJ SelectObject(HDC hdc, HGDIOBJ h)
     // 역할: 지정된 DC로 객체를 선택하여 기존의 동일한 유형의 객체를 바꿈
-    pub fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let hobj = uc.read_arg(1);
         let ctx = uc.get_data();
@@ -192,21 +203,21 @@ impl DllGDI32 {
             hobj,
             old_hobj
         );
-        Some((2, Some(old_hobj as i32)))
+        Some(ApiHookResult::callee(2, Some(old_hobj as i32)))
     }
 
     // API: BOOL DeleteObject(HGDIOBJ ho)
     // 역할: 논리적 펜, 브러시, 폰트, 비트맵, 영역, 또는 팔레트를 삭제하여 시스템 리소스를 확보
-    pub fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hobj = uc.read_arg(0);
         uc.get_data().gdi_objects.lock().unwrap().remove(&hobj);
         crate::emu_log!("[GDI32] DeleteObject({:#x}) -> BOOL 1", hobj);
-        Some((1, Some(1)))
+        Some(ApiHookResult::callee(1, Some(1)))
     }
 
     // API: HGDIOBJ GetStockObject(int i)
     // 역할: 미리 정의된 펜, 브러시, 폰트 또는 팔레트 중 하나의 핸들을 가져옴
-    pub fn get_stock_object(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_stock_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let index = uc.read_arg(0);
         let ctx = uc.get_data();
         let handle = ctx.alloc_handle();
@@ -215,12 +226,12 @@ impl DllGDI32 {
             .unwrap()
             .insert(handle, GdiObject::StockObject(index));
         crate::emu_log!("[GDI32] GetStockObject({}) -> HGDIOBJ {:#x}", index, handle);
-        Some((1, Some(handle as i32)))
+        Some(ApiHookResult::callee(1, Some(handle as i32)))
     }
 
     // API: int GetDeviceCaps(HDC hdc, int index)
     // 역할: 지정된 디바이스에 대한 특정 장치 구성 정보를 가져옴
-    pub fn get_device_caps(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_device_caps(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let index = uc.read_arg(1);
         let ctx = uc.get_data();
@@ -258,12 +269,12 @@ impl DllGDI32 {
             index,
             result
         );
-        Some((2, Some(result)))
+        Some(ApiHookResult::callee(2, Some(result)))
     }
 
     // API: HFONT CreateFontIndirectA(const LOGFONTA *lplf)
     // 역할: 논리적 폰트 구조체에 지정된 특성을 가진 폰트를 생성
-    pub fn create_font_indirect_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_font_indirect_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let lplf = uc.read_arg(0);
         // LOGFONTA: face_name at +36
         let face_name_addr = uc.read_u32(lplf as u64 + 36);
@@ -286,12 +297,12 @@ impl DllGDI32 {
             lplf,
             hfont
         );
-        Some((1, Some(hfont as i32)))
+        Some(ApiHookResult::callee(1, Some(hfont as i32)))
     }
 
     // API: HFONT CreateFontA(int cHeight, int cWidth, int cEscapement, int cOrientation, int cWeight, DWORD bItalic, DWORD bUnderline, DWORD bStrikeOut, DWORD iCharSet, DWORD iOutPrecision, DWORD iClipPrecision, DWORD iQuality, DWORD iPitchAndFamily, LPCSTR pszFaceName)
     // 역할: 지정된 특성을 가진 논리적 폰트를 생성
-    pub fn create_font_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_font_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let height = uc.read_arg(0) as i32;
         let width = uc.read_arg(1) as i32;
         let escapement = uc.read_arg(2) as i32;
@@ -338,12 +349,12 @@ impl DllGDI32 {
             face_name,
             hfont
         );
-        Some((14, Some(hfont as i32)))
+        Some(ApiHookResult::callee(14, Some(hfont as i32)))
     }
 
     // API: BOOL GetTextMetricsA(HDC hdc, LPTEXTMETRICA lptm)
     // 역할: 지정된 장치 컨텍스트의 텍스트 메트릭스를 가져옴
-    pub fn get_text_metrics_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_text_metrics_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let lptm = uc.read_arg(1);
 
@@ -377,14 +388,14 @@ impl DllGDI32 {
             lptm,
             ret
         );
-        Some((2, Some(ret)))
+        Some(ApiHookResult::callee(2, Some(ret)))
     }
 
     // API: BOOL GetTextExtentPoint32A(HDC hdc, LPCSTR lpString, int cbString, LPSIZE lpSize)
     // 역할: 지정된 장치 컨텍스트에서 문자열의 크기를 가져옴
     pub fn get_text_extent_point32_a(
         uc: &mut Unicorn<Win32Context>,
-    ) -> Option<(usize, Option<i32>)> {
+    ) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let lpstring = uc.read_arg(1);
         let cbstring = uc.read_arg(2);
@@ -419,12 +430,12 @@ impl DllGDI32 {
             lp_size,
             ret
         );
-        Some((4, Some(ret)))
+        Some(ApiHookResult::callee(4, Some(ret)))
     }
 
     // API: BOOL GetTextExtentPointA(HDC hdc, LPCSTR lpString, int cbString, LPSIZE lpSize)
     // 역할: 지정된 장치 컨텍스트에서 문자열의 크기를 가져옴
-    pub fn get_text_extent_point_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_text_extent_point_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let lpstring = uc.read_arg(1);
         let cbstring = uc.read_arg(2);
@@ -459,12 +470,12 @@ impl DllGDI32 {
             lp_size,
             ret
         );
-        Some((4, Some(ret)))
+        Some(ApiHookResult::callee(4, Some(ret)))
     }
 
     // API: GetCharWidthA(HDC hdc, UINT FirstChar, UINT LastChar, LPINT lpBuffer)
     // 역할: 지정된 장치 컨텍스트에서 문자열의 크기를 가져옴
-    pub fn get_char_width_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_char_width_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let first_char = uc.read_arg(1);
         let last_char = uc.read_arg(2);
@@ -500,12 +511,12 @@ impl DllGDI32 {
             lp_buffer,
             ret
         );
-        Some((4, Some(ret)))
+        Some(ApiHookResult::callee(4, Some(ret)))
     }
 
     // API: BOOL TextOutA(HDC hdc, int nXStart, int nYStart, LPCSTR lpString, int cbString)
     // 역할: 지정된 장치 컨텍스트에서 문자열을 출력
-    pub fn text_out_a(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn text_out_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let n_x_start = uc.read_arg(1) as i32;
         let n_y_start = uc.read_arg(2) as i32;
@@ -568,11 +579,7 @@ impl DllGDI32 {
                     drop(pixels);
                     drop(gdi_objects);
                     if hwnd != 0 {
-                        uc.get_data()
-                            .win_event
-                            .lock()
-                            .unwrap()
-                            .update_window(hwnd);
+                        uc.get_data().win_event.lock().unwrap().update_window(hwnd);
                     }
                 }
             }
@@ -585,12 +592,12 @@ impl DllGDI32 {
             n_y_start,
             text
         );
-        Some((5, Some(1)))
+        Some(ApiHookResult::callee(5, Some(1)))
     }
 
     // API: int SetBkMode(HDC hdc, int mode)
     // 역할: 배경 혼합 모드를 설정
-    pub fn set_bk_mode(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_bk_mode(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let mode = uc.read_arg(1) as i32;
         let mut old_mode = 1;
@@ -606,12 +613,12 @@ impl DllGDI32 {
             mode,
             old_mode
         );
-        Some((2, Some(old_mode)))
+        Some(ApiHookResult::callee(2, Some(old_mode)))
     }
 
     // API: int GetBkMode(HDC hdc)
     // 역할: 배경 혼합 모드를 가져옴
-    pub fn get_bk_mode(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_bk_mode(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let mode = uc
             .get_data()
@@ -628,12 +635,12 @@ impl DllGDI32 {
             })
             .unwrap_or(1);
         crate::emu_log!("[GDI32] GetBkMode({:#x}) -> int {:#x}", hdc, mode);
-        Some((1, Some(mode)))
+        Some(ApiHookResult::callee(1, Some(mode)))
     }
 
     // API: COLORREF SetBkColor(HDC hdc, COLORREF color)
     // 역할: 배경 색상을 설정
-    pub fn set_bk_color(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_bk_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let color = uc.read_arg(1);
         let mut old_color = 0x00FFFFFF;
@@ -649,12 +656,12 @@ impl DllGDI32 {
             color,
             old_color
         );
-        Some((2, Some(old_color as i32)))
+        Some(ApiHookResult::callee(2, Some(old_color as i32)))
     }
 
     // API: COLORREF GetBkColor(HDC hdc)
     // 역할: 배경 색상을 가져옴
-    pub fn get_bk_color(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_bk_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let color = uc
             .get_data()
@@ -671,12 +678,12 @@ impl DllGDI32 {
             })
             .unwrap_or(0x00FFFFFF);
         crate::emu_log!("[GDI32] GetBkColor({:#x}) -> COLORREF {:#x}", hdc, color);
-        Some((1, Some(color as i32)))
+        Some(ApiHookResult::callee(1, Some(color as i32)))
     }
 
     // API: COLORREF SetTextColor(HDC hdc, COLORREF color)
     // 역할: 텍스트 색상을 설정
-    pub fn set_text_color(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_text_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let color = uc.read_arg(1);
         let mut old_color = 0;
@@ -692,12 +699,12 @@ impl DllGDI32 {
             color,
             old_color
         );
-        Some((2, Some(old_color as i32)))
+        Some(ApiHookResult::callee(2, Some(old_color as i32)))
     }
 
     // API: COLORREF GetTextColor(HDC hdc)
     // 역할: 텍스트 색상을 가져옴
-    pub fn get_text_color(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_text_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let color = uc
             .get_data()
@@ -714,12 +721,12 @@ impl DllGDI32 {
             })
             .unwrap_or(0);
         crate::emu_log!("[GDI32] GetTextColor({:#x}) -> COLORREF {:#x}", hdc, color);
-        Some((1, Some(color as i32)))
+        Some(ApiHookResult::callee(1, Some(color as i32)))
     }
 
     // API: HPEN CreatePen(int iStyle, int cWidth, COLORREF color)
     // 역할: 지정된 스타일, 너비 및 색상을 가진 논리적 펜을 생성
-    pub fn create_pen(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_pen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let style = uc.read_arg(0);
         let width = uc.read_arg(1);
         let color = uc.read_arg(2);
@@ -740,12 +747,12 @@ impl DllGDI32 {
             color,
             hpen
         );
-        Some((3, Some(hpen as i32)))
+        Some(ApiHookResult::callee(3, Some(hpen as i32)))
     }
 
     // API: HBRUSH CreateSolidBrush(COLORREF color)
     // 역할: 지정된 단색을 가지는 논리적 브러시를 생성
-    pub fn create_solid_brush(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_solid_brush(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let color = uc.read_arg(0);
         let ctx = uc.get_data();
         let hbrush = ctx.alloc_handle();
@@ -758,12 +765,12 @@ impl DllGDI32 {
             color,
             hbrush
         );
-        Some((1, Some(hbrush as i32)))
+        Some(ApiHookResult::callee(1, Some(hbrush as i32)))
     }
 
     // API: HRGN CreateRectRgn(int x1, int y1, int x2, int y2)
     // 역할: 직사각형 영역(Region)을 생성
-    pub fn create_rect_rgn(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_rect_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let x1 = uc.read_arg(0) as i32;
         let y1 = uc.read_arg(1) as i32;
         let x2 = uc.read_arg(2) as i32;
@@ -787,12 +794,12 @@ impl DllGDI32 {
             y2,
             hrgn
         );
-        Some((4, Some(hrgn as i32)))
+        Some(ApiHookResult::callee(4, Some(hrgn as i32)))
     }
 
     // API: int SelectClipRgn(HDC hdc, HRGN hrgn)
     // 역할: 지정된 영역(Region)을 디바이스 컨텍스트(DC)의 클리핑 영역으로 설정
-    pub fn select_clip_rgn(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn select_clip_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let hrgn = uc.read_arg(1);
         let ctx = uc.get_data();
@@ -810,12 +817,12 @@ impl DllGDI32 {
             hrgn,
             result
         );
-        Some((2, Some(result)))
+        Some(ApiHookResult::callee(2, Some(result)))
     }
 
     // API: int CombineRgn(HRGN hrgnDest, HRGN hrgnSrc1, HRGN hrgnSrc2, int fnCombine)
     // 역할: 두 영역(Region)을 결합하여 새로운 영역을 생성
-    pub fn combine_rgn(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn combine_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hrgn_dest = uc.read_arg(0);
         let hrgn_src1 = uc.read_arg(1);
         let hrgn_src2 = uc.read_arg(2);
@@ -823,12 +830,24 @@ impl DllGDI32 {
         let ctx = uc.get_data();
         let mut result = 0;
         let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
-        let region1 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn_src1) {
+        let region1 = if let Some(GdiObject::Region {
+            left,
+            top,
+            right,
+            bottom,
+        }) = gdi_objects.get(&hrgn_src1)
+        {
             Some((*left, *top, *right, *bottom))
         } else {
             None
         };
-        let region2 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn_src2) {
+        let region2 = if let Some(GdiObject::Region {
+            left,
+            top,
+            right,
+            bottom,
+        }) = gdi_objects.get(&hrgn_src2)
+        {
             Some((*left, *top, *right, *bottom))
         } else {
             None
@@ -858,23 +877,35 @@ impl DllGDI32 {
             fn_combine,
             result
         );
-        Some((4, Some(result)))
+        Some(ApiHookResult::callee(4, Some(result)))
     }
 
     // API: BOOL EqualRgn(HRGN hrgn1, HRGN hrgn2)
     // 역할: 두 영역(Region)이 동일한지 확인
-    pub fn equal_rgn(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn equal_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hrgn1 = uc.read_arg(0);
         let hrgn2 = uc.read_arg(1);
         let ctx = uc.get_data();
         let mut result = 0;
         let gdi_objects = ctx.gdi_objects.lock().unwrap();
-        let region1 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn1) {
+        let region1 = if let Some(GdiObject::Region {
+            left,
+            top,
+            right,
+            bottom,
+        }) = gdi_objects.get(&hrgn1)
+        {
             Some((*left, *top, *right, *bottom))
         } else {
             None
         };
-        let region2 = if let Some(GdiObject::Region { left, top, right, bottom }) = gdi_objects.get(&hrgn2) {
+        let region2 = if let Some(GdiObject::Region {
+            left,
+            top,
+            right,
+            bottom,
+        }) = gdi_objects.get(&hrgn2)
+        {
             Some((*left, *top, *right, *bottom))
         } else {
             None
@@ -891,12 +922,12 @@ impl DllGDI32 {
             hrgn2,
             result
         );
-        Some((2, Some(result)))
+        Some(ApiHookResult::callee(2, Some(result)))
     }
 
     // API: int GetRgnBox(HRGN hrgn, LPRECT lprc)
     // 역할: 영역(Region)의 경계 사각형(Bounding Rectangle)을 가져옴
-    pub fn get_rgn_box(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_rgn_box(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hrgn = uc.read_arg(0);
         let lprc = uc.read_arg(1);
 
@@ -927,12 +958,12 @@ impl DllGDI32 {
             lprc,
             result
         );
-        Some((2, Some(result)))
+        Some(ApiHookResult::callee(2, Some(result)))
     }
 
     // API: int SetDIBitsToDevice(HDC hdc, int xDest, int yDest, DWORD dwWidth, DWORD dwHeight, int xSrc, int ySrc, UINT uStartScan, UINT cScans, const VOID *lpBits, const BITMAPINFO *lpBitsInfo, UINT uUsage)
     // 역할: DIB(Device-Independent Bitmap) 데이터를 디바이스 컨텍스트(DC)의 지정된 위치에 픽셀로 설정
-    pub fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let x_dest = uc.read_arg(1) as i32;
         let y_dest = uc.read_arg(2) as i32;
@@ -962,12 +993,12 @@ impl DllGDI32 {
             u_usage,
             c_scans
         );
-        Some((12, Some(c_scans as i32)))
+        Some(ApiHookResult::callee(12, Some(c_scans as i32)))
     }
 
     // API: int StretchDIBits(HDC hdc, int xDest, int yDest, int nDestWidth, int nDestHeight, int xSrc, int ySrc, int nSrcWidth, int nSrcHeight, const VOID *lpBits, const BITMAPINFO *lpBitsInfo, UINT uUsage, DWORD rop)
     // 역할: DIB(Device-Independent Bitmap) 데이터를 디바이스 컨텍스트(DC)의 지정된 위치에 픽셀로 설정
-    pub fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let x_dest = uc.read_arg(1) as i32;
         let y_dest = uc.read_arg(2) as i32;
@@ -997,21 +1028,21 @@ impl DllGDI32 {
             u_usage,
             rop
         );
-        Some((13, Some(1)))
+        Some(ApiHookResult::callee(13, Some(1)))
     }
 
     // API: int SetStretchBltMode(HDC hdc, int mode)
     // 역할: 디바이스 컨텍스트(DC)의 스트레치 블릿(StretchBlt) 모드를 설정
-    pub fn set_stretch_blt_mode(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_stretch_blt_mode(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let mode = uc.read_arg(1);
         crate::emu_log!("[GDI32] SetStretchBltMode({:#x}, {}) -> int 1", hdc, mode);
-        Some((2, Some(1)))
+        Some(ApiHookResult::callee(2, Some(1)))
     }
 
     // API: BOOL BitBlt(HDC hdcDest, int xDest, int yDest, int nDestWidth, int nDestHeight, HDC hdcSrc, int xSrc, int ySrc, DWORD rop)
     // 역할: 디바이스 컨텍스트(DC)의 지정된 위치에 픽셀로 설정
-    pub fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc_dest = uc.read_arg(0);
         let x_dest = uc.read_arg(1) as i32;
         let y_dest = uc.read_arg(2) as i32;
@@ -1101,12 +1132,12 @@ impl DllGDI32 {
             y_src,
             rop
         );
-        Some((9, Some(1)))
+        Some(ApiHookResult::callee(9, Some(1)))
     }
 
     // API: BOOL Rectangle(HDC hdc, int left, int top, int right, int bottom)
     // 역할: 현재 펜과 브러시를 사용하여 직사각형을 그림
-    pub fn rectangle(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn rectangle(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let left = uc.read_arg(1) as i32;
         let top = uc.read_arg(2) as i32;
@@ -1191,12 +1222,12 @@ impl DllGDI32 {
             right,
             bottom
         );
-        Some((5, Some(1)))
+        Some(ApiHookResult::callee(5, Some(1)))
     }
 
     // API: BOOL MoveToEx(HDC hdc, int x, int y, LPPOINT lppt)
     // 역할: 현재 그리기 위치를 지정된 좌표로 갱신
-    pub fn move_to_ex(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn move_to_ex(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let x = uc.read_arg(1) as i32;
         let y = uc.read_arg(2) as i32;
@@ -1227,12 +1258,12 @@ impl DllGDI32 {
             y,
             lppt
         );
-        Some((4, Some(1)))
+        Some(ApiHookResult::callee(4, Some(1)))
     }
 
     // API: BOOL LineTo(HDC hdc, int x, int y)
     // 역할: 현재 위치에서 지정된 끝점까지 선을 그림
-    pub fn line_to(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn line_to(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let x = uc.read_arg(1) as i32;
         let y = uc.read_arg(2) as i32;
@@ -1280,12 +1311,12 @@ impl DllGDI32 {
         }
 
         crate::emu_log!("[GDI32] LineTo({:#x}, {}, {}) -> BOOL 1", hdc, x, y);
-        Some((3, Some(1)))
+        Some(ApiHookResult::callee(3, Some(1)))
     }
 
     // API: int SetROP2(HDC hdc, int nROP2)
     // 역할: 디바이스 컨텍스트의 그리기 모드를 설정
-    pub fn set_rop2(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_rop2(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let mode = uc.read_arg(1) as i32;
         let mut old_mode = 13;
@@ -1301,12 +1332,12 @@ impl DllGDI32 {
             mode,
             old_mode
         );
-        Some((2, Some(old_mode)))
+        Some(ApiHookResult::callee(2, Some(old_mode)))
     }
 
     // API: UINT RealizePalette(HDC hdc)
     // 역할: 디바이스 컨텍스트의 팔레트를 실제 디바이스에 적용
-    pub fn realize_palette(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn realize_palette(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let mut count = 0u32;
 
@@ -1330,12 +1361,12 @@ impl DllGDI32 {
         }
 
         crate::emu_log!("[GDI32] RealizePalette({:#x}) -> UINT {:#x}", hdc, count);
-        Some((1, Some(count as i32)))
+        Some(ApiHookResult::callee(1, Some(count as i32)))
     }
 
     // API: HPALETTE SelectPalette(HDC hdc, HPALETTE hpal, BOOL bForceBkgd)
     // 역할: 디바이스 컨텍스트(DC)에 논리적 팔레트를 선택
-    pub fn select_palette(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn select_palette(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let hpal = uc.read_arg(1);
         let b_force_bkgd = uc.read_arg(2);
@@ -1354,12 +1385,12 @@ impl DllGDI32 {
             b_force_bkgd,
             old_pal
         );
-        Some((3, Some(old_pal as i32)))
+        Some(ApiHookResult::callee(3, Some(old_pal as i32)))
     }
 
     // API: HPALETTE CreatePalette(LPLOGPAL lpLogPalette)
     // 역할: 논리적 팔레트를 생성
-    pub fn create_palette(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn create_palette(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let logpal_addr = uc.read_arg(0);
         let num_entries = uc.read_u16(logpal_addr as u64 + 2) as u32;
         let ctx = uc.get_data();
@@ -1373,12 +1404,12 @@ impl DllGDI32 {
             logpal_addr,
             hpal
         );
-        Some((1, Some(hpal as i32)))
+        Some(ApiHookResult::callee(1, Some(hpal as i32)))
     }
 
     // API: COLORREF GetPixel(HDC hdc, int x, int y)
     // 역할: 지정된 좌표의 픽셀 색상을 가져옴
-    pub fn get_pixel(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn get_pixel(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let x = uc.read_arg(1) as i32;
         let y = uc.read_arg(2) as i32;
@@ -1396,12 +1427,12 @@ impl DllGDI32 {
             y,
             color
         );
-        Some((3, Some(color as i32)))
+        Some(ApiHookResult::callee(3, Some(color as i32)))
     }
 
     // API: COLORREF SetPixel(HDC hdc, int x, int y, COLORREF color)
     // 역할: 지정된 좌표의 픽셀 색상을 설정
-    pub fn set_pixel(uc: &mut Unicorn<Win32Context>) -> Option<(usize, Option<i32>)> {
+    pub fn set_pixel(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hdc = uc.read_arg(0);
         let x = uc.read_arg(1) as i32;
         let y = uc.read_arg(2) as i32;
@@ -1422,12 +1453,12 @@ impl DllGDI32 {
             color,
             old_color
         );
-        Some((4, Some(old_color as i32)))
+        Some(ApiHookResult::callee(4, Some(old_color as i32)))
     }
 
     /// 함수명 기준 `GDI32.dll` API 구현체
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
-        callee_result(match func_name {
+        match func_name {
             "CreateCompatibleDC" => Self::create_compatible_dc(uc),
             "DeleteDC" => Self::delete_dc(uc),
             "CreateDIBSection" => Self::create_dib_section(uc),
@@ -1473,6 +1504,6 @@ impl DllGDI32 {
                 crate::emu_log!("[!] GDI32 Unhandled: {}", func_name);
                 None
             }
-        })
+        }
     }
 }
