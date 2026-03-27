@@ -12,7 +12,7 @@ mod win32;
 
 use helper::{SHARED_MEM_BASE, UnicornHelper};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, OnceLock, atomic::AtomicUsize};
+use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
 use std::{
     any::Any,
     sync::mpsc::{Receiver, Sender, channel},

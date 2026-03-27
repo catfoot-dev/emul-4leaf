@@ -1,12 +1,11 @@
-use std::{thread, time::{Duration, Instant}};
-
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use unicorn_engine::{RegisterX86, Unicorn};
 
 use crate::helper::{EXIT_ADDRESS, UnicornHelper};
 use crate::win32::{
     ApiHookResult, EmulatedThread, EventState, StackCleanup, Win32Context, get_tokio_runtime,
 };
-use std::sync::atomic::Ordering;
 
 /// `KERNEL32.dll` 프록시 구현 모듈
 ///
@@ -282,7 +281,7 @@ impl DllKERNEL32 {
     pub fn wait_for_multiple_objects(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let n_count = uc.read_arg(0);
         let lp_handles = uc.read_arg(1);
-        let b_wait_all = uc.read_arg(2);
+        let _b_wait_all = uc.read_arg(2);
         let dw_milliseconds = uc.read_arg(3);
 
         let timeout_ms: u64 = if dw_milliseconds == 0xFFFFFFFF {
@@ -1407,16 +1406,17 @@ impl DllKERNEL32 {
             if let Err(e) = res {
                 crate::emu_log!("[!] Thread id={} emu_start failed: {:?}", t.thread_id, e);
             } else {
-                crate::emu_log!(
-                    "[*] Thread id={} quantum finished",
-                    t.thread_id
-                );
+                crate::emu_log!("[*] Thread id={} quantum finished", t.thread_id);
             }
 
             // 스레드 레지스터 저장
             let new_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32;
             let new_eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-            crate::emu_log!("[*] Thread id={} stopped at EIP={:#x}", t.thread_id, new_eip);
+            crate::emu_log!(
+                "[*] Thread id={} stopped at EIP={:#x}",
+                t.thread_id,
+                new_eip
+            );
             let new_ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
             let new_edx = uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32;
             let new_ebx = uc.reg_read(RegisterX86::EBX).unwrap_or(0) as u32;

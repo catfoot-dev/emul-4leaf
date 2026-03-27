@@ -31,14 +31,15 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
         // 클라이언트가 CTRL_OPEN(1) 제어 메시지로 채널 개방을 먼저 요청합니다.
 
         // 1. 수신 및 프로토콜 처리 태스크
-        // ─ DNet 전송 계층 ──────────────────────────────────────────────────
+        // DNet 전송 계층
+        //
         // 헤더: [channel_id: u16 LE][body_len: u16 LE]
         // ch=0: 제어 메시지 4B → [msg_type: u16 LE][target_channel_id: u16 LE]
         // ch=1-15: 데이터 패킷 → [main_type: u8][sub_type: u8][payload...]
         let mut buf_reader = BufReader::new(reader);
         tokio::spawn(async move {
             loop {
-                // ── 4바이트 DNet 헤더 읽기 ──────────────────────────────────
+                // 4바이트 DNet 헤더 읽기
                 let mut header = [0u8; 4];
                 match buf_reader.read_exact(&mut header).await {
                     Ok(_) => {}
@@ -65,7 +66,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                // ── body_len 바이트 본문 읽기 ────────────────────────────────
+                // body_len 바이트 본문 읽기
                 let mut body = vec![0u8; body_len as usize];
                 match buf_reader.read_exact(&mut body).await {
                     Ok(_) => {}
@@ -82,9 +83,9 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // ── 채널별 라우팅 ────────────────────────────────────────────
+                // 채널별 라우팅
                 if channel_id == 0 {
-                    // ── 채널 0: 제어 메시지 [msg_type: u16 LE][대상 채널: u16 LE] ──
+                    // 채널 0: 제어 메시지 [msg_type: u16 LE][대상 채널: u16 LE]
                     // SendControlMessage(this, msg, ch): HIWORD(a2)=채널번호, LOWORD(a2)=메시지타입
                     let ctrl = match ControlMessage::from_bytes(&body) {
                         Some(c) => c,
@@ -159,7 +160,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else {
-                    // ── 채널 1-15: 데이터 패킷 [main_type: u8][sub_type: u8][payload...] ──
+                    // 채널 1-15: 데이터 패킷 [main_type: u8][sub_type: u8][payload...]
                     // ProcessPacket: 채널이 CONNECTED(2) 상태여야 하며, 아닐 경우 CTRL_CLOSE(3) 전송
                     if let Some(pkt) = ProtocolPacket::from_bytes(&body) {
                         crate::emu_socket_log!(
