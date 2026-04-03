@@ -16,6 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
 use std::{
     any::Any,
+    env,
     sync::mpsc::{Receiver, Sender, channel},
     thread,
 };
@@ -101,7 +102,9 @@ macro_rules! emu_log {
         if $crate::debug::should_send_debug_messages() {
             let index = $crate::INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let msg = std::format!("[{:#08x}] {}", index, std::format!($($arg)*)).replace("\r", "\\r").replace("\n", "\\n");
-            $crate::push_log(msg)
+            if msg.contains("[UI]") || msg.contains("CreateWindowExA") {
+                $crate::push_log(msg)
+            }
         }
     }};
 }
@@ -135,6 +138,7 @@ use crate::ui::UiCommand;
 /// 하위 시스템(로그, 에뮬레이션, 서버, UI)들을 초기화하고 실행합니다.
 fn main() {
     init_logger();
+    let headless_mode = env::var("EMUL_HEADLESS").ok().as_deref() == Some("1");
     let debug_window_enabled = crate::debug::should_create_debug_window();
 
     // 스레드 간 통신을 위한 채널 설정
@@ -146,12 +150,19 @@ fn main() {
     // 1. Win32 에뮬레이션 상태 컨텍스트 생성 (Arc로 내부 상태 공유 가능)
     let context = Win32Context::new(Some(ui_tx.clone()));
 
+    if headless_mode {
+        if let Err(e) = emu_4leaf(None, None, ui_tx, context, splash_tx) {
+            eprintln!("[4leaf Emulator Error] {:?}", e);
+        }
+        return;
+    }
+
     let context_for_emu = context.clone();
     // 1. 에뮬레이션 코어 스레드 실행
     thread::spawn(move || {
         if let Err(e) = emu_4leaf(
-            debug_window_enabled.then_some(state_tx),
-            debug_window_enabled.then_some(cmd_rx),
+            (!headless_mode && debug_window_enabled).then_some(state_tx),
+            (!headless_mode && debug_window_enabled).then_some(cmd_rx),
             ui_tx,
             context_for_emu,
             splash_tx,

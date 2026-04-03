@@ -5,6 +5,7 @@ use std::{
 };
 
 static UI_WAKE_PROXY: OnceLock<winit::event_loop::EventLoopProxy<()>> = OnceLock::new();
+const WS_CHILD: u32 = 0x40000000;
 
 fn wake_ui_event_loop() {
     if let Some(proxy) = UI_WAKE_PROXY.get() {
@@ -22,6 +23,26 @@ pub struct WinEvent {
 }
 
 impl WinEvent {
+    /// 화면 갱신을 실제로 담당하는 호스트 윈도우 HWND를 찾습니다.
+    fn redraw_target_for(&self, hwnd: u32) -> Option<u32> {
+        let mut current = hwnd;
+
+        loop {
+            let state = self.windows.get(&current)?;
+            if state.style & WS_CHILD == 0 || state.parent == 0 {
+                return Some(current);
+            }
+            current = state.parent;
+        }
+    }
+
+    /// 자식 창 변경이 화면에 반영되도록 호스트 윈도우에 다시 그리기를 요청합니다.
+    fn request_visual_refresh(&self, hwnd: u32) {
+        if let Some(target) = self.redraw_target_for(hwnd) {
+            self.send_ui_command(UiCommand::UpdateWindow { hwnd: target });
+        }
+    }
+
     /// UI 이벤트 루프를 깨우기 위한 프록시를 등록합니다.
     pub fn install_wake_proxy(proxy: winit::event_loop::EventLoopProxy<()>) {
         let _ = UI_WAKE_PROXY.set(proxy);
@@ -58,6 +79,22 @@ impl WinEvent {
             return;
         };
 
+        if (state.style & WS_CHILD) != 0 {
+            crate::emu_log!(
+                "[UI] realize_window: child HWND {:#x} class=\"{}\" parent={:#x} visible={} size={}x{}",
+                hwnd,
+                state.class_name,
+                state.parent,
+                state.visible,
+                state.width,
+                state.height
+            );
+            if state.visible {
+                self.request_visual_refresh(hwnd);
+            }
+            return;
+        }
+
         let title = state.title.clone();
         let width = state.width as u32;
         let height = state.height as u32;
@@ -66,6 +103,17 @@ impl WinEvent {
         let parent = state.parent;
         let visible = state.visible;
         let surface_bitmap = state.surface_bitmap;
+
+        crate::emu_log!(
+            "[UI] realize_window: top-level HWND {:#x} class=\"{}\" title=\"{}\" visible={} size={}x{} parent={:#x}",
+            hwnd,
+            state.class_name,
+            state.title,
+            visible,
+            width,
+            height,
+            parent
+        );
 
         self.send_ui_command(UiCommand::CreateWindow {
             hwnd,
@@ -82,8 +130,19 @@ impl WinEvent {
 
     /// 윈도우 파괴 및 UI 스레드에 알림
     pub fn destroy_window(&mut self, hwnd: u32) {
+        let is_child = self
+            .windows
+            .get(&hwnd)
+            .map(|state| (state.style & WS_CHILD) != 0)
+            .unwrap_or(false);
+        let redraw_target = is_child.then(|| self.redraw_target_for(hwnd)).flatten();
         self.windows.remove(&hwnd);
-        self.send_ui_command(UiCommand::DestroyWindow { hwnd });
+        if !is_child {
+            self.send_ui_command(UiCommand::DestroyWindow { hwnd });
+        }
+        if let Some(target) = redraw_target {
+            self.send_ui_command(UiCommand::UpdateWindow { hwnd: target });
+        }
     }
 
     /// 윈도우 크기 변경 시 상태 업데이트
@@ -101,27 +160,45 @@ impl WinEvent {
 
     /// 윈도우 표시 상태 변경 및 UI 알림
     pub fn show_window(&mut self, hwnd: u32, visible: bool) {
+        let is_child = self
+            .windows
+            .get(&hwnd)
+            .map(|state| (state.style & WS_CHILD) != 0)
+            .unwrap_or(false);
         if let Some(state) = self.windows.get_mut(&hwnd) {
             state.visible = visible;
         }
-        self.send_ui_command(UiCommand::ShowWindow { hwnd, visible });
+        if is_child {
+            self.request_visual_refresh(hwnd);
+        } else {
+            self.send_ui_command(UiCommand::ShowWindow { hwnd, visible });
+        }
     }
 
     /// 윈도우 위치 및 크기 변경, UI 알림
     pub fn move_window(&mut self, hwnd: u32, x: i32, y: i32, width: u32, height: u32) {
+        let is_child = self
+            .windows
+            .get(&hwnd)
+            .map(|state| (state.style & WS_CHILD) != 0)
+            .unwrap_or(false);
         if let Some(state) = self.windows.get_mut(&hwnd) {
             state.x = x;
             state.y = y;
             state.width = width as i32;
             state.height = height as i32;
         }
-        self.send_ui_command(UiCommand::MoveWindow {
-            hwnd,
-            x,
-            y,
-            width,
-            height,
-        });
+        if is_child {
+            self.request_visual_refresh(hwnd);
+        } else {
+            self.send_ui_command(UiCommand::MoveWindow {
+                hwnd,
+                x,
+                y,
+                width,
+                height,
+            });
+        }
     }
 
     /// 윈도우 크기, 위치 및 Z 순서 변경, UI 알림
@@ -135,6 +212,11 @@ impl WinEvent {
         cy: u32,
         _flags: u32,
     ) {
+        let is_child = self
+            .windows
+            .get(&hwnd)
+            .map(|state| (state.style & WS_CHILD) != 0)
+            .unwrap_or(false);
         // SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001
         if let Some(state) = self.windows.get_mut(&hwnd) {
             if _flags & 0x0002 == 0 {
@@ -146,14 +228,18 @@ impl WinEvent {
                 state.height = cy as i32;
             }
         }
-        // UI 스레드에는 일단 MoveWindow 명령으로 전달 (Z-order 등은 현재 UI에서 미지원할 수 있음)
-        self.send_ui_command(UiCommand::MoveWindow {
-            hwnd,
-            x: x as i32,
-            y: y as i32,
-            width: cx,
-            height: cy,
-        });
+        // 자식 창은 부모 표면 합성으로 그리므로 호스트 창만 다시 그리면 됩니다.
+        if is_child {
+            self.request_visual_refresh(hwnd);
+        } else {
+            self.send_ui_command(UiCommand::MoveWindow {
+                hwnd,
+                x: x as i32,
+                y: y as i32,
+                width: cx,
+                height: cy,
+            });
+        }
     }
 
     /// 윈도우 제목 변경 및 UI 알림
@@ -173,7 +259,7 @@ impl WinEvent {
 
     /// 윈도우 강제 다시 그리기 (UpdateWindow) 알림
     pub fn update_window(&self, hwnd: u32) {
-        self.send_ui_command(UiCommand::UpdateWindow { hwnd });
+        self.request_visual_refresh(hwnd);
     }
 
     /// 메시지 박스 표시 및 응답 대기 (동기)

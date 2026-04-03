@@ -1294,16 +1294,43 @@ impl USER32 {
         let hwnd = uc.read_arg(0);
         let lp_paint = uc.read_arg(1);
 
-        let (width, height, hdc) = {
+        let (width, height, surface_bitmap, hdc) = {
             let ctx = uc.get_data();
             let mut win_event = ctx.win_event.lock().unwrap();
             if let Some(state) = win_event.windows.get_mut(&hwnd) {
                 state.needs_paint = false; // 그리기 시작했으므로 무효 영역 해제
-                (state.width as u32, state.height as u32, ctx.alloc_handle())
+                (
+                    state.width as u32,
+                    state.height as u32,
+                    state.surface_bitmap,
+                    ctx.alloc_handle(),
+                )
             } else {
                 return Some(ApiHookResult::callee(2, Some(0)));
             }
         };
+
+        // WM_PAINT 경로에서도 일반 GetDC와 동일하게 창 표면에 연결된 DC를 제공합니다.
+        uc.get_data().gdi_objects.lock().unwrap().insert(
+            hdc,
+            GdiObject::Dc {
+                associated_window: hwnd,
+                width: width as i32,
+                height: height as i32,
+                selected_bitmap: surface_bitmap,
+                selected_font: 0,
+                selected_brush: 0,
+                selected_pen: 0,
+                selected_region: 0,
+                selected_palette: 0,
+                bk_mode: 0,
+                bk_color: 0,
+                text_color: 0,
+                rop2_mode: 0,
+                current_x: 0,
+                current_y: 0,
+            },
+        );
 
         // PAINTSTRUCT 채우기
         uc.write_u32(lp_paint as u64 + 0, hdc); // hdc
@@ -1321,6 +1348,11 @@ impl USER32 {
     // 역할: 그리기를 종료함
     pub fn end_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
+        let lp_paint = uc.read_arg(1);
+        let hdc = uc.read_u32(lp_paint as u64);
+        let ctx = uc.get_data();
+        ctx.gdi_objects.lock().unwrap().remove(&hdc);
+        ctx.win_event.lock().unwrap().update_window(hwnd);
         crate::emu_log!("[USER32] EndPaint({:#x}) -> 1", hwnd);
         Some(ApiHookResult::callee(2, Some(1)))
     }

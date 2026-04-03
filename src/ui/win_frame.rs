@@ -98,6 +98,15 @@ impl WinFrame {
                     // 자식 윈도우는 별도 호스트 OS 창으로 만들지 않고 guest 상태만 유지합니다.
                     // 그렇지 않으면 컨트롤/헬퍼 창마다 예기치 않은 활성화/크기 이벤트가 발생합니다.
                     if (style & WS_CHILD) != 0 {
+                        crate::emu_log!(
+                            "[UI] host create skipped for child HWND {:#x} parent={:#x} visible={} size={}x{} style={:#x}",
+                            hwnd,
+                            parent,
+                            visible,
+                            width,
+                            height,
+                            style
+                        );
                         let _ = parent;
                         continue;
                     }
@@ -127,10 +136,21 @@ impl WinFrame {
 
                     let window = event_loop.create_window(attributes).unwrap();
                     let id = window.id();
+                    crate::emu_log!(
+                        "[UI] host window created HWND {:#x} visible={} size={}x{} style={:#x} ex_style={:#x} parent={:#x}",
+                        hwnd,
+                        visible,
+                        width,
+                        height,
+                        style,
+                        ex_style,
+                        parent
+                    );
                     self.hwnd_to_id.insert(hwnd, id);
                     self.id_to_hwnd.insert(id, hwnd);
 
                     let painter = DefaultEmulatorPainter {
+                        hwnd,
                         surface_bitmap,
                         emu_context: self.emu_context.clone(),
                     };
@@ -156,7 +176,21 @@ impl WinFrame {
                     if let Some(id) = self.hwnd_to_id.get(&hwnd)
                         && let Some(window) = self.get_window(id)
                     {
+                        crate::emu_log!(
+                            "[UI] host ShowWindow HWND {:#x} visible={}",
+                            hwnd,
+                            visible
+                        );
                         window.set_visible(visible);
+                        if visible {
+                            window.request_redraw();
+                        }
+                    } else {
+                        crate::emu_log!(
+                            "[UI] host ShowWindow missed HWND {:#x} visible={} (no host window)",
+                            hwnd,
+                            visible
+                        );
                     }
                 }
 
@@ -636,9 +670,142 @@ impl ApplicationHandler<()> for WinFrame {
 
 /// 에뮬레이터 윈도우용 기본 페인터
 pub struct DefaultEmulatorPainter {
+    hwnd: u32,
     surface_bitmap: u32,
     emu_context: Win32Context,
 }
+
+impl DefaultEmulatorPainter {
+    /// 현재 호스트 창에 속한 자식 창들을 생성 순서에 가까운 핸들 순서로 반환합니다.
+    fn child_windows(
+        windows: &HashMap<u32, crate::dll::win32::WindowState>,
+        parent: u32,
+    ) -> Vec<u32> {
+        let mut children = windows
+            .iter()
+            .filter_map(|(hwnd, state)| (state.parent == parent).then_some(*hwnd))
+            .collect::<Vec<_>>();
+        children.sort_unstable();
+        children
+    }
+
+    /// 비트맵 하나를 대상 버퍼에 잘라서 복사합니다.
+    fn blit_bitmap(
+        buffer: &mut [u32],
+        buffer_width: u32,
+        buffer_height: u32,
+        dest_x: i32,
+        dest_y: i32,
+        pixels: &[u32],
+        src_width: u32,
+        src_height: u32,
+    ) {
+        for src_y in 0..src_height as i32 {
+            let dst_y = dest_y + src_y;
+            if dst_y < 0 || dst_y >= buffer_height as i32 {
+                continue;
+            }
+
+            for src_x in 0..src_width as i32 {
+                let dst_x = dest_x + src_x;
+                if dst_x < 0 || dst_x >= buffer_width as i32 {
+                    continue;
+                }
+
+                let src_idx = (src_y as u32 * src_width + src_x as u32) as usize;
+                let dst_idx = (dst_y as u32 * buffer_width + dst_x as u32) as usize;
+                if src_idx < pixels.len() && dst_idx < buffer.len() {
+                    buffer[dst_idx] = pixels[src_idx];
+                }
+            }
+        }
+    }
+
+    /// 루트 창과 모든 자식 창 표면을 하나의 호스트 버퍼로 합성합니다.
+    fn composite_window_tree(
+        &self,
+        buffer: &mut [u32],
+        buffer_width: u32,
+        buffer_height: u32,
+        windows: &HashMap<u32, crate::dll::win32::WindowState>,
+        hwnd: u32,
+        dest_x: i32,
+        dest_y: i32,
+        is_root: bool,
+    ) {
+        let Some(state) = windows.get(&hwnd) else {
+            return;
+        };
+
+        if !is_root && !state.visible {
+            return;
+        }
+
+        let bitmap = {
+            let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            gdi_objects.get(&state.surface_bitmap).and_then(|obj| {
+                if let GdiObject::Bitmap {
+                    pixels,
+                    width,
+                    height,
+                    ..
+                } = obj
+                {
+                    Some((pixels.clone(), *width, *height))
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some((pixels, src_width, src_height)) = bitmap {
+            let pixels = pixels.lock().unwrap();
+            Self::blit_bitmap(
+                buffer,
+                buffer_width,
+                buffer_height,
+                if is_root { 0 } else { dest_x },
+                if is_root { 0 } else { dest_y },
+                &pixels,
+                src_width,
+                src_height,
+            );
+        }
+
+        for child_hwnd in Self::child_windows(windows, hwnd) {
+            let Some(child_state) = windows.get(&child_hwnd) else {
+                continue;
+            };
+
+            // 자식 좌표는 부모 클라이언트 기준이므로 누적 오프셋을 계산해 합성합니다.
+            let child_x = if is_root {
+                child_state.x
+            } else {
+                dest_x + child_state.x
+            };
+            let child_y = if is_root {
+                child_state.y
+            } else {
+                dest_y + child_state.y
+            };
+
+            self.composite_window_tree(
+                buffer,
+                buffer_width,
+                buffer_height,
+                windows,
+                child_hwnd,
+                child_x,
+                child_y,
+                false,
+            );
+        }
+    }
+}
+
 impl Painter for DefaultEmulatorPainter {
     fn create_window(
         &self,
@@ -652,12 +819,23 @@ impl Painter for DefaultEmulatorPainter {
     }
 
     fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
+        let windows = {
+            let win_event = match self.emu_context.win_event.try_lock() {
+                Ok(event) => event,
+                Err(_) => return,
+            };
+            win_event.windows.clone()
+        };
+
+        if windows.contains_key(&self.hwnd) {
+            self.composite_window_tree(buffer, width, height, &windows, self.hwnd, 0, 0, true);
+            return;
+        }
+
         let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
             Ok(g) => g,
             Err(_) => return, // 락 획득 실패 시 이번 프레임은 건너뜀 (데드락 방지)
         };
-
-        let mut surface_pixels = None;
 
         if let Some(GdiObject::Bitmap {
             pixels: p,
@@ -666,19 +844,8 @@ impl Painter for DefaultEmulatorPainter {
             ..
         }) = gdi_objects.get(&self.surface_bitmap)
         {
-            surface_pixels = Some((p.clone(), *sw, *sh));
-        }
-
-        if let Some((p, sw, sh)) = surface_pixels {
             let p = p.lock().unwrap();
-            let copy_w = width.min(sw);
-            let copy_h = height.min(sh);
-
-            for y in 0..copy_h {
-                for x in 0..copy_w {
-                    buffer[(y * width + x) as usize] = p[(y * sw + x) as usize];
-                }
-            }
+            Self::blit_bitmap(buffer, width, height, 0, 0, &p, *sw, *sh);
         }
     }
 
