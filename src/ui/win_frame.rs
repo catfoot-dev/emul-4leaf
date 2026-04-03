@@ -1,34 +1,37 @@
-use std::collections::HashMap;
-use std::num::NonZeroU32;
-use std::sync::mpsc::Receiver;
-
-use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
-use winit::keyboard::{Key, NamedKey};
-use winit::event_loop::ActiveEventLoop;
-use winit::raw_window_handle::{DisplayHandle, HasDisplayHandle};
-use winit::window::{Window, WindowId};
-
+use crate::{
+    dll::win32::{GdiObject, Win32Context},
+    ui::{Painter, UiCommand},
+};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use softbuffer::{Context as SoftContext, Surface};
-
-use crate::ui::{Painter, UiCommand};
+use std::{collections::HashMap, num::NonZeroU32, sync::mpsc::Receiver};
+use winit::{
+    application::ApplicationHandler,
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    event_loop::ActiveEventLoop,
+    keyboard::{Key, NamedKey},
+    raw_window_handle::{DisplayHandle, HasDisplayHandle},
+    window::{Window, WindowId},
+};
 
 // Windows 스타일 -> winit 속성 매핑
 const WS_POPUP: u32 = 0x80000000;
+const WS_CHILD: u32 = 0x40000000;
 const WS_CAPTION: u32 = 0x00C00000;
 const WS_THICKFRAME: u32 = 0x00040000; // WS_SIZEBOX
 const WS_MINIMIZEBOX: u32 = 0x00020000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
 const WS_EX_TOPMOST: u32 = 0x00000008;
 
+type WinSurface = Surface<DisplayHandle<'static>, Window>;
+
 /// 윈도우 애플리케이션 핸들러
 /// 모든 winit 윈도우와 Painter를 관리함
 pub struct WinFrame {
     ui_rx: Receiver<UiCommand>,
 
-    /// 윈도우 ID -> winit Window
-    windows: HashMap<WindowId, Window>,
+    /// 윈도우 ID -> softbuffer Surface (내부에 Window를 소유)
+    surfaces: HashMap<WindowId, WinSurface>,
     /// 윈도우 ID -> Painter (그리기 로직)
     painters: HashMap<WindowId, Box<dyn Painter>>,
     /// 가상 HWND -> 윈도우 ID
@@ -39,7 +42,7 @@ pub struct WinFrame {
     /// softbuffer 컨텍스트
     sb_context: Option<SoftContext<DisplayHandle<'static>>>,
     /// Win32 컨텍스트 (공유 상태)
-    pub emu_context: crate::win32::Win32Context,
+    pub emu_context: Win32Context,
 
     /// 초기 페인터 목록 (resumed에서 창 생성 후 painters로 이동)
     initial_painters: Vec<Box<dyn Painter>>,
@@ -49,11 +52,11 @@ impl WinFrame {
     pub fn new(
         ui_rx: Receiver<UiCommand>,
         initial_painters: Vec<Box<dyn Painter>>,
-        context: crate::win32::Win32Context,
+        context: Win32Context,
     ) -> Self {
         Self {
             ui_rx,
-            windows: HashMap::new(),
+            surfaces: HashMap::new(),
             painters: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             id_to_hwnd: HashMap::new(),
@@ -61,6 +64,10 @@ impl WinFrame {
             emu_context: context,
             initial_painters,
         }
+    }
+
+    fn get_window(&self, id: &WindowId) -> Option<&Window> {
+        self.surfaces.get(id).map(|s| s.window())
     }
 
     pub fn get_painter_mut<T: Painter + 'static>(
@@ -71,9 +78,250 @@ impl WinFrame {
             .get_mut(&id)
             .and_then(|p| p.as_any_mut().downcast_mut::<T>())
     }
+
+    fn process_ui_commands(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let mut needs_redraw = false;
+
+        while let Ok(cmd) = self.ui_rx.try_recv() {
+            match cmd {
+                UiCommand::CreateWindow {
+                    hwnd,
+                    title,
+                    width,
+                    height,
+                    style,
+                    ex_style,
+                    parent,
+                    visible,
+                    surface_bitmap,
+                } => {
+                    // 자식 윈도우는 별도 호스트 OS 창으로 만들지 않고 guest 상태만 유지합니다.
+                    // 그렇지 않으면 컨트롤/헬퍼 창마다 예기치 않은 활성화/크기 이벤트가 발생합니다.
+                    if (style & WS_CHILD) != 0 {
+                        let _ = parent;
+                        continue;
+                    }
+
+                    let mut attributes = Window::default_attributes()
+                        .with_title(title)
+                        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+                        .with_visible(visible);
+
+                    if (style & WS_POPUP) != 0 || (style & WS_CAPTION) == 0 {
+                        attributes = attributes.with_decorations(false);
+                    }
+
+                    attributes = if (style & WS_THICKFRAME) != 0 {
+                        attributes.with_resizable(true)
+                    } else {
+                        attributes.with_resizable(false)
+                    };
+
+                    let _has_min = (style & WS_MINIMIZEBOX) != 0;
+                    let _has_max = (style & WS_MAXIMIZEBOX) != 0;
+
+                    if (ex_style & WS_EX_TOPMOST) != 0 {
+                        attributes =
+                            attributes.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
+                    }
+
+                    let window = event_loop.create_window(attributes).unwrap();
+                    let id = window.id();
+                    self.hwnd_to_id.insert(hwnd, id);
+                    self.id_to_hwnd.insert(id, hwnd);
+
+                    let painter = DefaultEmulatorPainter {
+                        surface_bitmap,
+                        emu_context: self.emu_context.clone(),
+                    };
+                    self.painters.insert(id, Box::new(painter));
+                    let context = self
+                        .sb_context
+                        .as_ref()
+                        .expect("Context should be initialized");
+                    let surface = Surface::new(context, window).unwrap();
+                    self.surfaces.insert(id, surface);
+                    needs_redraw = true;
+                }
+
+                UiCommand::DestroyWindow { hwnd } => {
+                    if let Some(id) = self.hwnd_to_id.remove(&hwnd) {
+                        self.id_to_hwnd.remove(&id);
+                        self.painters.remove(&id);
+                        self.surfaces.remove(&id);
+                    }
+                }
+
+                UiCommand::ShowWindow { hwnd, visible } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_visible(visible);
+                    }
+                }
+
+                UiCommand::MoveWindow {
+                    hwnd,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                        let _ =
+                            window.request_inner_size(winit::dpi::LogicalSize::new(width, height));
+                    }
+                }
+
+                UiCommand::SetWindowText { hwnd, text } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_title(&text);
+                    }
+                }
+
+                UiCommand::UpdateWindow { hwnd } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.request_redraw();
+                    }
+                }
+
+                UiCommand::ActivateWindow { hwnd } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.focus_window();
+                    }
+                }
+
+                UiCommand::MessageBox {
+                    caption,
+                    text,
+                    u_type,
+                    response_tx,
+                } => {
+                    let mut dialog = MessageDialog::new()
+                        .set_title(&caption)
+                        .set_description(&text);
+
+                    if (u_type & 0x10) != 0 {
+                        dialog = dialog.set_level(MessageLevel::Error);
+                    } else if (u_type & 0x30) == 0x30 {
+                        dialog = dialog.set_level(MessageLevel::Warning);
+                    } else if (u_type & 0x40) != 0 {
+                        dialog = dialog.set_level(MessageLevel::Info);
+                    }
+
+                    let buttons = match u_type & 0xF {
+                        1 => MessageButtons::OkCancel,
+                        3 => MessageButtons::YesNoCancel,
+                        4 => MessageButtons::YesNo,
+                        _ => MessageButtons::Ok,
+                    };
+                    dialog = dialog.set_buttons(buttons);
+
+                    let result = dialog.show();
+                    let win_result = match result {
+                        MessageDialogResult::Ok => 1,
+                        MessageDialogResult::Cancel => 2,
+                        MessageDialogResult::Yes => 6,
+                        MessageDialogResult::No => 7,
+                        _ => 1,
+                    };
+                    let _ = response_tx.send(win_result);
+                }
+
+                UiCommand::SetCursor { hwnd, hcursor } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        let mut cursor_applied = false;
+                        {
+                            let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
+                            if let Some(GdiObject::Cursor {
+                                resource_id,
+                                frames,
+                                ..
+                            }) = gdi_objects.get(&hcursor)
+                            {
+                                if let Some(frame) = frames.first()
+                                    && !frame.pixels.is_empty()
+                                {
+                                    let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
+                                    for p in &frame.pixels {
+                                        let a = (p >> 24) as u8;
+                                        let r = (p >> 16) as u8;
+                                        let g = (p >> 8) as u8;
+                                        let b = *p as u8;
+                                        rgba.push(r);
+                                        rgba.push(g);
+                                        rgba.push(b);
+                                        rgba.push(a);
+                                    }
+
+                                    let source = winit::window::CustomCursor::from_rgba(
+                                        rgba,
+                                        frame.width as u16,
+                                        frame.height as u16,
+                                        frame.hotspot_x as u16,
+                                        frame.hotspot_y as u16,
+                                    );
+                                    if let Ok(source) = source {
+                                        let custom_cursor = event_loop.create_custom_cursor(source);
+                                        window.set_cursor(custom_cursor);
+                                        cursor_applied = true;
+                                    }
+                                }
+
+                                if !cursor_applied {
+                                    let icon = match *resource_id {
+                                        32512 => winit::window::CursorIcon::Default,
+                                        32513 => winit::window::CursorIcon::Text,
+                                        32514 => winit::window::CursorIcon::Wait,
+                                        32515 => winit::window::CursorIcon::Crosshair,
+                                        32516 => winit::window::CursorIcon::NResize,
+                                        32642 => winit::window::CursorIcon::NwseResize,
+                                        32643 => winit::window::CursorIcon::NeswResize,
+                                        32644 => winit::window::CursorIcon::EwResize,
+                                        32645 => winit::window::CursorIcon::NsResize,
+                                        32646 => winit::window::CursorIcon::Move,
+                                        32648 => winit::window::CursorIcon::NotAllowed,
+                                        32649 => winit::window::CursorIcon::Pointer,
+                                        32650 => winit::window::CursorIcon::Progress,
+                                        32651 => winit::window::CursorIcon::Help,
+                                        _ => winit::window::CursorIcon::Default,
+                                    };
+                                    window.set_cursor(icon);
+                                    cursor_applied = true;
+                                }
+                            }
+                        }
+                        if !cursor_applied {
+                            window.set_cursor(winit::window::CursorIcon::Default);
+                        }
+                    }
+                }
+            }
+        }
+
+        needs_redraw
+    }
+
+    fn next_poll_interval(&self) -> Option<std::time::Duration> {
+        self.painters
+            .values()
+            .filter_map(|painter| painter.poll_interval())
+            .min()
+    }
 }
 
-impl ApplicationHandler for WinFrame {
+impl ApplicationHandler<()> for WinFrame {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.sb_context.is_none() {
             let display_handle = unsafe {
@@ -90,255 +338,37 @@ impl ApplicationHandler for WinFrame {
             let window = painter.create_window(event_loop);
             let id = window.id();
             self.painters.insert(id, painter);
-            self.windows.insert(id, window);
+            let context = self
+                .sb_context
+                .as_ref()
+                .expect("Context should be initialized");
+            let surface = Surface::new(context, window).unwrap();
+            self.surfaces.insert(id, surface);
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let mut needs_redraw = false;
-
-        // UI 명령 처리 (윈도우 생성 등)
-        while let Ok(cmd) = self.ui_rx.try_recv() {
-            match cmd {
-                UiCommand::CreateWindow {
-                    hwnd,
-                    title,
-                    width,
-                    height,
-                    style,
-                    ex_style,
-                    surface_bitmap,
-                } => {
-                    let mut attributes = Window::default_attributes()
-                        .with_title(title)
-                        .with_inner_size(winit::dpi::LogicalSize::new(width, height));
-
-                    // 테두리 및 캡션 제어
-                    if (style & WS_POPUP) != 0 {
-                        attributes = attributes.with_decorations(false);
-                    } else if (style & WS_CAPTION) == 0 {
-                        attributes = attributes.with_decorations(false);
-                    }
-
-                    // 크기 조절 가능 여부
-                    if (style & WS_THICKFRAME) != 0 {
-                        attributes = attributes.with_resizable(true);
-                    } else {
-                        attributes = attributes.with_resizable(false);
-                    }
-
-                    // 최소/최대화 버튼 (winit에서는 개별 제어가 제한적일 수 있음)
-                    let _has_min = (style & WS_MINIMIZEBOX) != 0;
-                    let _has_max = (style & WS_MAXIMIZEBOX) != 0;
-
-                    // 항상 위에 표시
-                    if (ex_style & WS_EX_TOPMOST) != 0 {
-                        attributes =
-                            attributes.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
-                    }
-
-                    let window = event_loop.create_window(attributes).unwrap();
-                    let id = window.id();
-                    self.hwnd_to_id.insert(hwnd, id);
-                    self.id_to_hwnd.insert(id, hwnd);
-
-                    // 에뮬레이션 윈도우용 기본 Painter
-                    let painter = DefaultEmulatorPainter {
-                        surface_bitmap,
-                        emu_context: self.emu_context.clone(),
-                    };
-                    self.painters.insert(id, Box::new(painter));
-                    self.windows.insert(id, window);
-                    needs_redraw = true;
-                }
-
-                UiCommand::DestroyWindow { hwnd } => {
-                    if let Some(id) = self.hwnd_to_id.remove(&hwnd) {
-                        self.id_to_hwnd.remove(&id);
-                        self.painters.remove(&id);
-                        self.windows.remove(&id);
-                    }
-                }
-
-                UiCommand::ShowWindow { hwnd, visible } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
-                        if let Some(window) = self.windows.get(id) {
-                            window.set_visible(visible);
-                        }
-                    }
-                }
-
-                UiCommand::MoveWindow {
-                    hwnd,
-                    x,
-                    y,
-                    width,
-                    height,
-                } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
-                        if let Some(window) = self.windows.get(id) {
-                            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
-                            let _ = window
-                                .request_inner_size(winit::dpi::LogicalSize::new(width, height));
-                        }
-                    }
-                }
-
-                UiCommand::SetWindowText { hwnd, text } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
-                        if let Some(window) = self.windows.get(id) {
-                            window.set_title(&text);
-                        }
-                    }
-                }
-
-                UiCommand::UpdateWindow { hwnd } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
-                        if let Some(window) = self.windows.get(id) {
-                            window.request_redraw();
-                        }
-                    }
-                }
-
-                UiCommand::ActivateWindow { hwnd } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
-                        if let Some(window) = self.windows.get(id) {
-                            window.focus_window();
-                        }
-                    }
-                }
-
-                UiCommand::MessageBox {
-                    caption,
-                    text,
-                    u_type,
-                    response_tx,
-                } => {
-                    let mut dialog = MessageDialog::new()
-                        .set_title(&caption)
-                        .set_description(&text);
-
-                    // 아이콘 설정 (MB_ICON*)
-                    if (u_type & 0x10) != 0 {
-                        dialog = dialog.set_level(MessageLevel::Error);
-                    } else if (u_type & 0x30) == 0x30 {
-                        dialog = dialog.set_level(MessageLevel::Warning);
-                    } else if (u_type & 0x40) != 0 {
-                        dialog = dialog.set_level(MessageLevel::Info);
-                    }
-
-                    // 버튼 설정 (MB_*)
-                    let buttons = match u_type & 0xF {
-                        1 => MessageButtons::OkCancel,
-                        3 => MessageButtons::YesNoCancel,
-                        4 => MessageButtons::YesNo,
-                        _ => MessageButtons::Ok,
-                    };
-                    dialog = dialog.set_buttons(buttons);
-
-                    let result = dialog.show();
-
-                    // 결과 매핑 (IDOK = 1, IDCANCEL = 2, IDYES = 6, IDNO = 7)
-                    let win_result = match result {
-                        MessageDialogResult::Ok => 1,
-                        MessageDialogResult::Cancel => 2,
-                        MessageDialogResult::Yes => 6,
-                        MessageDialogResult::No => 7,
-                        _ => 1,
-                    };
-                    let _ = response_tx.send(win_result);
-                }
-
-                UiCommand::SetCursor { hwnd, hcursor } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd) {
-                        if let Some(window) = self.windows.get(id) {
-                            let mut cursor_applied = false;
-                            {
-                                let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
-                                if let Some(crate::win32::GdiObject::Cursor {
-                                    resource_id,
-                                    frames,
-                                    ..
-                                }) = gdi_objects.get(&hcursor)
-                                {
-                                    // First try custom frames
-                                    if let Some(frame) = frames.first() {
-                                        if !frame.pixels.is_empty() {
-                                            let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
-                                            for p in &frame.pixels {
-                                                let a = (p >> 24) as u8;
-                                                let r = (p >> 16) as u8;
-                                                let g = (p >> 8) as u8;
-                                                let b = *p as u8;
-                                                rgba.push(r);
-                                                rgba.push(g);
-                                                rgba.push(b);
-                                                rgba.push(a);
-                                            }
-
-                                            let source = winit::window::CustomCursor::from_rgba(
-                                                rgba,
-                                                frame.width as u16,
-                                                frame.height as u16,
-                                                frame.hotspot_x as u16,
-                                                frame.hotspot_y as u16,
-                                            );
-                                            if let Ok(source) = source {
-                                                let custom_cursor = event_loop.create_custom_cursor(source);
-                                                window.set_cursor(custom_cursor);
-                                                cursor_applied = true;
-                                            }
-                                        }
-                                    }
-
-                                    if !cursor_applied {
-                                        // Fall back to system cursor mapping by resource_id
-                                        let icon = match *resource_id {
-                                            32512 => winit::window::CursorIcon::Default,    // IDC_ARROW
-                                            32513 => winit::window::CursorIcon::Text,       // IDC_IBEAM
-                                            32514 => winit::window::CursorIcon::Wait,       // IDC_WAIT
-                                            32515 => winit::window::CursorIcon::Crosshair,  // IDC_CROSS
-                                            32516 => winit::window::CursorIcon::NResize,    // IDC_UPARROW
-                                            32642 => winit::window::CursorIcon::NwseResize, // IDC_SIZENWSE
-                                            32643 => winit::window::CursorIcon::NeswResize, // IDC_SIZENESW
-                                            32644 => winit::window::CursorIcon::EwResize,   // IDC_SIZEWE
-                                            32645 => winit::window::CursorIcon::NsResize,   // IDC_SIZENS
-                                            32646 => winit::window::CursorIcon::Move,       // IDC_SIZEALL
-                                            32648 => winit::window::CursorIcon::NotAllowed, // IDC_NO
-                                            32649 => winit::window::CursorIcon::Pointer,    // IDC_HAND
-                                            32650 => winit::window::CursorIcon::Progress,   // IDC_APPSTARTING
-                                            32651 => winit::window::CursorIcon::Help,       // IDC_HELP
-                                            _ => winit::window::CursorIcon::Default,
-                                        };
-                                        window.set_cursor(icon);
-                                        cursor_applied = true;
-                                    }
-                                }
-                            }
-                            if !cursor_applied {
-                                window.set_cursor(winit::window::CursorIcon::Default);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let needs_redraw = self.process_ui_commands(event_loop);
 
         // 모든 Painter에게 백그라운드 상태 변경 알림 및 종료 체크
         let mut windows_to_remove = Vec::new();
+        let mut windows_to_redraw = Vec::new();
         for (id, painter) in self.painters.iter_mut() {
             if painter.tick() {
-                if let Some(window) = self.windows.get(id) {
-                    window.request_redraw();
-                }
+                windows_to_redraw.push(*id);
             }
             if painter.should_close() {
                 windows_to_remove.push(*id);
             }
         }
+        for id in windows_to_redraw {
+            if let Some(window) = self.get_window(&id) {
+                window.request_redraw();
+            }
+        }
 
         for id in windows_to_remove {
-            self.windows.remove(&id);
+            self.surfaces.remove(&id);
             self.painters.remove(&id);
             if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
                 self.hwnd_to_id.remove(&hwnd);
@@ -346,22 +376,24 @@ impl ApplicationHandler for WinFrame {
         }
 
         if needs_redraw {
-            for window in self.windows.values() {
+            for window in self.surfaces.values().map(|s| s.window()) {
                 window.request_redraw();
             }
         }
 
-        // 10ms 마다 다시 깨어나서 리시버를 확인하도록 설정 (ControlFlow::Wait면 이벤트를 기다림)
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(10),
-        ));
+        if let Some(interval) = self.next_poll_interval() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + interval,
+            ));
+        } else {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let window = match self.windows.get(&id) {
-            Some(w) => w,
-            None => return,
-        };
+        if !self.surfaces.contains_key(&id) {
+            return;
+        }
 
         // 윈도우별 자체 이벤트 처리 위임 및 필요한 정보 추출
         let (handled, quit_on_close) = if let Some(painter) = self.painters.get_mut(&id) {
@@ -374,7 +406,9 @@ impl ApplicationHandler for WinFrame {
         };
 
         if handled {
-            window.request_redraw();
+            if let Some(window) = self.get_window(&id) {
+                window.request_redraw();
+            }
         }
 
         match event {
@@ -394,29 +428,27 @@ impl ApplicationHandler for WinFrame {
                     }
                 }
 
-                // 2. 호스트 화면에 현재 버퍼 출력 (실제 그리기)
-                let (width, height) = {
-                    let size = window.inner_size();
-                    (size.width, size.height)
-                };
+                // 2. 호스트 화면에 현재 버퍼 출력 (캐시된 Surface 사용)
+                if let Some(surface) = self.surfaces.get_mut(&id) {
+                    let (width, height) = {
+                        let size = surface.window().inner_size();
+                        (size.width, size.height)
+                    };
 
-                let context = self
-                    .sb_context
-                    .as_ref()
-                    .expect("Context should be initialized");
-                let mut surface = Surface::new(context, window).unwrap();
-                if let (Some(nw), Some(nh)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
-                    surface.resize(nw, nh).unwrap();
+                    if let (Some(nw), Some(nh)) = (NonZeroU32::new(width), NonZeroU32::new(height))
+                    {
+                        surface.resize(nw, nh).unwrap();
+
+                        let mut buffer = surface.buffer_mut().unwrap();
+                        buffer.fill(0);
+
+                        if let Some(painter) = self.painters.get_mut(&id) {
+                            painter.paint(&mut buffer, width, height);
+                        }
+
+                        buffer.present().unwrap();
+                    }
                 }
-
-                let mut buffer = surface.buffer_mut().unwrap();
-                buffer.fill(0);
-
-                if let Some(painter) = self.painters.get_mut(&id) {
-                    painter.paint(&mut buffer, width, height);
-                }
-
-                buffer.present().unwrap();
             }
 
             WindowEvent::CloseRequested => {
@@ -428,7 +460,7 @@ impl ApplicationHandler for WinFrame {
                 if quit_on_close {
                     event_loop.exit();
                 } else {
-                    self.windows.remove(&id);
+                    self.surfaces.remove(&id);
                     self.painters.remove(&id);
                     if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
                         self.hwnd_to_id.remove(&hwnd);
@@ -521,10 +553,9 @@ impl ApplicationHandler for WinFrame {
             }
 
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key, state, ..
-                    },
+                event: KeyEvent {
+                    logical_key, state, ..
+                },
                 ..
             } => {
                 if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
@@ -606,7 +637,7 @@ impl ApplicationHandler for WinFrame {
 /// 에뮬레이터 윈도우용 기본 페인터
 pub struct DefaultEmulatorPainter {
     surface_bitmap: u32,
-    emu_context: crate::win32::Win32Context,
+    emu_context: Win32Context,
 }
 impl Painter for DefaultEmulatorPainter {
     fn create_window(
@@ -628,10 +659,11 @@ impl Painter for DefaultEmulatorPainter {
 
         let mut surface_pixels = None;
 
-        if let Some(crate::win32::GdiObject::Bitmap {
+        if let Some(GdiObject::Bitmap {
             pixels: p,
             width: sw,
             height: sh,
+            ..
         }) = gdi_objects.get(&self.surface_bitmap)
         {
             surface_pixels = Some((p.clone(), *sw, *sh));
