@@ -1,6 +1,6 @@
 use crate::{
     debug::common::{CpuContext, DebugCommand},
-    win32::{LoadedDll, StackCleanup, Win32Context, dll_kernel32::DllKERNEL32},
+    dll::win32::{LoadedDll, StackCleanup, Win32Context, kernel32::KERNEL32},
 };
 use chardetng::EncodingDetector;
 use encoding_rs::EUC_KR;
@@ -10,8 +10,7 @@ use std::{
     collections::HashMap,
     fs,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::Ordering,
         mpsc::{Receiver, Sender},
     },
     time::{Duration, Instant},
@@ -36,6 +35,9 @@ pub const FAKE_IMPORT_BASE: u64 = 0xF000_0000;
 pub const EXIT_ADDRESS: u64 = 0xFFFF_FFFF;
 
 const SIZE_4KB: u64 = 4 * 1024;
+const DEBUG_AUTO_QUANTUM: usize = 200_000;
+const DEBUG_STEP_QUANTUM: usize = 1;
+const DEBUG_STATE_SEND_INTERVAL: Duration = Duration::from_millis(250);
 
 /// 함수 호출 규약에 따른 스택 정리(Cleanup) 시 이동해야 할 ESP의 상대적 위치를 계산합니다.
 ///
@@ -61,6 +63,84 @@ fn stack_cleanup_final_esp(esp: u64, cleanup: StackCleanup) -> u64 {
     stack_cleanup_target_esp(esp, cleanup).unwrap_or(esp) + 4
 }
 
+fn capture_cpu_context(uc: &mut Unicorn<Win32Context>) -> CpuContext {
+    let regs = [
+        uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::EBX).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::EBP).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::ESP).unwrap_or(0) as u32,
+        uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32,
+    ];
+
+    let esp = regs[7] as u64;
+    let mut stack = Vec::new();
+    let mut buf = [0u8; 4];
+    for i in 0..10 {
+        let target = esp + (i as u64 * 4);
+        if uc.mem_read(target, &mut buf).is_ok() {
+            stack.push((target as u32, u32::from_le_bytes(buf)));
+        }
+    }
+
+    // 디스어셈블러가 없으므로 현재 EIP 주변 바이트를 보여줘 다음 위치 파악에 사용합니다.
+    let mut code = [0u8; 8];
+    let code_len = if uc.mem_read(regs[8] as u64, &mut code).is_ok() {
+        code.len()
+    } else {
+        0
+    };
+    let next_instr = code[..code_len]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    CpuContext {
+        regs,
+        stack,
+        next_instr,
+    }
+}
+
+/// 중첩 게스트 호출을 실제 반환 지점(`EXIT_ADDRESS`)까지 계속 실행합니다.
+///
+/// `emu_stop()`로 인해 한 번의 `emu_start`가 조기 중단되어도 현재 EIP에서 재개하며,
+/// 사이사이에 백그라운드 스레드를 스케줄링해 Sleep/Wait 기반 yield도 소화합니다.
+pub(crate) fn run_nested_guest_until_exit(
+    uc: &mut Unicorn<Win32Context>,
+    entry_eip: u64,
+) -> Result<(), String> {
+    let mut next_eip = entry_eip;
+
+    loop {
+        if next_eip == EXIT_ADDRESS {
+            return Ok(());
+        }
+        if next_eip == 0 {
+            return Err(String::from("execution reached 0x0"));
+        }
+
+        if let Err(e) = uc.emu_start(next_eip, EXIT_ADDRESS, 0, DEBUG_AUTO_QUANTUM) {
+            return Err(format!("{e:?}"));
+        }
+
+        let cur_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
+        if cur_eip == EXIT_ADDRESS {
+            return Ok(());
+        }
+        if cur_eip == 0 {
+            return Err(String::from("execution reached 0x0"));
+        }
+
+        KERNEL32::schedule_threads(uc);
+        next_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
+    }
+}
+
 /// Unicorn 객체에 추가할 메소드 목록 정의
 ///
 /// Unicorn 엔진을 확장하여 Win32 에뮬레이션에 필요한 메모리 조작, 스택 제어, DLL 로딩 등을 지원하는 헬퍼 트레잇
@@ -69,15 +149,15 @@ pub trait UnicornHelper {
     /// 스택, 힙, 통신 채널 등을 설정하고 기본적인 API 후킹 준비를 완료
     ///
     /// # 인자
-    /// * `state_tx`: UI(디버거)로 CPU 상태(`CpuContext`)를 전송하기 위한 Sender
-    /// * `cmd_rx`: UI로부터 디버깅 명령어(`DebugCommand`)를 수신하기 위한 Receiver
+    /// * `state_tx`: UI(디버거)로 CPU 상태(`CpuContext`)를 전송하기 위한 Sender. 비디버그 모드에서는 `None`
+    /// * `cmd_rx`: UI로부터 디버깅 명령어(`DebugCommand`)를 수신하기 위한 Receiver. 비디버그 모드에서는 `None`
     ///
     /// # 반환
     /// * `Result<(), ()>`: 성공 시 `Ok(())`, 메모리 매핑 요류 등 실패 시 `Err(())`
     fn setup(
         &mut self,
-        state_tx: Sender<CpuContext>,
-        cmd_rx: Receiver<DebugCommand>,
+        state_tx: Option<Sender<CpuContext>>,
+        cmd_rx: Option<Receiver<DebugCommand>>,
     ) -> Result<(), ()>;
 
     /// 지정된 경로의 DLL 파일을 메모리에 로드하고 재배치(Relocation)를 수행
@@ -117,7 +197,14 @@ pub trait UnicornHelper {
     fn run_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>);
 
     /// 메인 에뮬레이터 루프를 실행 (tid=0과 백그라운드 스레드를 교차 실행)
-    fn run_emulator(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>);
+    fn run_emulator(
+        &mut self,
+        dll_name: &str,
+        func_name: &str,
+        args: Vec<Box<dyn Any>>,
+        state_tx: Option<Sender<CpuContext>>,
+        cmd_rx: Option<Receiver<DebugCommand>>,
+    );
 
     /// 함수 호출을 위한 스택 및 EIP 환경을 준비 (실제 에뮬레이션은 시작하지 않음)
     fn prepare_dll_func(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>);
@@ -181,6 +268,13 @@ pub trait UnicornHelper {
     /// * `text`: 기록할 Rust 문자열 레퍼런스(`&str`)
     fn write_string(&mut self, addr: u64, text: &str);
 
+    /// 대상 메모리에 ANSI(EUC-KR) 기반 널 종료 문자열을 기록합니다.
+    ///
+    /// # 인자
+    /// * `addr`: 문자열을 기록할 메모리 주소
+    /// * `text`: 기록할 Rust 문자열 레퍼런스(`&str`)
+    fn write_euc_kr(&mut self, addr: u64, text: &str);
+
     /// 대상 메모리의 널 종료 문자열을 읽고, 내용이 EUC-KR 문자셋일 경우 디코딩하여 Rust `String`으로 반환 (한국어 호환 프로그램용)
     ///
     /// # 인자
@@ -231,6 +325,10 @@ pub trait UnicornHelper {
     /// * `u32`: 데이터가 복사된 힙의 32비트 주소
     fn alloc_bytes(&mut self, data: &[u8]) -> u32;
 
+    /// 주어진 주소가 어떤 DLL의 어느 오프셋에 해당하는지 해석하여 문자열로 반환
+    /// 가장 가까운 export 심볼이 있으면 함께 표시 (예: "4Leaf.dll+0x1234 (near Main+0x10)")
+    fn resolve_address(&self, addr: u32) -> String;
+
     /// 대상 메모리에 32비트 정수 배열을 리틀 엔디안 방식으로 기록 (RECT 등 구조체 처리용)
     ///
     /// # 인자
@@ -245,15 +343,15 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
     /// 스택, 힙, 통신 채널 등을 설정하고 기본적인 API 후킹 준비를 완료합니다.
     ///
     /// # 인자
-    /// * `state_tx`: UI(디버거)로 CPU 상태(`CpuContext`)를 전송하기 위한 Sender
-    /// * `cmd_rx`: UI로부터 디버깅 명령어(`DebugCommand`)를 수신하기 위한 Receiver
+    /// * `state_tx`: UI(디버거)로 CPU 상태(`CpuContext`)를 전송하기 위한 Sender. 비디버그 모드에서는 `None`
+    /// * `cmd_rx`: UI로부터 디버깅 명령어(`DebugCommand`)를 수신하기 위한 Receiver. 비디버그 모드에서는 `None`
     ///
     /// # 반환
     /// * `Result<(), ()>`: 성공 시 `Ok(())`, 메모리 매핑 오류 등 실패 시 `Err(())`
     fn setup(
         &mut self,
-        state_tx: Sender<CpuContext>,
-        cmd_rx: Receiver<DebugCommand>,
+        _state_tx: Option<Sender<CpuContext>>,
+        _cmd_rx: Option<Receiver<DebugCommand>>,
     ) -> Result<(), ()> {
         // [1] 메모리 맵 설정
         self.mem_map(STACK_BASE, STACK_SIZE, Prot::ALL)
@@ -268,15 +366,32 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
             .map_err(|e| crate::emu_log!("[!] Failed to map Shared Mem: {:?}", e))?;
 
         // NULL 포인터 접근 방지 (0 ~ 128KB)
-        self.mem_map(0, 0x2_0000, Prot::ALL)
+        // 읽기/쓰기만 허용하고 실행은 차단하여, EIP가 0으로 떨어졌을 때
+        // FETCH_UNMAPPED 훅이 발동되어 호스트 프로세스 segfault를 방지합니다.
+        self.mem_map(0, 0x2_0000, Prot::READ | Prot::WRITE)
             .map_err(|e| crate::emu_log!("[!] Failed to map Null Page: {:?}", e))?;
 
         // [2] TEB (Thread Environment Block) 설정
         self.mem_map(TEB_BASE, SIZE_4KB, Prot::ALL)
             .map_err(|e| crate::emu_log!("[!] Failed to map TEB: {:?}", e))?;
+        // x86 SEH 체인의 끝은 `-1`이므로 초기 예외 리스트 헤더를 맞춰 둡니다.
+        self.mem_write(TEB_BASE, &0xFFFF_FFFFu32.to_le_bytes())
+            .map_err(|e| crate::emu_log!("[!] Failed to write TEB exception list: {:?}", e))?;
         // Self-pointer at TEB + 0x18
         self.mem_write(TEB_BASE + 0x18, &(TEB_BASE as u32).to_le_bytes())
             .map_err(|e| crate::emu_log!("[!] Failed to write TEB self-pointer: {:?}", e))?;
+        // 현재 Unicorn 32-bit x86에서는 `FS_BASE` 쓰기가 no-op이므로, 게스트가 실제로
+        // 사용하는 `fs:[0]` / `fs:[0x18]` 조회가 선형 주소 0 기반에서도 동작하도록
+        // 최소 TEB 헤더를 저주소 별칭으로 함께 미러링합니다.
+        self.mem_write(0, &0xFFFF_FFFFu32.to_le_bytes())
+            .map_err(|e| crate::emu_log!("[!] Failed to mirror SEH head at null page: {:?}", e))?;
+        self.mem_write(0x18, &(TEB_BASE as u32).to_le_bytes())
+            .map_err(|e| {
+                crate::emu_log!(
+                    "[!] Failed to mirror TEB self-pointer at null page: {:?}",
+                    e
+                )
+            })?;
 
         // [3] Fake Import Area (API 후킹용 실행 영역)
         self.mem_map(FAKE_IMPORT_BASE, 1024 * 1024, Prot::ALL | Prot::EXEC)
@@ -303,23 +418,18 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 let import_func = {
                     let context = uc.get_data();
                     let address_map = context.address_map.lock().unwrap();
-                    let info = address_map.get(&addr).cloned();
-                    // if let Some(ref name) = info {
-                    //     let cur_tid = context.current_thread_idx.load(Ordering::SeqCst);
-                    //     let ret_addr = uc.read_u32(uc.reg_read(RegisterX86::ESP).unwrap_or(0));
-                    //     crate::emu_log!("[*] API Dispatch: {:<20} at EIP={:#x} (ret={:#x}, tid={})", name, addr, ret_addr, cur_tid);
-                    // }
-                    info
+                    address_map.get(&addr).cloned()
                 };
 
                 if let Some(import_func) = import_func {
                     let splits: Vec<&str> = import_func.split('!').collect();
                     if splits.len() < 2 {
-                        // crate::emu_log!("[!] Invalid import function format: {}", import_func);
                         return;
                     }
                     let dll_name = splits[0];
                     let func_name = splits[1];
+
+                    let esp_before = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
 
                     // 1. 이미 로드된 DLL 내부 오프셋에 매핑된 함수가 있는지 확인
                     let func_address = {
@@ -331,15 +441,36 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                     };
 
                     if let Some(func_address) = func_address {
-                        // DLL 내부 함수 직접 실행 (Recursive Emulation)
-                        if let Err(e) = uc.emu_start(func_address, EXIT_ADDRESS, 0, 0) {
+                        if dll_name.eq_ignore_ascii_case("WinCore.dll")
+                            && func_name.contains("?Create@T")
+                        {
+                            let ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
+                            let edx = uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32;
+                            let stack_words = (0..6)
+                                .map(|i| format!("{:#x}", uc.read_u32(esp_before + (i * 4))))
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             crate::emu_log!(
-                                "[!] Emulation for {} failed at {:#x}: {:?}",
+                                "[TRACE] Internal call {} -> {:#x} ECX={:#x} EDX={:#x} ESP={:#x} RET={:#x} STACK=[{}]",
                                 import_func,
                                 func_address,
-                                e
+                                ecx,
+                                edx,
+                                esp_before as u32,
+                                uc.read_u32(esp_before),
+                                stack_words
                             );
                         }
+
+                        // 이미 게스트가 `call [IAT]`를 수행해 원래 복귀 주소를 스택에 올려 둔 상태이므로,
+                        // 내부 DLL export는 중첩 `emu_start`로 별도 실행하지 않고 현재 실행 흐름의 EIP만
+                        // 실제 함수 주소로 넘겨 같은 게스트 call frame 안에서 계속 실행시킵니다.
+                        //
+                        // 이 경로는 C++ thiscall / SEH 프레임까지 포함한 원래 호출 구조를 보존하므로,
+                        // WinCore 내부 메서드가 다시 다른 guest 함수를 호출할 때 상위 프레임이 오염되는
+                        // 문제를 막습니다.
+                        let _ = uc.reg_write(RegisterX86::EIP, func_address as u64);
+                        uc.emu_stop().unwrap_or_default();
                         return;
                     }
 
@@ -355,11 +486,35 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                             uc.reg_write(RegisterX86::EAX, eax as u64)
                                 .unwrap_or_default();
                         }
-                        uc.apply_stack_cleanup(hook_result.cleanup);
+
+                        if dll_name.eq_ignore_ascii_case("USER32.dll") {
+                            // USER32의 일부 호출(CreateWindowExA 등)은 가짜 import RET가
+                            // 실행되기 전에 동일 훅으로 재진입하면서 현재 호출 프레임을
+                            // 다시 읽어 가짜 인자를 만드는 문제가 있습니다.
+                            //
+                            // 이 DLL에 한해서는 훅 안에서 caller의 EIP/ESP로 즉시
+                            // 복귀를 완료하여 RET 재진입을 차단합니다.
+                            let esp_after = uc.reg_read(RegisterX86::ESP).unwrap_or(esp_before);
+                            let return_addr = uc.read_u32(esp_after);
+                            let final_esp = stack_cleanup_final_esp(esp_after, hook_result.cleanup);
+                            let _ = uc.reg_write(RegisterX86::ESP, final_esp);
+                            let _ = uc.reg_write(RegisterX86::EIP, return_addr as u64);
+                            uc.emu_stop().unwrap_or_default();
+                        } else {
+                            // 그 외 DLL은 원래 x86 호출 흐름을 최대한 그대로 두어,
+                            // cdecl 호출자 정리 코드(pop ecx; ret 등)가 같은 quantum 안에서
+                            // 자연스럽게 이어지도록 합니다.
+                            uc.apply_stack_cleanup(hook_result.cleanup);
+                        }
                         return;
                     }
 
-                    crate::emu_log!("[!] Function not implemented: {}", import_func);
+                    // 미구현 함수: 스택 정리 불가 (arg_count 불명)
+                    // RET만 실행되므로 stdcall 인자가 스택에 잔류하여 ESP가 어긋남
+                    crate::emu_log!(
+                        "[!] Function not implemented: {} — ESP may be corrupted (no stack cleanup)",
+                        import_func
+                    );
                 } else {
                     crate::emu_log!("[!] Call to unknown fake address: {:#x}", addr);
                 }
@@ -370,124 +525,103 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         )
         .map_err(|e| crate::emu_log!("[!] Failed to install API hook: {:?}", e))?;
 
-        // [5] Instruction-level Debug Hook
-        let auto_run = Arc::new(AtomicBool::new(true));
-        let auto_run_hook = auto_run.clone();
-        let mut inst_count = 0u64;
-
-        self.add_code_hook(0, -1i64 as u64, move |uc, addr, size| {
-            inst_count += 1;
-            let is_auto = auto_run_hook.load(Ordering::Relaxed);
-
-            // 약 10만 명령어마다 타 스레드에게 실행 양보 및 진행 상황 로그
-            if inst_count % 100000 == 0 {
-                let eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
-                crate::emu_log!(
-                    "[*] Main thread running at EIP={:#x} (inst_count={})",
-                    eip,
-                    inst_count
-                );
-                DllKERNEL32::schedule_threads(uc);
-            }
-
-            // CPU 레지스터 읽기 (EAX ~ EIP)
-            let regs = [
-                uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::EBX).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::EBP).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::ESP).unwrap_or(0) as u32,
-                uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32,
-            ];
-
-            // 주소 0 접근 감지 (의도치 않은 리턴 상황 등)
-            if regs[8] == 0 {
-                crate::emu_log!("[!] Execution at 0x00 detected. Terminating.");
-                uc.emu_stop().unwrap_or_default();
-                return;
-            }
-
-            let mut send_state = false;
-            if is_auto {
-                // 자동 실행 시 10,000 명령마다 UI 갱신
-                if inst_count % 10000 == 0 {
-                    send_state = true;
+        // [5] 전역 코드 훅 (JIT 블록 비활성화 + EIP=0 보호)
+        // API 코드 훅에서 중첩 emu_start를 호출할 때 unicorn의 JIT 블록이 내부 상태를
+        // 손상시킬 수 있으므로, 전체 주소 범위에 코드 훅을 설치하여 인터프리터 모드로 강제합니다.
+        self.add_code_hook(
+            0,
+            u64::MAX,
+            |uc: &mut Unicorn<Win32Context>, addr, _size| {
+                if addr == 0x3100_23f4 {
+                    let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
+                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
+                    let ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
+                    let edx = uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32;
+                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
+                    let edi = uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32;
+                    let frame = (0..10)
+                        .map(|i| format!("{:#x}", uc.read_u32(esp + (i * 4))))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    crate::emu_log!(
+                        "[TRACE] WinCore::TWindow::Create callsite EIP=0x310023f4 ESP={:#x} EAX={:#x} ECX={:#x} EDX={:#x} ESI={:#x} EDI={:#x} STACK=[{}]",
+                        esp as u32,
+                        eax,
+                        ecx,
+                        edx,
+                        esi,
+                        edi,
+                        frame
+                    );
+                } else if addr == 0x3100_23fa {
+                    let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
+                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
+                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
+                    let hwnd_field = if esi >= 0x2000_0000 {
+                        uc.read_u32(esi as u64 + 4)
+                    } else {
+                        0
+                    };
+                    crate::emu_log!(
+                        "[TRACE] WinCore::TWindow::Create return EIP=0x310023fa ESP={:#x} EAX={:#x} ESI={:#x} [ESI+4]={:#x}",
+                        esp as u32,
+                        eax,
+                        esi,
+                        hwnd_field
+                    );
+                } else if addr == 0x3100_242f {
+                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
+                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
+                    let hwnd_field = if esi >= 0x2000_0000 {
+                        uc.read_u32(esi as u64 + 4)
+                    } else {
+                        0
+                    };
+                    crate::emu_log!(
+                        "[TRACE] WinCore::TWindow::Create compare branch EAX={:#x} ESI={:#x} [ESI+4]={:#x}",
+                        eax,
+                        esi,
+                        hwnd_field
+                    );
+                } else if addr == 0x3100_2434 {
+                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
+                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
+                    let hwnd_field = if esi >= 0x2000_0000 {
+                        uc.read_u32(esi as u64 + 4)
+                    } else {
+                        0
+                    };
+                    crate::emu_log!(
+                        "[TRACE] WinCore::TWindow::Create throw path entered EAX={:#x} ESI={:#x} [ESI+4]={:#x}",
+                        eax,
+                        esi,
+                        hwnd_field
+                    );
+                } else if addr == 0x3100_4964 || addr == 0x3100_35d0 {
+                    let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
+                    let ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
+                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
+                    let frame = (0..10)
+                        .map(|i| format!("{:#x}", uc.read_u32(esp + (i * 4))))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    crate::emu_log!(
+                        "[TRACE] WinCore child create direct USER32 call EIP={:#x} ESP={:#x} ECX={:#x} ESI={:#x} STACK=[{}]",
+                        addr as u32,
+                        esp as u32,
+                        ecx,
+                        esi,
+                        frame
+                    );
                 }
 
-                // Pause/Stop 명령어 확인
-                match cmd_rx.try_recv() {
-                    Ok(DebugCommand::Pause) => {
-                        auto_run_hook.store(false, Ordering::Relaxed);
-                        send_state = true;
-                    }
-                    Ok(DebugCommand::Stop) => {
-                        uc.emu_stop().unwrap_or_default();
-                        return;
-                    }
-                    _ => {}
-                }
-            } else {
-                // 스텝 실행 시 매번 갱신
-                send_state = true;
-            }
-
-            if send_state {
-                // 스택 상위 10개 항목 읽기
-                let esp = regs[7] as u64;
-                let mut stack = Vec::new();
-                let mut buf = [0u8; 4];
-                for i in 0..10 {
-                    let target = esp + (i as u64 * 4);
-                    if uc.mem_read(target, &mut buf).is_ok() {
-                        stack.push((target as u32, u32::from_le_bytes(buf)));
-                    }
-                }
-
-                // 현재 명령어 바이트 읽기
-                let mut code = vec![0u8; size as usize];
-                let _ = uc.mem_read(addr, &mut code);
-                let instr_hex = code
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                // UI로 상태 메시지 전송
-                if state_tx
-                    .send(CpuContext {
-                        regs,
-                        stack,
-                        next_instr: instr_hex,
-                    })
-                    .is_err()
-                {
+                if addr == 0 {
+                    crate::emu_log!("[!] Execution at address 0x0 detected. Stopping.");
                     uc.emu_stop().unwrap_or_default();
-                    return;
                 }
-            }
-
-            // 스텝 모드 대기
-            if !auto_run_hook.load(Ordering::Relaxed) {
-                loop {
-                    match cmd_rx.recv() {
-                        Ok(DebugCommand::Step) => break,
-                        Ok(DebugCommand::Run) => {
-                            auto_run_hook.store(true, Ordering::Relaxed);
-                            break;
-                        }
-                        Ok(DebugCommand::Stop) => {
-                            uc.emu_stop().unwrap_or_default();
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        })
-        .map_err(|e| crate::emu_log!("[!] Failed to install debugger hook: {:?}", e))?;
+            },
+        )
+        .map_err(|e| crate::emu_log!("[!] Failed to install global code hook: {:?}", e))?;
 
         // [6] Unmapped Memory Access Hook
         self.add_mem_hook(
@@ -668,6 +802,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         Ok(LoadedDll {
             name: filename.to_string(),
             base_addr: target_base,
+            size: image_size,
             entry_point,
             exports,
         })
@@ -875,21 +1010,102 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         }
     }
 
-    fn run_emulator(&mut self, dll_name: &str, func_name: &str, args: Vec<Box<dyn Any>>) {
+    fn run_emulator(
+        &mut self,
+        dll_name: &str,
+        func_name: &str,
+        args: Vec<Box<dyn Any>>,
+        state_tx: Option<Sender<CpuContext>>,
+        cmd_rx: Option<Receiver<DebugCommand>>,
+    ) {
         self.prepare_dll_func(dll_name, func_name, args);
+        let cmd_rx = cmd_rx;
+        let mut debug_auto_run = true;
+        let mut debug_last_state_sent = Instant::now();
+
+        if let Some(state_tx) = state_tx.as_ref() {
+            if state_tx.send(capture_cpu_context(self)).is_ok() {
+                debug_last_state_sent = Instant::now();
+            }
+        }
 
         loop {
             let eip = self.reg_read(RegisterX86::EIP).unwrap_or(0);
-            if eip == EXIT_ADDRESS {
+            if eip == EXIT_ADDRESS || eip == 0 {
                 break;
             }
 
+            if let Some(cmd_rx) = cmd_rx.as_ref() {
+                if !debug_auto_run {
+                    // 일시정지 상태에서는 명령어를 받기 전까지 실행하지 않습니다.
+                    match cmd_rx.recv() {
+                        Ok(DebugCommand::Step) => {}
+                        Ok(DebugCommand::Run) => {
+                            debug_auto_run = true;
+                            continue;
+                        }
+                        Ok(DebugCommand::Stop) | Err(_) => {
+                            self.emu_stop().unwrap_or_default();
+                            break;
+                        }
+                        Ok(DebugCommand::Pause) => continue,
+                    }
+                } else {
+                    match cmd_rx.try_recv() {
+                        Ok(DebugCommand::Pause) => {
+                            debug_auto_run = false;
+                            if let Some(state_tx) = state_tx.as_ref() {
+                                if state_tx.send(capture_cpu_context(self)).is_err() {
+                                    self.emu_stop().unwrap_or_default();
+                                    break;
+                                }
+                                debug_last_state_sent = Instant::now();
+                            }
+                            continue;
+                        }
+                        Ok(DebugCommand::Stop) => {
+                            self.emu_stop().unwrap_or_default();
+                            break;
+                        }
+                        Ok(DebugCommand::Run) | Ok(DebugCommand::Step) => {}
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            self.emu_stop().unwrap_or_default();
+                            break;
+                        }
+                    }
+                }
+            }
+
             // 메인 스레드(tid=0) 실행
-            const QUANTUM: usize = 200_000;
-            let _ = self.emu_start(eip, EXIT_ADDRESS as u64, 0, QUANTUM);
+            let quantum = if cmd_rx.is_some() {
+                if debug_auto_run {
+                    DEBUG_AUTO_QUANTUM
+                } else {
+                    DEBUG_STEP_QUANTUM
+                }
+            } else {
+                200_000
+            };
+            let _ = self.emu_start(eip, EXIT_ADDRESS as u64, 0, quantum);
 
             // 백그라운드 스레드 스케줄링
-            DllKERNEL32::schedule_threads(self);
+            KERNEL32::schedule_threads(self);
+
+            if let Some(state_tx) = state_tx.as_ref() {
+                let should_send_state = if debug_auto_run {
+                    debug_last_state_sent.elapsed() >= DEBUG_STATE_SEND_INTERVAL
+                } else {
+                    true
+                };
+                if should_send_state {
+                    if state_tx.send(capture_cpu_context(self)).is_err() {
+                        self.emu_stop().unwrap_or_default();
+                        break;
+                    }
+                    debug_last_state_sent = Instant::now();
+                }
+            }
 
             // 모든 스레드(메인 포함)가 대기 중인 경우 호스트 측에서 대기하여 CPU 점유율 조절
             let earliest_resume = {
@@ -1027,6 +1243,13 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         let _ = self.mem_write(addr + bytes.len() as u64, &[0u8]); // Null terminator
     }
 
+    fn write_euc_kr(&mut self, addr: u64, text: &str) {
+        let (encoded, _, _) = EUC_KR.encode(text);
+        let bytes = encoded.as_ref();
+        let _ = self.mem_write(addr, bytes);
+        let _ = self.mem_write(addr + bytes.len() as u64, &[0u8]);
+    }
+
     fn read_euc_kr(&self, addr: u64) -> String {
         let bytes = self.read_string_bytes(addr, 2048);
         if bytes.is_empty() {
@@ -1114,6 +1337,42 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
 
     fn write_u8(&mut self, addr: u64, value: u8) {
         self.mem_write(addr, &[value]).unwrap();
+    }
+
+    fn resolve_address(&self, addr: u32) -> String {
+        let ctx = self.get_data();
+        let dll_modules = ctx.dll_modules.lock().unwrap();
+        for dll in dll_modules.values() {
+            let base = dll.base_addr as u32;
+            let end = base.wrapping_add(dll.size as u32);
+            if addr >= base && addr < end {
+                let offset = addr - base;
+                // 가장 가까운 export 심볼 찾기
+                let mut nearest_name: Option<&str> = None;
+                let mut nearest_dist: u32 = u32::MAX;
+                for (name, &exp_addr) in &dll.exports {
+                    let exp = exp_addr as u32;
+                    if exp <= addr {
+                        let dist = addr - exp;
+                        if dist < nearest_dist {
+                            nearest_dist = dist;
+                            nearest_name = Some(name);
+                        }
+                    }
+                }
+                let dll_short = dll.name.rsplit('/').next().unwrap_or(&dll.name);
+                return if let Some(sym) = nearest_name {
+                    if nearest_dist == 0 {
+                        format!("{}!{}", dll_short, sym)
+                    } else {
+                        format!("{}+{:#x} ({}+{:#x})", dll_short, offset, sym, nearest_dist)
+                    }
+                } else {
+                    format!("{}+{:#x}", dll_short, offset)
+                };
+            }
+        }
+        format!("{:#x}", addr)
     }
 }
 

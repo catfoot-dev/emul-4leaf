@@ -4,14 +4,15 @@
 //! 그리고 서버 스레드 간의 조율을 담당합니다. 전역 로그 버퍼와 실행 흐름 제어를 포함합니다.
 
 mod debug;
+mod dll;
 mod server;
 #[macro_use]
 mod helper;
 mod ui;
-mod win32;
 
+use dll::win32::LoadedDll;
 use helper::{SHARED_MEM_BASE, UnicornHelper};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
 use std::{
     any::Any,
@@ -39,20 +40,28 @@ pub static INDEX: AtomicUsize = AtomicUsize::new(0);
 /// # 인자
 /// * `msg`: 추가할 로그 텍스트
 pub fn push_log(msg: String) {
+    if !crate::debug::should_send_debug_messages() {
+        return;
+    }
+    eprintln!("[EMU] {}", msg);
     if let Some(buf) = LOG_BUFFER.get() {
-        let mut b = buf.lock().unwrap();
-        for line in msg.lines() {
-            b.push_back(line.to_string());
-            if b.len() > LOG_SCROLL_MAX {
-                b.pop_front();
+        if let Ok(mut b) = buf.lock() {
+            for line in msg.lines() {
+                b.push_back(line.to_string());
+                if b.len() > LOG_SCROLL_MAX {
+                    b.pop_front();
+                }
             }
+            LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 /// 에뮬레이터 구동을 위한 전역 로거 및 버퍼들을 초기화합니다.
 pub fn init_logger() {
+    if !crate::debug::should_send_debug_messages() {
+        return;
+    }
     let _ = LOG_BUFFER.set(Mutex::new(VecDeque::new()));
     let _ = SOCKET_LOG_BUFFER.set(Mutex::new(VecDeque::new()));
 }
@@ -62,15 +71,20 @@ pub fn init_logger() {
 /// # 인자
 /// * `msg`: 추가할 소켓 로그 텍스트
 pub fn push_socket_log(msg: String) {
+    if !crate::debug::should_send_debug_messages() {
+        return;
+    }
+    // eprintln!("[SOCK] {}", msg);
     if let Some(buf) = SOCKET_LOG_BUFFER.get() {
-        let mut b = buf.lock().unwrap();
-        for line in msg.lines() {
-            b.push_back(line.to_string());
-            if b.len() > 200 {
-                b.pop_front();
+        if let Ok(mut b) = buf.lock() {
+            for line in msg.lines() {
+                b.push_back(line.to_string());
+                if b.len() > 200 {
+                    b.pop_front();
+                }
             }
+            SOCKET_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        SOCKET_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -79,31 +93,39 @@ pub fn push_socket_log(msg: String) {
 #[macro_export]
 macro_rules! emu_log {
     () => {
-        $crate::push_log(String::new())
+        if $crate::debug::should_send_debug_messages() {
+            $crate::push_log(String::new())
+        }
     };
     ($($arg:tt)*) => {{
-        let index = $crate::INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let msg = std::format!("[{:#08x}] {}", index, std::format!($($arg)*)).replace("\r", "\\r").replace("\n", "\\n");
-        $crate::push_log(msg)
+        if $crate::debug::should_send_debug_messages() {
+            let index = $crate::INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let msg = std::format!("[{:#08x}] {}", index, std::format!($($arg)*)).replace("\r", "\\r").replace("\n", "\\n");
+            $crate::push_log(msg)
+        }
     }};
 }
 
 #[macro_export]
 macro_rules! emu_socket_log {
     () => {
-        $crate::push_socket_log(String::new())
+        if $crate::debug::should_send_debug_messages() {
+            $crate::push_socket_log(String::new())
+        }
     };
     ($($arg:tt)*) => {{
-        let msg = std::format!($($arg)*);
-        $crate::push_socket_log(msg)
+        if $crate::debug::should_send_debug_messages() {
+            let msg = std::format!($($arg)*);
+            $crate::push_socket_log(msg)
+        }
     }};
 }
 
+use dll::win32::Win32Context;
 use unicorn_engine::{
     Unicorn,
     unicorn_const::{Arch, Mode},
 };
-use win32::Win32Context;
 
 use crate::debug::LOG_SCROLL_MAX;
 use crate::debug::common::{CpuContext, DebugCommand};
@@ -113,6 +135,7 @@ use crate::ui::UiCommand;
 /// 하위 시스템(로그, 에뮬레이션, 서버, UI)들을 초기화하고 실행합니다.
 fn main() {
     init_logger();
+    let debug_window_enabled = crate::debug::should_create_debug_window();
 
     // 스레드 간 통신을 위한 채널 설정
     let (cmd_tx, cmd_rx) = channel::<DebugCommand>();
@@ -126,19 +149,18 @@ fn main() {
     let context_for_emu = context.clone();
     // 1. 에뮬레이션 코어 스레드 실행
     thread::spawn(move || {
-        if let Err(e) = emu_4leaf(state_tx, cmd_rx, ui_tx, context_for_emu, splash_tx) {
+        if let Err(e) = emu_4leaf(
+            debug_window_enabled.then_some(state_tx),
+            debug_window_enabled.then_some(cmd_rx),
+            ui_tx,
+            context_for_emu,
+            splash_tx,
+        ) {
             eprintln!("[4leaf Emulator Error] {:?}", e);
         }
     });
 
-    // 2. 가상 서버(백그운드) 스레드 실행
-    thread::spawn(|| {
-        if let Err(e) = server::server() {
-            eprintln!("[Server Error] {:?}", e);
-        }
-    });
-
-    // 3. UI 렌더러 준비 (스플래시 화면 및 디버그 창)
+    // 2. UI 렌더러 준비 (스플래시 화면 및 디버그 창)
     let mut initial_painters: Vec<Box<dyn ui::Painter>> = Vec::new();
     if let Some((pixels, width, height)) = ui::splash::load_splash_data("./Resources") {
         let splash_painter = ui::splash::SplashPainter {
@@ -151,8 +173,10 @@ fn main() {
         initial_painters.push(Box::new(splash_painter));
     }
 
-    let debug_painter = crate::debug::Debug::new(cmd_tx, state_rx);
-    initial_painters.push(Box::new(debug_painter));
+    if debug_window_enabled {
+        let debug_painter = crate::debug::Debug::new(cmd_tx, state_rx);
+        initial_painters.push(Box::new(debug_painter));
+    }
 
     // 4. UI 이벤트 루프 실행 (메인 스레드 점유)
     ui::run_ui(ui_rx, initial_painters, context.clone());
@@ -161,14 +185,14 @@ fn main() {
 /// Unicorn 엔진을 초기화하고 필수 DLL들을 로드한 뒤 메인 시뮬레이션을 시작합니다.
 ///
 /// # 인자
-/// * `state_tx`: UI로의 CPU 상태 전달 채널
-/// * `cmd_rx`: UI로부터의 제어 명령 수신 채널
+/// * `state_tx`: UI로의 CPU 상태 전달 채널. 비디버그 모드에서는 `None`
+/// * `cmd_rx`: UI로부터의 제어 명령 수신 채널. 비디버그 모드에서는 `None`
 /// * `_ui_tx`: UI 조작 요청 채널
 /// * `context`: Win32 상태 컨텍스트
 /// * `splash_tx`: 스플래시 종료 알림 채널
 fn emu_4leaf(
-    state_tx: Sender<CpuContext>,
-    cmd_rx: Receiver<DebugCommand>,
+    state_tx: Option<Sender<CpuContext>>,
+    cmd_rx: Option<Receiver<DebugCommand>>,
     _ui_tx: Sender<UiCommand>,
     context: Win32Context,
     splash_tx: Sender<()>,
@@ -177,23 +201,33 @@ fn emu_4leaf(
         .expect("Failed to create the Unicorn instance");
 
     // 기본 훅 및 상태 전달 설정
-    unicorn.setup(state_tx, cmd_rx).map_err(|e| {
+    unicorn.setup(None, None).map_err(|e| {
         crate::emu_log!("[!] Infrastructure setup failed: {:?}", e);
     })?;
 
+    // Rare.dll은 호스트 프록시로 처리하므로 모듈 메타데이터만 선등록합니다.
+    unicorn.get_data().dll_modules.lock().unwrap().insert(
+        "Rare.dll".to_string(),
+        LoadedDll {
+            name: "Resources/Rare.dll".to_string(),
+            base_addr: 0x3400_0000,
+            size: 0,
+            entry_point: 0,
+            exports: HashMap::new(),
+        },
+    );
+
     // 어플리케이션 구동에 필요한 핵심 DLL 목록
     let dll_list = [
-        "Core.dll",
-        "WinCore.dll",
-        "DNet.dll",
-        "Lime.dll",
-        "Rare.dll",
-        "4Leaf.dll",
+        ("Core.dll", 0x3000_0000u64),
+        ("WinCore.dll", 0x3100_0000u64),
+        ("DNet.dll", 0x3200_0000u64),
+        ("Lime.dll", 0x3300_0000u64),
+        ("4Leaf.dll", 0x3500_0000u64),
     ];
 
-    for (i, dll_name) in dll_list.iter().enumerate() {
+    for (dll_name, target_base) in dll_list {
         let filename = format!("Resources/{}", dll_name);
-        let target_base = (0x3000_0000 + i * 0x100_0000) as u64;
 
         crate::emu_log!("[*] Loading {} at {:#x}...", dll_name, target_base);
 
@@ -217,9 +251,10 @@ fn emu_4leaf(
 
     // 모든 자격 증명이 로드되었음을 알리고 스플래시 창 종료 유도
     let _ = splash_tx.send(());
+    crate::ui::win_event::WinEvent::notify_wakeup();
 
     // 4Leaf 메인 루틴 실행
-    run_4leaf_main(&mut unicorn);
+    run_4leaf_main(&mut unicorn, state_tx, cmd_rx);
 
     Ok(())
 }
@@ -228,7 +263,11 @@ fn emu_4leaf(
 ///
 /// # 인자
 /// * `uc`: 초기화된 Unicorn 엔진 인스턴스
-fn run_4leaf_main(uc: &mut Unicorn<Win32Context>) {
+fn run_4leaf_main(
+    uc: &mut Unicorn<Win32Context>,
+    state_tx: Option<Sender<CpuContext>>,
+    cmd_rx: Option<Receiver<DebugCommand>>,
+) {
     let dll_name = "4Leaf.dll";
     let func_name = "Main";
 
@@ -240,5 +279,5 @@ fn run_4leaf_main(uc: &mut Unicorn<Win32Context>) {
         Box::new("127.0.0.1"),
     ];
 
-    uc.run_emulator(dll_name, func_name, args);
+    uc.run_emulator(dll_name, func_name, args, state_tx, cmd_rx);
 }

@@ -17,6 +17,7 @@ pub struct DNetPacket {
 }
 
 impl DNetPacket {
+    /// 채널 ID와 본문 바이트로 DNet 패킷을 생성합니다.
     pub fn new(channel_id: u16, body: Vec<u8>) -> Self {
         Self { channel_id, body }
     }
@@ -81,16 +82,16 @@ impl ProtocolPacket {
 /// SendControlMessage(this, msg_type, channel_id):
 ///   HIWORD(a2) = channel_id → 4바이트 본문 [msg_type LE][channel_id LE]
 pub const CTRL_OPEN: u16 = 1; // 클라이언트 → 서버: 채널 N 열기 요청
-pub const CTRL_OPEN_ACK: u16 = 2; // 서버 → 클라이언트: 채널 N 수락
-pub const CTRL_CLOSE: u16 = 3; // 양방향: 채널 N 거절/종료
-pub const CTRL_CLOSE_ACK: u16 = 4; // 양방향: 채널 N 종료 확인
+pub const CTRL_OPEN_OK: u16 = 2; // 서버 → 클라이언트: 채널 N 수락
+pub const CTRL_REJECT_OR_ABORT: u16 = 3; // 양방향: 오픈 거절 또는 비정상 중단
+pub const CTRL_CLOSE: u16 = 4; // 양방향: 채널 종료 통지
 
 /// 채널 0 제어 메시지 본문 (항상 4바이트)
 ///
 /// 와이어 포맷: [msg_type: u16 LE][channel_id: u16 LE]
 #[derive(Debug, Clone)]
 pub struct ControlMessage {
-    pub msg_type: u16,   // CTRL_OPEN / CTRL_OPEN_ACK / CTRL_CLOSE / CTRL_CLOSE_ACK
+    pub msg_type: u16,   // CTRL_OPEN / CTRL_OPEN_OK / CTRL_REJECT_OR_ABORT / CTRL_CLOSE
     pub channel_id: u16, // 대상 채널 번호 (1-15)
 }
 
@@ -131,4 +132,65 @@ pub fn create_control_message(msg_type: u16, channel_id: u16) -> Vec<u8> {
 /// 디버깅용 16진수 덤프 문자열
 pub fn hex_dump(label: &str, data: &[u8]) -> String {
     format!("{} ({}B): {}", label, data.len(), hex::encode(data))
+}
+
+// =========================================================
+// 애플리케이션 패킷 빌더
+// =========================================================
+
+/// DNet 채널 1-15 애플리케이션 패킷을 직렬화합니다.
+///
+/// 포맷: [channel_id: u16 LE][body_len: u16 LE][main_type: u8][sub_type: u8][payload...]
+pub fn create_app_packet(channel_id: u16, main_type: u8, sub_type: u8, payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(2 + payload.len());
+    body.push(main_type);
+    body.push(sub_type);
+    body.extend_from_slice(payload);
+    DNetPacket::new(channel_id, body).to_bytes()
+}
+
+/// EUC-KR 문자열을 `[Length: u32 LE][Data: bytes]` 포맷으로 직렬화합니다.
+pub fn write_string(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + s.len());
+    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+    out.extend_from_slice(s);
+    out
+}
+
+/// `u32`를 little-endian 4바이트로 직렬화합니다.
+pub fn write_u32(v: u32) -> [u8; 4] {
+    v.to_le_bytes()
+}
+
+/// `u16`를 little-endian 2바이트로 직렬화합니다.
+pub fn write_u16(v: u16) -> [u8; 2] {
+    v.to_le_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dnet_packet_uses_exact_four_byte_header() {
+        let wire = DNetPacket::new(1, vec![0xaa, 0xbb, 0xcc]).to_bytes();
+
+        assert_eq!(wire, vec![0x01, 0x00, 0x03, 0x00, 0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn control_message_wire_format_matches_original_layout() {
+        let wire = create_control_message(CTRL_OPEN_OK, 7);
+
+        assert_eq!(wire, vec![0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x07, 0x00]);
+    }
+
+    #[test]
+    fn parse_header_rejects_invalid_control_body_length() {
+        assert_eq!(DNetPacket::parse_header(&[0x00, 0x00, 0x03, 0x00]), None);
+        assert_eq!(
+            DNetPacket::parse_header(&[0x00, 0x00, 0x04, 0x00]),
+            Some((0, 4))
+        );
+    }
 }

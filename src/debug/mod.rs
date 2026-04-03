@@ -10,10 +10,28 @@ use rusttype::Font as TtfFont;
 static FONT_DATA: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
 static TTF_FONT: std::sync::OnceLock<TtfFont<'static>> = std::sync::OnceLock::new();
 
-pub const LOG_SCROLL_MAX: usize = 3000;
+pub const LOG_SCROLL_MAX: usize = 5000;
 
 use crate::debug::common::{CpuContext, DebugCommand};
 use crate::ui::Painter;
+
+/// 현재 실행 중인 바이너리가 디버그 빌드인지 판별합니다.
+#[inline(always)]
+pub const fn is_debug_mode() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// 디버그 창을 생성할지 여부를 결정합니다.
+#[inline(always)]
+pub const fn should_create_debug_window() -> bool {
+    is_debug_mode()
+}
+
+/// 디버그 창으로 상태와 로그를 전달할지 여부를 결정합니다.
+#[inline(always)]
+pub const fn should_send_debug_messages() -> bool {
+    should_create_debug_window()
+}
 
 struct FrameBuffer<'a> {
     buffer: &'a mut [u32],
@@ -62,6 +80,7 @@ pub struct Debug {
 }
 
 impl Debug {
+    /// 디버그 창 페인터를 생성합니다.
     pub fn new(cmd_tx: Sender<DebugCommand>, state_rx: Receiver<CpuContext>) -> Self {
         Debug {
             cmd_tx: cmd_tx,
@@ -79,11 +98,13 @@ impl Debug {
         }
     }
 
+    /// 최신 CPU 상태를 반영하고 스텝 대기 상태를 해제합니다.
     pub fn update_state(&mut self, state: CpuContext) {
         self.cpu_state = Some(state);
         self.waiting_for_step = false;
     }
 
+    /// 마지막으로 반영한 로그 카운터 값을 반환합니다.
     pub fn last_log_count(&self) -> usize {
         self.last_log_count
     }
@@ -97,8 +118,8 @@ impl Painter for Debug {
         event_loop
             .create_window(
                 winit::window::Window::default_attributes()
-                    .with_title("emul-4leaf Debugger")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                    .with_title("4Leaf Emulator Debugger")
+                    .with_inner_size(winit::dpi::LogicalSize::new(1600, 600)),
             )
             .unwrap()
     }
@@ -132,6 +153,10 @@ impl Painter for Debug {
         }
 
         needs_redraw
+    }
+
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_millis(10))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -212,11 +237,12 @@ impl Painter for Debug {
                         if !self.input_buffer.is_empty() {
                             let trimmed = self.input_buffer.trim();
                             match hex::decode(trimmed) {
-                                Ok(bytes) => {
-                                    if let Some(tx) = crate::server::SERVER_TX.get() {
-                                        let _ = tx.send(bytes);
-                                        crate::emu_socket_log!("[UI] Sent packet: {}", trimmed);
-                                    }
+                                Ok(_bytes) => {
+                                    // 채널 기반 구조로 변경 후 브로드캐스트 송신 제거됨
+                                    crate::emu_socket_log!(
+                                        "[UI] Packet input disabled (channel mode): {}",
+                                        trimmed
+                                    );
                                 }
                                 Err(e) => {
                                     crate::emu_socket_log!("[UI] Hex Error: {}", e);
@@ -283,7 +309,7 @@ impl Painter for Debug {
         // TTF 폰트 초기화 (한글 지원)
         let ttf_font = TTF_FONT.get_or_init(|| {
             let data = FONT_DATA.get_or_init(|| {
-                let path = "Dotum.ttf";
+                let path = "gulim.ttf";
                 std::fs::read(path).unwrap_or_else(|_| Vec::new()).leak()
             });
             TtfFont::try_from_bytes(data).expect("Failed to load font")
@@ -498,7 +524,8 @@ impl Painter for Debug {
                 let current_count = crate::LOG_COUNT.load(std::sync::atomic::Ordering::Relaxed);
                 self.last_log_count = current_count;
 
-                let lines_to_show = (height as i32 - log_y_start) as usize / 13;
+                let remaining = (height as i32 - log_y_start).max(0) as usize;
+                let lines_to_show = remaining / 13;
                 let total_logs = b.len();
 
                 if total_logs < lines_to_show {
@@ -514,21 +541,18 @@ impl Painter for Debug {
                     + (lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13);
                 for line in b.iter().skip(start_idx).take(row_count) {
                     let text = line.clone();
-                    let no = if text.starts_with("[0x") {
-                        &text[1..9]
+                    let (no, message) = if text.starts_with("[0x") && text.len() >= 12 {
+                        (&text[1..9], format!("[             ] {}", &text[11..]))
                     } else {
-                        &text
-                    };
-                    let message = if text.starts_with("[0x") {
-                        format!("[             ] {}", &text[11..])
-                    } else {
-                        "".to_string()
+                        (text.as_str(), String::new())
                     };
 
                     let style = if message.contains("[!]") {
                         style_r.clone()
                     } else if message.contains("[*]") {
                         style_c.clone()
+                    } else if message.contains("_stricmp") {
+                        style_y.clone()
                     } else {
                         style_w.clone()
                     };

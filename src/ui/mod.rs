@@ -19,6 +19,10 @@ pub enum UiCommand {
         style: u32,
         /// 확장 스타일 (WS_EX_*)
         ex_style: u32,
+        /// 부모 HWND
+        parent: u32,
+        /// 초기 표시 여부
+        visible: bool,
         /// 표면 비트맵 핸들
         surface_bitmap: u32,
     },
@@ -51,10 +55,7 @@ pub enum UiCommand {
         response_tx: std::sync::mpsc::Sender<i32>,
     },
     /// 윈도우 커서 변경 요청
-    SetCursor {
-        hwnd: u32,
-        hcursor: u32,
-    },
+    SetCursor { hwnd: u32, hcursor: u32 },
 }
 
 /// 윈도우 콘텐츠를 그리는 인터페이스
@@ -74,6 +75,10 @@ pub trait Painter: std::any::Any {
         _event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> bool;
     fn tick(&mut self) -> bool;
+    /// 주기적으로 `tick()`을 호출해야 하는 경우 원하는 간격을 반환합니다.
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
@@ -84,9 +89,12 @@ use std::sync::mpsc::Receiver;
 pub fn run_ui(
     ui_rx: Receiver<UiCommand>,
     initial_painters: Vec<Box<dyn Painter>>,
-    context: crate::win32::Win32Context,
+    context: crate::dll::win32::Win32Context,
 ) {
-    let event_loop = winit::event_loop::EventLoop::new().unwrap();
+    let event_loop = winit::event_loop::EventLoop::<()>::with_user_event()
+        .build()
+        .unwrap();
+    win_event::WinEvent::install_wake_proxy(event_loop.create_proxy());
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 
     let mut app = win_frame::WinFrame::new(ui_rx, initial_painters, context);

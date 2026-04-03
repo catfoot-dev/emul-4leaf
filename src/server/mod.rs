@@ -1,219 +1,348 @@
 pub mod packet_logger;
 pub mod protocol;
 
+use std::collections::HashSet;
+
 use self::protocol::{ControlMessage, DNetPacket, ProtocolPacket};
-use std::sync::OnceLock;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
 
-/// 서버의 브로드캐스트 송신단
-pub static SERVER_TX: OnceLock<broadcast::Sender<Vec<u8>>> = OnceLock::new();
-
-#[tokio::main]
-pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "0.0.0.0:33000";
-    let listener = TcpListener::bind(addr).await?;
-    crate::emu_socket_log!("[*] Protocol-aware Server running on {}", addr);
-
-    let (tx, _rx) = broadcast::channel::<Vec<u8>>(10);
-    SERVER_TX.set(tx.clone()).ok();
+/// DNet 프로토콜 핸들러를 인-프로세스 스레드로 실행합니다.
+///
+/// `server_rx`: 게스트(에뮬레이터) → 핸들러 (게스트가 send()한 데이터)
+/// `server_tx`: 핸들러 → 게스트 (게스트가 recv()로 읽을 데이터)
+///
+/// 이 함수는 블로킹이며 `std::thread::spawn`으로 실행해야 합니다.
+pub fn run_dnet_handler(
+    server_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    server_tx: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+    let mut byte_buf: Vec<u8> = Vec::new();
+    let mut open_channels: HashSet<u16> = HashSet::new();
 
     loop {
-        let (socket, client_addr) = listener.accept().await?;
-        crate::emu_socket_log!("[*] New Client Connected: {}", client_addr);
+        // 데이터가 올 때까지 블로킹 대기
+        match server_rx.recv() {
+            Ok(chunk) => byte_buf.extend(chunk),
+            Err(_) => return, // 게스트 측 송신단(chan_tx)이 drop되면 종료
+        }
 
-        let mut rx = tx.subscribe();
-        let (reader, mut writer) = socket.into_split();
-        let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        // 버퍼에서 완전한 DNet 프레임을 모두 처리
+        loop {
+            if byte_buf.len() < 4 {
+                break; // 헤더 4바이트가 올 때까지 대기
+            }
 
-        // 서버는 초기 패킷을 먼저 보내지 않습니다.
-        // 클라이언트가 CTRL_OPEN(1) 제어 메시지로 채널 개방을 먼저 요청합니다.
-
-        // 1. 수신 및 프로토콜 처리 태스크
-        // DNet 전송 계층
-        //
-        // 헤더: [channel_id: u16 LE][body_len: u16 LE]
-        // ch=0: 제어 메시지 4B → [msg_type: u16 LE][target_channel_id: u16 LE]
-        // ch=1-15: 데이터 패킷 → [main_type: u8][sub_type: u8][payload...]
-        let mut buf_reader = BufReader::new(reader);
-        tokio::spawn(async move {
-            loop {
-                // 4바이트 DNet 헤더 읽기
-                let mut header = [0u8; 4];
-                match buf_reader.read_exact(&mut header).await {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        crate::emu_socket_log!("[*] Client Disconnected: {}", client_addr);
-                        break;
-                    }
-                    Err(e) => {
-                        crate::emu_socket_log!("[!] Header read error: {}", e);
-                        break;
-                    }
+            let header: [u8; 4] = byte_buf[..4].try_into().unwrap();
+            let (channel_id, body_len) = match DNetPacket::parse_header(&header) {
+                Some(v) => v,
+                None => {
+                    crate::emu_socket_log!("[DNet] Invalid header: {}", hex::encode(&header));
+                    return;
                 }
+            };
 
-                // 유효성 검사 (channel_id 0-15, body_len 0-0x1FFC, ch0→len==4)
-                let (channel_id, body_len) = match DNetPacket::parse_header(&header) {
-                    Some(v) => v,
+            let needed = 4 + body_len as usize;
+            if byte_buf.len() < needed {
+                break; // 본문이 모두 도착할 때까지 대기
+            }
+
+            // 헤더 + 본문을 버퍼에서 소비
+            let frame: Vec<u8> = byte_buf.drain(..needed).collect();
+            let body = &frame[4..];
+
+            // 채널별 라우팅
+            if channel_id == 0 {
+                // 채널 0: 제어 메시지 [msg_type: u16 LE][target_channel_id: u16 LE]
+                let ctrl = match ControlMessage::from_bytes(body) {
+                    Some(c) => c,
                     None => {
                         crate::emu_socket_log!(
-                            "[!] Invalid DNet header from {}: {}",
-                            client_addr,
-                            hex::encode(&header)
+                            "[DNet] Malformed control body: {}",
+                            hex::encode(body)
                         );
-                        break;
+                        return;
                     }
                 };
 
-                // body_len 바이트 본문 읽기
-                let mut body = vec![0u8; body_len as usize];
-                match buf_reader.read_exact(&mut body).await {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        crate::emu_socket_log!(
-                            "[*] Client Disconnected (mid-packet): {}",
-                            client_addr
-                        );
-                        break;
-                    }
-                    Err(e) => {
-                        crate::emu_socket_log!("[!] Body read error: {}", e);
-                        break;
-                    }
-                }
+                crate::emu_socket_log!(
+                    "[CTRL] msg={} target_ch={}",
+                    ctrl.msg_type,
+                    ctrl.channel_id
+                );
 
-                // 채널별 라우팅
-                if channel_id == 0 {
-                    // 채널 0: 제어 메시지 [msg_type: u16 LE][대상 채널: u16 LE]
-                    // SendControlMessage(this, msg, ch): HIWORD(a2)=채널번호, LOWORD(a2)=메시지타입
-                    let ctrl = match ControlMessage::from_bytes(&body) {
-                        Some(c) => c,
-                        None => {
+                let responses = match ctrl.msg_type {
+                    protocol::CTRL_OPEN => {
+                        if !is_supported_data_channel(ctrl.channel_id) {
                             crate::emu_socket_log!(
-                                "[!] Malformed control body: {}",
-                                hex::encode(&body)
+                                "[CTRL] Ch={} open request → unsupported, rejecting",
+                                ctrl.channel_id
                             );
-                            break;
-                        }
-                    };
-
-                    crate::emu_socket_log!(
-                        "[CTRL] msg={} target_ch={}",
-                        ctrl.msg_type,
-                        ctrl.channel_id
-                    );
-
-                    // 채널 상태 기계 (서버 측, TConnection::ProcessControlMessage 역공학)
-                    let resp = match ctrl.msg_type {
-                        protocol::CTRL_OPEN => {
-                            // 클라이언트가 채널 N 개방 요청
-                            // 서버는 LISTENING(1) 상태 → OPEN_ACK(2) 응답 + CONNECTED로 전환
+                            vec![protocol::create_control_message(
+                                protocol::CTRL_REJECT_OR_ABORT,
+                                ctrl.channel_id,
+                            )]
+                        } else if !open_channels.insert(ctrl.channel_id) {
+                            crate::emu_socket_log!(
+                                "[CTRL] Ch={} open request → already open, rejecting",
+                                ctrl.channel_id
+                            );
+                            vec![protocol::create_control_message(
+                                protocol::CTRL_REJECT_OR_ABORT,
+                                ctrl.channel_id,
+                            )]
+                        } else {
                             crate::emu_socket_log!(
                                 "[CTRL] Ch={} open request → accepting",
                                 ctrl.channel_id
                             );
-                            Some(protocol::create_control_message(
-                                protocol::CTRL_OPEN_ACK,
+                            vec![protocol::create_control_message(
+                                protocol::CTRL_OPEN_OK,
                                 ctrl.channel_id,
-                            ))
+                            )]
                         }
-                        protocol::CTRL_OPEN_ACK => {
-                            // 상대방이 채널 개방 확인 (서버 측 CONNECTING(0) 시나리오)
+                    }
+                    protocol::CTRL_OPEN_OK => {
+                        crate::emu_socket_log!("[CTRL] Ch={} open acknowledged", ctrl.channel_id);
+                        Vec::new()
+                    }
+                    protocol::CTRL_REJECT_OR_ABORT => {
+                        let was_open = open_channels.remove(&ctrl.channel_id);
+                        crate::emu_socket_log!(
+                            "[CTRL] Ch={} reject/abort received (was_open={})",
+                            ctrl.channel_id,
+                            was_open
+                        );
+                        Vec::new()
+                    }
+                    protocol::CTRL_CLOSE => {
+                        let was_open = open_channels.remove(&ctrl.channel_id);
+                        if was_open {
                             crate::emu_socket_log!(
-                                "[CTRL] Ch={} open acknowledged",
+                                "[CTRL] Ch={} close received → echoing close",
                                 ctrl.channel_id
                             );
-                            None
-                        }
-                        protocol::CTRL_CLOSE => {
-                            // 클라이언트가 채널 N 종료 요청
-                            // CONNECTED(2) 상태: OnClosed 처리 후 CLOSE_ACK(4) 전송
-                            crate::emu_socket_log!(
-                                "[CTRL] Ch={} close request → sending ack",
-                                ctrl.channel_id
-                            );
-                            Some(protocol::create_control_message(
-                                protocol::CTRL_CLOSE_ACK,
+                            vec![protocol::create_control_message(
+                                protocol::CTRL_CLOSE,
                                 ctrl.channel_id,
-                            ))
-                        }
-                        protocol::CTRL_CLOSE_ACK => {
-                            // 종료 확인 수신 (CLOSING(3) → 완전 종료)
-                            crate::emu_socket_log!("[CTRL] Ch={} fully closed", ctrl.channel_id);
-                            None
-                        }
-                        unknown => {
+                            )]
+                        } else {
                             crate::emu_socket_log!(
-                                "[CTRL] Unknown msg_type={} ch={}",
-                                unknown,
+                                "[CTRL] Ch={} close received on unopened channel → ignoring",
                                 ctrl.channel_id
                             );
+                            Vec::new()
+                        }
+                    }
+                    unknown => {
+                        crate::emu_socket_log!(
+                            "[CTRL] Unknown msg_type={} ch={}",
+                            unknown,
+                            ctrl.channel_id
+                        );
+                        Vec::new()
+                    }
+                };
+
+                for pkt in responses {
+                    if !send_wire(&server_tx, "CTRL", pkt) {
+                        crate::emu_socket_log!(
+                            "[DNet] Failed to send control response (guest disconnected)"
+                        );
+                        return;
+                    }
+                }
+            } else {
+                // 채널 1-15: 데이터 패킷 [main_type: u8][sub_type: u8][payload...]
+                if !is_supported_data_channel(channel_id) || !open_channels.contains(&channel_id) {
+                    crate::emu_socket_log!(
+                        "[DNet] App packet on unopened/unsupported ch={} → sending REJECT",
+                        channel_id
+                    );
+                    let reject = protocol::create_control_message(
+                        protocol::CTRL_REJECT_OR_ABORT,
+                        channel_id,
+                    );
+                    if !send_wire(&server_tx, "CTRL", reject) {
+                        crate::emu_socket_log!(
+                            "[DNet] Failed to send reject response (guest disconnected)"
+                        );
+                        return;
+                    }
+                } else if let Some(pkt) = ProtocolPacket::from_bytes(body) {
+                    crate::emu_socket_log!(
+                        "[RECV] ch={} main=0x{:02x} sub=0x{:02x} payload={}B {}",
+                        channel_id,
+                        pkt.main_type,
+                        pkt.sub_type,
+                        pkt.payload.len(),
+                        hex::encode(&pkt.payload)
+                    );
+                    let resp = match pkt.main_type {
+                        0x64 => handle_system(&pkt, channel_id),
+                        0x0B => handle_chat_town_main(&pkt, channel_id),
+                        0x0C => handle_chat_town_sub(&pkt, channel_id),
+                        other => {
+                            crate::emu_socket_log!("[WARN] 미구현 MainType=0x{:02x}", other);
                             None
                         }
                     };
-
-                    if let Some(pkt) = resp {
-                        crate::emu_socket_log!("[SEND] {}", protocol::hex_dump("CTRL", &pkt));
-                        if direct_tx.send(pkt).is_err() {
-                            crate::emu_socket_log!("[!] Failed to queue control response");
+                    if let Some(data) = resp {
+                        if !send_wire(&server_tx, "APP", data) {
+                            crate::emu_socket_log!(
+                                "[DNet] Failed to send app response (guest disconnected)"
+                            );
+                            return;
                         }
                     }
                 } else {
-                    // 채널 1-15: 데이터 패킷 [main_type: u8][sub_type: u8][payload...]
-                    // ProcessPacket: 채널이 CONNECTED(2) 상태여야 하며, 아닐 경우 CTRL_CLOSE(3) 전송
-                    if let Some(pkt) = ProtocolPacket::from_bytes(&body) {
+                    // 본문이 2바이트 미만이면 원본의 거절/중단 제어 메시지를 보냅니다.
+                    crate::emu_socket_log!(
+                        "[DNet] Malformed app body on ch={} → sending REJECT",
+                        channel_id
+                    );
+                    let reject = protocol::create_control_message(
+                        protocol::CTRL_REJECT_OR_ABORT,
+                        channel_id,
+                    );
+                    if !send_wire(&server_tx, "CTRL", reject) {
                         crate::emu_socket_log!(
-                            "[RECV] ch={} main=0x{:02x} sub=0x{:02x} payload={}B",
-                            channel_id,
-                            pkt.main_type,
-                            pkt.sub_type,
-                            pkt.payload.len()
+                            "[DNet] Failed to send reject response (guest disconnected)"
                         );
-                        if pkt.main_type == 0x0b {
-                            crate::emu_socket_log!("[*] ChatTown (sub=0x{:02x})", pkt.sub_type);
-                        }
-                    } else {
-                        // 채널이 없거나 연결 안 됨 → CTRL_CLOSE(3) 전송 (ProcessPacket 동작)
-                        crate::emu_socket_log!(
-                            "[!] No handler for ch={} from {} → sending CLOSE",
-                            channel_id,
-                            client_addr
-                        );
-                        let close =
-                            protocol::create_control_message(protocol::CTRL_CLOSE, channel_id);
-                        direct_tx.send(close).ok();
+                        return;
                     }
                 }
             }
-        });
+        }
+    }
+}
 
-        // 2. 송신 태스크 (직접 응답 + 브로드캐스트)
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    Some(msg) = direct_rx.recv() => {
-                        crate::emu_socket_log!("[SEND] {}", protocol::hex_dump("Pkt", &msg));
-                        if let Err(e) = writer.write_all(&msg).await {
-                            crate::emu_socket_log!("[!] Failed to write direct response: {}", e);
-                            break;
-                        }
-                    }
-                    res = rx.recv() => {
-                        match res {
-                            Ok(msg) => {
-                                crate::emu_socket_log!("[SEND] {}", protocol::hex_dump("Bcast", &msg));
-                                if let Err(e) = writer.write_all(&msg).await {
-                                    crate::emu_socket_log!("[!] Failed to write broadcast message: {}", e);
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-            }
-        });
+// =========================================================
+// MainType별 핸들러
+// =========================================================
+
+/// MainType 0x64 — 공통 시스템 메시지 (버전 핸드셰이크, 로그인 등)를 처리합니다.
+fn handle_system(pkt: &ProtocolPacket, ch: u16) -> Option<Vec<u8>> {
+    match pkt.sub_type {
+        0x01 => {
+            // 버전 확인 요청 → 프로토콜 버전 54로 응답
+            crate::emu_socket_log!("[SYS] 버전 핸드셰이크 요청 → 버전 54 응답");
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&protocol::write_u32(54));
+            Some(protocol::create_app_packet(ch, 0x64, 0x01, &payload))
+        }
+        0x02 => {
+            // 로그인 요청 → result=0 (성공) 응답
+            crate::emu_socket_log!("[SYS] 로그인 요청 → 성공 응답");
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&protocol::write_u32(0));
+            Some(protocol::create_app_packet(ch, 0x64, 0x02, &payload))
+        }
+        sub => {
+            crate::emu_socket_log!(
+                "[SYS] 미구현 sub=0x{:02x} payload={}",
+                sub,
+                hex::encode(&pkt.payload)
+            );
+            None
+        }
+    }
+}
+
+/// MainType 0x0B — ChatTown Main (입장, 퇴장, 월드 로직)을 처리합니다.
+fn handle_chat_town_main(pkt: &ProtocolPacket, _ch: u16) -> Option<Vec<u8>> {
+    crate::emu_socket_log!(
+        "[ChatTown Main] sub=0x{:02x} payload={}",
+        pkt.sub_type,
+        hex::encode(&pkt.payload)
+    );
+    // TODO: 패킷 로그 분석 후 sub_type별 응답 구현
+    None
+}
+
+/// MainType 0x0C — ChatTown Sub (대화, 액션, 아이템 사용)을 처리합니다.
+fn handle_chat_town_sub(pkt: &ProtocolPacket, _ch: u16) -> Option<Vec<u8>> {
+    crate::emu_socket_log!(
+        "[ChatTown Sub] sub=0x{:02x} payload={}",
+        pkt.sub_type,
+        hex::encode(&pkt.payload)
+    );
+    // TODO: 채팅 메시지 에코 등 구현 예정
+    None
+}
+
+fn is_supported_data_channel(channel_id: u16) -> bool {
+    (1..=14).contains(&channel_id)
+}
+
+fn send_wire(server_tx: &std::sync::mpsc::Sender<Vec<u8>>, label: &str, data: Vec<u8>) -> bool {
+    crate::emu_socket_log!("[SEND] {}", protocol::hex_dump(label, &data));
+    server_tx.send(data).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn handler_does_not_send_app_data_before_client_opens_a_channel() {
+        let (to_handler_tx, to_handler_rx) = mpsc::channel();
+        let (from_handler_tx, from_handler_rx) = mpsc::channel();
+        let handle = thread::spawn(move || run_dnet_handler(to_handler_rx, from_handler_tx));
+
+        let timeout = from_handler_rx.recv_timeout(Duration::from_millis(100));
+        assert!(timeout.is_err());
+
+        drop(to_handler_tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn handler_acknowledges_open_without_sending_extra_app_data() {
+        let (to_handler_tx, to_handler_rx) = mpsc::channel();
+        let (from_handler_tx, from_handler_rx) = mpsc::channel();
+        let handle = thread::spawn(move || run_dnet_handler(to_handler_rx, from_handler_tx));
+
+        to_handler_tx
+            .send(protocol::create_control_message(protocol::CTRL_OPEN, 1))
+            .unwrap();
+
+        let open_ok = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(
+            open_ok,
+            protocol::create_control_message(protocol::CTRL_OPEN_OK, 1)
+        );
+        let timeout = from_handler_rx.recv_timeout(Duration::from_millis(100));
+        assert!(timeout.is_err());
+
+        drop(to_handler_tx);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn handler_rejects_app_packets_on_unopened_channel() {
+        let (to_handler_tx, to_handler_rx) = mpsc::channel();
+        let (from_handler_tx, from_handler_rx) = mpsc::channel();
+        let handle = thread::spawn(move || run_dnet_handler(to_handler_rx, from_handler_tx));
+
+        to_handler_tx
+            .send(protocol::create_app_packet(2, 0x64, 0x01, &[]))
+            .unwrap();
+
+        let reject = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            reject,
+            protocol::create_control_message(protocol::CTRL_REJECT_OR_ABORT, 2)
+        );
+
+        drop(to_handler_tx);
+        handle.join().unwrap();
     }
 }

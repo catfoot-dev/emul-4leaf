@@ -1,4 +1,7 @@
+use std::collections::VecDeque;
 use std::time::Instant;
+
+const MAX_PACKET_HISTORY: usize = 4096;
 
 /// 패킷 송신/수신 방향을 나타냄
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,7 +28,7 @@ pub struct CapturedPacket {
 /// 에뮬레이터 내 TCP/UDP 통신을 캡처하여 시간, 방향, 내용을 기록하고 관리하는 모듈
 pub struct PacketLogger {
     start_time: Instant,
-    packets: Vec<CapturedPacket>,
+    packets: VecDeque<CapturedPacket>,
     pub enabled: bool,
 }
 
@@ -34,8 +37,8 @@ impl PacketLogger {
     pub fn new() -> Self {
         PacketLogger {
             start_time: Instant::now(),
-            packets: Vec::new(),
-            enabled: true,
+            packets: VecDeque::new(),
+            enabled: crate::debug::should_send_debug_messages(),
         }
     }
 
@@ -51,56 +54,47 @@ impl PacketLogger {
         }
 
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
-        let dir_str = match direction {
-            PacketDirection::Send => "SEND",
-            PacketDirection::Recv => "RECV",
-        };
+        if crate::debug::should_send_debug_messages() {
+            let dir_str = match direction {
+                PacketDirection::Send => "SEND",
+                PacketDirection::Recv => "RECV",
+            };
 
-        // Hex dump
-        let hex = data
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
+            // 디버그 창이 열려 있을 때만 16진수/ASCII 덤프를 생성해 핫패스 비용을 줄입니다.
+            let hex = data
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ascii: String = data
+                .iter()
+                .map(|&b| {
+                    if (0x20..=0x7e).contains(&b) {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
 
-        // ASCII dump (printable characters only)
-        let ascii: String = data
-            .iter()
-            .map(|&b| {
-                if (0x20..=0x7e).contains(&b) {
-                    b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-
-        println!(
-            "[PACKET][{}] t={:>8}ms | sock={:>5} | len={:>5} | {}",
-            dir_str,
-            timestamp_ms,
-            socket_id,
-            data.len(),
-            hex
-        );
-        if !data.is_empty() {
-            println!("[PACKET][{}] ASCII: {}", dir_str, ascii);
-        }
-        // 소켓 전용 로그 버퍼에도 기록
-        crate::emu_socket_log!(
-            "[{}] t={}ms sock={} len={} | {}",
-            dir_str,
-            timestamp_ms,
-            socket_id,
-            data.len(),
-            hex
-        );
-        if !data.is_empty() {
-            crate::emu_socket_log!("  ASCII: {}", ascii);
+            crate::emu_socket_log!(
+                "[{}] t={}ms sock={} len={} | {}",
+                dir_str,
+                timestamp_ms,
+                socket_id,
+                data.len(),
+                hex
+            );
+            if !data.is_empty() {
+                crate::emu_socket_log!("  ASCII: {}", ascii);
+            }
         }
 
-        // 캡처 저장
-        self.packets.push(CapturedPacket {
+        // 캡처 이력은 고정 크기로 유지해 장시간 실행 시 메모리 사용량이 계속 커지지 않게 합니다.
+        if self.packets.len() >= MAX_PACKET_HISTORY {
+            self.packets.pop_front();
+        }
+        self.packets.push_back(CapturedPacket {
             timestamp_ms,
             direction,
             socket_id,
@@ -114,7 +108,7 @@ impl PacketLogger {
     }
 
     /// 현재 캡처된 모든 패킷 데이터의 읽기 전용 슬라이스를 반환
-    pub fn get_packets(&self) -> &[CapturedPacket] {
+    pub fn get_packets(&self) -> &VecDeque<CapturedPacket> {
         &self.packets
     }
 
@@ -140,5 +134,32 @@ impl PacketLogger {
         );
         println!("Total bytes: {}", total_bytes);
         println!("======================\n");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_history_is_capped() {
+        let mut logger = PacketLogger::new();
+        logger.enabled = true;
+
+        for i in 0..(MAX_PACKET_HISTORY + 8) {
+            logger.log(PacketDirection::Recv, i as u32, &[1, 2, 3]);
+        }
+
+        assert_eq!(logger.packet_count(), MAX_PACKET_HISTORY);
+        assert_eq!(logger.get_packets().front().unwrap().socket_id, 8);
+    }
+
+    #[test]
+    fn disabled_logger_does_not_store_packets() {
+        let mut logger = PacketLogger::new();
+        logger.enabled = false;
+        logger.log(PacketDirection::Send, 1, &[0xaa]);
+
+        assert_eq!(logger.packet_count(), 0);
     }
 }

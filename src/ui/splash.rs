@@ -1,3 +1,5 @@
+use std::thread;
+
 use goblin::pe::PE;
 
 pub fn load_splash_data(path: &str) -> Option<(Vec<u32>, u32, u32)> {
@@ -284,10 +286,19 @@ impl crate::ui::Painter for SplashPainter {
 
     fn tick(&mut self) -> bool {
         if !self.should_close && self.receiver.try_recv().is_ok() {
+            thread::sleep(std::time::Duration::from_secs(1));
             self.should_close = true;
             return true;
         }
         false
+    }
+
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        if self.should_close {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(10))
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

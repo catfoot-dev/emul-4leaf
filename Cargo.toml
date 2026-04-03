@@ -3,18 +3,26 @@ name = "emul-4leaf"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 chardetng = "0.1"
 encoding_rs = "0.8"
 hex = "0.4"
-unicorn-engine = "2.0"
+unicorn-engine = "2.1.5"
 goblin = "0.10"
 anyhow = "1.0"
+cpal = "0.17.3"
 winit = "0.30"
 softbuffer = "0.4"
 embedded-graphics = "0.8"
-embedded-ttf = "0.2"
+embedded-ttf = { path = "vendor/embedded-ttf" }
 rusttype = "0.9"
 chrono = "0.4"
 rfd = "0.17"
