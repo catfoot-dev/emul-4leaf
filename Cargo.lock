@@ -576,6 +576,8 @@ dependencies = [
 [[package]]
 name = "embedded-ttf"
 version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d26f0f428d9393d6c533d8a94bf0aadf7357991c5f5fd073c03adf938a25553"
 dependencies = [
  "embedded-graphics",
  "num-traits",
