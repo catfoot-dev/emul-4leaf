@@ -316,24 +316,20 @@ impl Painter for Debug {
         });
 
         let style_w = FontTextStyleBuilder::new(ttf_font.clone())
-            .font_size(12)
+            .font_size(18)
             .text_color(Rgb888::WHITE)
-            .anti_aliasing_color(Rgb888::BLACK)
             .build();
         let style_r = FontTextStyleBuilder::new(ttf_font.clone())
-            .font_size(12)
+            .font_size(18)
             .text_color(Rgb888::RED)
-            .anti_aliasing_color(Rgb888::BLACK)
             .build();
         let style_y = FontTextStyleBuilder::new(ttf_font.clone())
-            .font_size(12)
+            .font_size(18)
             .text_color(Rgb888::YELLOW)
-            .anti_aliasing_color(Rgb888::BLACK)
             .build();
         let style_c = FontTextStyleBuilder::new(ttf_font.clone())
-            .font_size(12)
+            .font_size(18)
             .text_color(Rgb888::CYAN)
-            .anti_aliasing_color(Rgb888::BLACK)
             .build();
 
         // === GUI: Header (Mode & Shortcuts) ===
@@ -344,9 +340,8 @@ impl Painter for Debug {
         };
         let mode_color = if self.auto_running {
             FontTextStyleBuilder::new(ttf_font.clone())
-                .font_size(12)
+                .font_size(18)
                 .text_color(Rgb888::new(0, 255, 128))
-                .anti_aliasing_color(Rgb888::BLACK)
                 .build()
         } else {
             style_y.clone()
@@ -357,14 +352,14 @@ impl Painter for Debug {
                 "Mode: {}  |  F5: Run/Pause  |  F10: Step  |  Toggles: [S]tate [K]Socket [L]Log  |  ESC: Quit",
                 mode_str
             ),
-            Point::new(10, 15),
+            Point::new(3, 3),
             mode_color,
         )
         .draw(&mut display)
         .ok();
 
         // === 동적 레이아웃 계산 ===
-        let header_h = 30i32;
+        let header_h = 22i32;
         let usable_h = height as i32 - header_h;
         let active_panels =
             (self.show_stack as i32) + (self.show_socket_log as i32) + (self.show_log as i32);
@@ -379,23 +374,19 @@ impl Painter for Debug {
         // === GUI: CPU State (Registers & Stack) ===
         if self.show_stack {
             // 구분선
-            for x in 10..width.saturating_sub(10) {
-                Pixel(Point::new(x as i32, current_y), Rgb888::new(80, 80, 40))
+            for x in 3..width.saturating_sub(3) {
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(60, 120, 60))
                     .draw(&mut display)
                     .ok();
             }
-            current_y += 10;
+            current_y += 2;
 
             if let Some(state) = self.cpu_state.as_ref() {
                 // 레지스터 출력
                 let reg_names = [
                     "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP",
                 ];
-                let mut reg_y = current_y + 10;
-                Text::new("REGISTERS", Point::new(10, reg_y), style_y.clone())
-                    .draw(&mut display)
-                    .ok();
-                reg_y += 15;
+                let mut reg_y = current_y + 3;
 
                 for (i, val) in state.regs.iter().enumerate() {
                     let style = if i == 8 {
@@ -404,38 +395,26 @@ impl Painter for Debug {
                         style_w.clone()
                     };
                     let text = format!("{}: 0x{:08x}", reg_names[i], val);
-                    Text::new(&text, Point::new(10, reg_y), style)
+                    Text::new(&text, Point::new(3, reg_y), style)
                         .draw(&mut display)
                         .ok();
-                    reg_y += 13;
-                    if reg_y > current_y + panel_h - 20 {
+                    reg_y += 16;
+                    if reg_y > current_y + panel_h - 10 {
                         break;
                     }
                 }
 
                 // 다음 명령어
-                reg_y += 10;
-                if reg_y < current_y + panel_h - 15 {
-                    Text::new("NEXT OP:", Point::new(10, reg_y), style_y.clone())
-                        .draw(&mut display)
-                        .ok();
-                    reg_y += 15;
-                    Text::new(&state.next_instr, Point::new(10, reg_y), style_c.clone())
+                reg_y += 23;
+                if reg_y < current_y + panel_h - 20 {
+                    Text::new(&state.next_instr, Point::new(3, reg_y), style_c.clone())
                         .draw(&mut display)
                         .ok();
                 }
 
                 // 스택 뷰 (오른쪽)
                 let stack_x = 200;
-                let mut stack_y = current_y + 10;
-                Text::new(
-                    "STACK (TOP 10)",
-                    Point::new(stack_x, stack_y),
-                    style_y.clone(),
-                )
-                .draw(&mut display)
-                .ok();
-                stack_y += 15;
+                let mut stack_y = current_y + 2;
 
                 for (addr, val) in &state.stack {
                     let mark = if *addr == state.regs[7] { "<- ESP" } else { "" };
@@ -443,15 +422,15 @@ impl Painter for Debug {
                     Text::new(&text, Point::new(stack_x, stack_y), style_w.clone())
                         .draw(&mut display)
                         .ok();
-                    stack_y += 13;
-                    if stack_y > current_y + panel_h - 15 {
+                    stack_y += 16;
+                    if stack_y > current_y + panel_h - 10 {
                         break;
                     }
                 }
             } else {
                 Text::new(
                     "Waiting for CPU state...",
-                    Point::new(10, current_y + 10),
+                    Point::new(3, current_y + 3),
                     style_w.clone(),
                 )
                 .draw(&mut display)
@@ -463,35 +442,34 @@ impl Painter for Debug {
         // === GUI: Socket Log Panel ===
         if self.show_socket_log {
             // 구분선
-            for x in 10..width.saturating_sub(10) {
+            for x in 3..width.saturating_sub(3) {
                 Pixel(Point::new(x as i32, current_y), Rgb888::new(60, 120, 60))
                     .draw(&mut display)
                     .ok();
             }
-            current_y += 10;
+            current_y += 3;
 
             let style_g = FontTextStyleBuilder::new(ttf_font.clone())
-                .font_size(12)
+                .font_size(18)
                 .text_color(Rgb888::new(100, 255, 100))
-                .anti_aliasing_color(Rgb888::BLACK)
                 .build();
 
-            Text::new("SOCKET LOG", Point::new(10, current_y), style_y.clone())
+            Text::new("SOCKET LOG", Point::new(3, current_y), style_y.clone())
                 .draw(&mut display)
                 .ok();
 
             let socket_content_h = panel_h - 40; // 제목 + 입력란 제외 높이
-            let socket_lines_max = (socket_content_h / 13).max(1) as usize;
+            let socket_lines_max = (socket_content_h / 18).max(1) as usize;
             if let Some(buf) = crate::SOCKET_LOG_BUFFER.get() {
                 if let Ok(b) = buf.try_lock() {
                     let total = b.len();
                     let start = total.saturating_sub(socket_lines_max);
-                    let mut sy = current_y + 15;
+                    let mut sy = current_y + 18;
                     for line in b.iter().skip(start) {
-                        Text::new(line, Point::new(10, sy), style_g.clone())
+                        Text::new(line, Point::new(3, sy), style_g.clone())
                             .draw(&mut display)
                             .ok();
-                        sy += 13;
+                        sy += 18;
                     }
                 }
             }
@@ -499,7 +477,7 @@ impl Painter for Debug {
             // 입력 버퍼 표시
             Text::new(
                 &format!("Input: {}", self.input_buffer),
-                Point::new(10, current_y + socket_content_h + 15),
+                Point::new(3, current_y + socket_content_h + 16),
                 style_y.clone(),
             )
             .draw(&mut display)
@@ -511,12 +489,12 @@ impl Painter for Debug {
         // === GUI: Log Box ===
         if self.show_log {
             // 구분선
-            for x in 10..width.saturating_sub(10) {
-                Pixel(Point::new(x as i32, current_y), Rgb888::new(100, 100, 100))
+            for x in 3..width.saturating_sub(3) {
+                Pixel(Point::new(x as i32, current_y), Rgb888::new(60, 120, 60))
                     .draw(&mut display)
                     .ok();
             }
-            let log_y_start = current_y + 5;
+            let log_y_start = current_y + 3;
 
             if let Some(buf) = crate::LOG_BUFFER.get()
                 && let Ok(b) = buf.try_lock()
@@ -525,7 +503,7 @@ impl Painter for Debug {
                 self.last_log_count = current_count;
 
                 let remaining = (height as i32 - log_y_start).max(0) as usize;
-                let lines_to_show = remaining / 13;
+                let lines_to_show = remaining / 18;
                 let total_logs = b.len();
 
                 if total_logs < lines_to_show {
@@ -538,7 +516,7 @@ impl Painter for Debug {
                 let row_count = end_idx - start_idx;
 
                 let mut log_y = log_y_start
-                    + (lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 13);
+                    + (lines_to_show.saturating_sub(row_count).min(lines_to_show) as i32 * 18);
                 for line in b.iter().skip(start_idx).take(row_count) {
                     let text = line.clone();
                     let (no, message) = if text.starts_with("[0x") && text.len() >= 12 {
@@ -557,13 +535,13 @@ impl Painter for Debug {
                         style_w.clone()
                     };
 
-                    Text::new(&message, Point::new(10, log_y), style)
+                    Text::new(&message, Point::new(3, log_y), style)
                         .draw(&mut display)
                         .ok();
-                    Text::new(&no, Point::new(14, log_y), style_w.clone())
+                    Text::new(&no, Point::new(9, log_y), style_w.clone())
                         .draw(&mut display)
                         .ok();
-                    log_y += 13;
+                    log_y += 18;
                 }
             }
         }

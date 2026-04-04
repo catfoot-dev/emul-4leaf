@@ -17,9 +17,14 @@ use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
 use std::{
     any::Any,
     env,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
     sync::mpsc::{Receiver, Sender, channel},
     thread,
 };
+
+const CAPTURE_DIR: &str = "./docs/Capture";
 
 /// UI 스레드와 로그 출력 스레드 간 동기화를 위한 전역 로그 큐 형태의 버퍼입니다.
 pub static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
@@ -41,6 +46,10 @@ pub static INDEX: AtomicUsize = AtomicUsize::new(0);
 /// # 인자
 /// * `msg`: 추가할 로그 텍스트
 pub fn push_log(msg: String) {
+    if !msg.is_empty() {
+        append_capture_line("emu.log", &format!("[EMU] {}", msg));
+    }
+
     if !crate::debug::should_send_debug_messages() {
         return;
     }
@@ -60,11 +69,53 @@ pub fn push_log(msg: String) {
 
 /// 에뮬레이터 구동을 위한 전역 로거 및 버퍼들을 초기화합니다.
 pub fn init_logger() {
-    if !crate::debug::should_send_debug_messages() {
+    reset_capture_file("emu.log");
+    reset_capture_file("socket.log");
+    reset_capture_file("packets.log");
+    reset_capture_file("frames.log");
+    reset_capture_file("protocol_analysis.log");
+
+    if crate::debug::should_send_debug_messages() {
+        let _ = LOG_BUFFER.set(Mutex::new(VecDeque::new()));
+        let _ = SOCKET_LOG_BUFFER.set(Mutex::new(VecDeque::new()));
+    }
+}
+
+/// 현재 실행에서 캡처 파일을 기록할지 여부를 결정합니다.
+pub(crate) fn should_write_capture_files() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    crate::debug::should_send_debug_messages()
+        || env::var("EMUL_CAPTURE").ok().as_deref() == Some("1")
+}
+
+/// 캡처 파일 하나를 비우고 새 세션용으로 초기화합니다.
+pub(crate) fn reset_capture_file(file_name: &str) {
+    if !should_write_capture_files() {
         return;
     }
-    let _ = LOG_BUFFER.set(Mutex::new(VecDeque::new()));
-    let _ = SOCKET_LOG_BUFFER.set(Mutex::new(VecDeque::new()));
+
+    let _ = fs::create_dir_all(CAPTURE_DIR);
+    let path = Path::new(CAPTURE_DIR).join(file_name);
+    let _ = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path);
+}
+
+/// 캡처 디렉터리의 지정된 파일 끝에 한 줄을 추가합니다.
+pub(crate) fn append_capture_line(file_name: &str, line: &str) {
+    if !should_write_capture_files() {
+        return;
+    }
+
+    let _ = fs::create_dir_all(CAPTURE_DIR);
+    let path = Path::new(CAPTURE_DIR).join(file_name);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", line);
+    }
 }
 
 /// 소켓 전용 로그 버퍼에 메시지를 추가합니다. 최대 200줄까지 유지됩니다.
@@ -72,6 +123,10 @@ pub fn init_logger() {
 /// # 인자
 /// * `msg`: 추가할 소켓 로그 텍스트
 pub fn push_socket_log(msg: String) {
+    if !msg.is_empty() {
+        append_capture_line("socket.log", &msg);
+    }
+
     if !crate::debug::should_send_debug_messages() {
         return;
     }
@@ -102,9 +157,9 @@ macro_rules! emu_log {
         if $crate::debug::should_send_debug_messages() {
             let index = $crate::INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let msg = std::format!("[{:#08x}] {}", index, std::format!($($arg)*)).replace("\r", "\\r").replace("\n", "\\n");
-            if msg.contains("[UI]") || msg.contains("CreateWindowExA") {
+            // if msg.contains("[UI]") || msg.contains("CreateWindowExA") {
                 $crate::push_log(msg)
-            }
+            // }
         }
     }};
 }
@@ -138,8 +193,16 @@ use crate::ui::UiCommand;
 /// 하위 시스템(로그, 에뮬레이션, 서버, UI)들을 초기화하고 실행합니다.
 fn main() {
     init_logger();
+    append_capture_line("emu.log", "[BOOT] main() entered");
     let headless_mode = env::var("EMUL_HEADLESS").ok().as_deref() == Some("1");
     let debug_window_enabled = crate::debug::should_create_debug_window();
+    append_capture_line(
+        "emu.log",
+        &format!(
+            "[BOOT] headless_mode={} debug_window_enabled={}",
+            headless_mode, debug_window_enabled
+        ),
+    );
 
     // 스레드 간 통신을 위한 채널 설정
     let (cmd_tx, cmd_rx) = channel::<DebugCommand>();
@@ -151,15 +214,22 @@ fn main() {
     let context = Win32Context::new(Some(ui_tx.clone()));
 
     if headless_mode {
+        append_capture_line("emu.log", "[BOOT] entering headless emu_4leaf()");
         if let Err(e) = emu_4leaf(None, None, ui_tx, context, splash_tx) {
+            append_capture_line(
+                "emu.log",
+                &format!("[BOOT] headless emu_4leaf error: {:?}", e),
+            );
             eprintln!("[4leaf Emulator Error] {:?}", e);
         }
+        append_capture_line("emu.log", "[BOOT] headless emu_4leaf() returned");
         return;
     }
 
     let context_for_emu = context.clone();
     // 1. 에뮬레이션 코어 스레드 실행
     thread::spawn(move || {
+        append_capture_line("emu.log", "[BOOT] emulation thread started");
         if let Err(e) = emu_4leaf(
             (!headless_mode && debug_window_enabled).then_some(state_tx),
             (!headless_mode && debug_window_enabled).then_some(cmd_rx),
@@ -167,8 +237,13 @@ fn main() {
             context_for_emu,
             splash_tx,
         ) {
+            append_capture_line(
+                "emu.log",
+                &format!("[BOOT] emulation thread error: {:?}", e),
+            );
             eprintln!("[4leaf Emulator Error] {:?}", e);
         }
+        append_capture_line("emu.log", "[BOOT] emulation thread finished");
     });
 
     // 2. UI 렌더러 준비 (스플래시 화면 및 디버그 창)
@@ -208,15 +283,23 @@ fn emu_4leaf(
     context: Win32Context,
     splash_tx: Sender<()>,
 ) -> Result<(), ()> {
+    append_capture_line("emu.log", "[BOOT] emu_4leaf() creating Unicorn");
     let mut unicorn = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, context)
         .expect("Failed to create the Unicorn instance");
+    append_capture_line("emu.log", "[BOOT] emu_4leaf() Unicorn ready");
 
     // 기본 훅 및 상태 전달 설정
+    append_capture_line("emu.log", "[BOOT] emu_4leaf() setup begin");
     unicorn.setup(None, None).map_err(|e| {
         crate::emu_log!("[!] Infrastructure setup failed: {:?}", e);
     })?;
+    append_capture_line("emu.log", "[BOOT] emu_4leaf() setup done");
 
     // Rare.dll은 호스트 프록시로 처리하므로 모듈 메타데이터만 선등록합니다.
+    append_capture_line(
+        "emu.log",
+        "[BOOT] emu_4leaf() registering Rare.dll metadata",
+    );
     unicorn.get_data().dll_modules.lock().unwrap().insert(
         "Rare.dll".to_string(),
         LoadedDll {
@@ -239,6 +322,10 @@ fn emu_4leaf(
 
     for (dll_name, target_base) in dll_list {
         let filename = format!("Resources/{}", dll_name);
+        append_capture_line(
+            "emu.log",
+            &format!("[BOOT] loading {} at {:#x}", dll_name, target_base),
+        );
 
         crate::emu_log!("[*] Loading {} at {:#x}...", dll_name, target_base);
 
@@ -248,24 +335,32 @@ fn emu_4leaf(
             .map_err(|_| {
                 crate::emu_log!("[!] Critical: Failed to load {}", dll_name);
             })?;
+        append_capture_line("emu.log", &format!("[BOOT] {} loaded", dll_name));
 
         // 2. IAT(Import Address Table) 해결
         unicorn.resolve_imports(&loaded_dll).map_err(|_| {
             crate::emu_log!("[!] Critical: Failed to resolve imports for {}", dll_name);
         })?;
+        append_capture_line("emu.log", &format!("[BOOT] {} imports resolved", dll_name));
 
         // 3. DllMain 실행
         unicorn.run_dll_entry(&loaded_dll).map_err(|_| {
             crate::emu_log!("[!] Critical: DllMain failed for {}", dll_name);
         })?;
+        append_capture_line("emu.log", &format!("[BOOT] {} DllMain completed", dll_name));
     }
 
     // 모든 자격 증명이 로드되었음을 알리고 스플래시 창 종료 유도
     let _ = splash_tx.send(());
     crate::ui::win_event::WinEvent::notify_wakeup();
+    append_capture_line(
+        "emu.log",
+        "[BOOT] all DLLs initialized, entering 4Leaf main",
+    );
 
     // 4Leaf 메인 루틴 실행
     run_4leaf_main(&mut unicorn, state_tx, cmd_rx);
+    append_capture_line("emu.log", "[BOOT] 4Leaf main returned");
 
     Ok(())
 }
@@ -290,5 +385,7 @@ fn run_4leaf_main(
         Box::new("127.0.0.1"),
     ];
 
+    append_capture_line("emu.log", "[BOOT] invoking 4Leaf.dll!Main");
     uc.run_emulator(dll_name, func_name, args, state_tx, cmd_rx);
+    append_capture_line("emu.log", "[BOOT] 4Leaf.dll!Main finished");
 }

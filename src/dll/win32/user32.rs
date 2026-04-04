@@ -558,12 +558,12 @@ impl USER32 {
         let hwnd = uc.read_arg(0);
         let n_cmd_show = uc.read_arg(1);
         // SW_HIDE = 0, 그 외는 대부분 표시
-        let visible = n_cmd_show != 0;
-        uc.get_data()
-            .win_event
-            .lock()
-            .unwrap()
-            .show_window(hwnd, visible);
+        // let visible = n_cmd_show != 0;
+        // uc.get_data()
+        //     .win_event
+        //     .lock()
+        //     .unwrap()
+        //     .show_window(hwnd, visible);
         crate::emu_log!(
             "[USER32] ShowWindow({:#x}, {:#x}) -> BOOL 1",
             hwnd,

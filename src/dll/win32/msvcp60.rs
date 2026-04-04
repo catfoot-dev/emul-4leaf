@@ -2,6 +2,10 @@ use crate::{
     dll::win32::{ApiHookResult, StackCleanup, Win32Context},
     helper::UnicornHelper,
 };
+use std::{
+    fs::OpenOptions,
+    io::{Read, Seek, SeekFrom, Write},
+};
 use unicorn_engine::{RegisterX86, Unicorn};
 
 const BASIC_STRING_PTR_OFFSET: u64 = 4;
@@ -19,6 +23,8 @@ const STREAMBUF_READ_POS_OFFSET: u64 = 12;
 const STREAMBUF_WRITE_POS_OFFSET: u64 = 16;
 const STREAMBUF_LOCALE_OFFSET: u64 = 20;
 const STREAMBUF_LAST_CHAR_OFFSET: u64 = 24;
+const STREAMBUF_FILE_HANDLE_OFFSET: u64 = 28;
+const STREAMBUF_FILE_MODE_OFFSET: u64 = 32;
 
 const FACET_REFCOUNT_OFFSET: u64 = 4;
 
@@ -26,12 +32,14 @@ const STREAM_OBJECT_SIZE: usize = 0x80;
 const STREAMBUF_OBJECT_SIZE: usize = 0x40;
 const LOCALE_OBJECT_SIZE: usize = 0x10;
 const LOCIMP_OBJECT_SIZE: usize = 0x20;
+const STREAMBUF_HOST_BUFFER_SIZE: usize = 0x400;
 
 const EMPTY_STRING_CACHE_KEY: &str = "$internal_empty_cstr";
 const LOCALE_IMPL_CACHE_KEY: &str = "$internal_locale_locimp";
 const LOCALE_VALUE_CACHE_KEY: &str = "$internal_locale_value";
 
 const BASIC_STREAMBUF_VTABLE: &str = "??_7?$basic_streambuf@DU?$char_traits@D@std@@@std@@6B@";
+const BASIC_FILEBUF_VTABLE: &str = "??_7?$basic_filebuf@DU?$char_traits@D@std@@@std@@6B@";
 const BASIC_OSTREAM_VTABLE: &str = "??_7?$basic_ostream@DU?$char_traits@D@std@@@std@@6B@";
 const BASIC_ISTREAM_VTABLE: &str = "??_7?$basic_istream@DU?$char_traits@D@std@@@std@@6B@";
 const BASIC_IOSTREAM_VTABLE: &str = "??_7?$basic_iostream@DU?$char_traits@D@std@@@std@@6B@";
@@ -160,6 +168,27 @@ impl MSVCP60 {
         uc.write_u32(this_ptr as u64 + STREAMBUF_WRITE_POS_OFFSET, 0);
         uc.write_u32(this_ptr as u64 + STREAMBUF_LOCALE_OFFSET, locale_addr);
         uc.write_u32(this_ptr as u64 + STREAMBUF_LAST_CHAR_OFFSET, u32::MAX);
+        uc.write_u32(this_ptr as u64 + STREAMBUF_FILE_HANDLE_OFFSET, 0);
+        uc.write_u32(this_ptr as u64 + STREAMBUF_FILE_MODE_OFFSET, 0);
+    }
+
+    fn init_filebuf_layout(
+        uc: &mut Unicorn<Win32Context>,
+        this_ptr: u32,
+        file_handle: u32,
+        mode: u32,
+    ) {
+        Self::init_streambuf_layout(uc, this_ptr, BASIC_FILEBUF_VTABLE);
+        let buffer_addr = Self::alloc_zeroed(uc, STREAMBUF_HOST_BUFFER_SIZE);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET, buffer_addr);
+        Self::write_streambuf_field(
+            uc,
+            this_ptr,
+            STREAMBUF_CAPACITY_OFFSET,
+            STREAMBUF_HOST_BUFFER_SIZE as u32,
+        );
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_FILE_HANDLE_OFFSET, file_handle);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_FILE_MODE_OFFSET, mode);
     }
 
     fn init_ios_base_layout(uc: &mut Unicorn<Win32Context>, this_ptr: u32, vtable_name: &str) {
@@ -357,6 +386,218 @@ impl MSVCP60 {
         }
     }
 
+    fn streambuf_file_handle(uc: &Unicorn<Win32Context>, this_ptr: u32) -> u32 {
+        Self::read_streambuf_field(uc, this_ptr, STREAMBUF_FILE_HANDLE_OFFSET)
+    }
+
+    fn ensure_streambuf_buffer(uc: &mut Unicorn<Win32Context>, this_ptr: u32) -> (u32, usize) {
+        let mut buffer_ptr = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
+        let mut capacity =
+            Self::read_streambuf_field(uc, this_ptr, STREAMBUF_CAPACITY_OFFSET) as usize;
+        if buffer_ptr == 0 || capacity == 0 {
+            buffer_ptr = Self::alloc_zeroed(uc, STREAMBUF_HOST_BUFFER_SIZE);
+            capacity = STREAMBUF_HOST_BUFFER_SIZE;
+            Self::write_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET, buffer_ptr);
+            Self::write_streambuf_field(
+                uc,
+                this_ptr,
+                STREAMBUF_CAPACITY_OFFSET,
+                capacity as u32,
+            );
+        }
+        (buffer_ptr, capacity)
+    }
+
+    fn open_host_file_by_name(
+        uc: &mut Unicorn<Win32Context>,
+        raw_filename: &str,
+        mode: u32,
+    ) -> Option<u32> {
+        if raw_filename.is_empty() {
+            return None;
+        }
+
+        let mut candidates = vec![raw_filename.to_string()];
+        if !raw_filename.contains('/') && !raw_filename.contains('\\') {
+            candidates.insert(0, format!("Resources/{}", raw_filename));
+        }
+
+        let want_read = mode == 0 || (mode & 0x01) != 0;
+        let mut want_write = (mode & 0x02) != 0;
+        let seek_to_end = (mode & 0x04) != 0;
+        let append = (mode & 0x08) != 0;
+        let truncate = (mode & 0x10) != 0;
+
+        if append {
+            want_write = true;
+        }
+
+        for candidate in candidates {
+            let mut options = OpenOptions::new();
+            options.read(want_read || !want_write);
+            options.write(want_write);
+            options.append(append);
+            options.create(want_write);
+            options.truncate(truncate);
+
+            let mut file = match options.open(&candidate) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+
+            if seek_to_end {
+                let _ = file.seek(SeekFrom::End(0));
+            }
+
+            let handle = {
+                let context = uc.get_data();
+                let handle = context.alloc_handle();
+                context.files.lock().unwrap().insert(handle, file);
+                handle
+            };
+            return Some(handle);
+        }
+
+        None
+    }
+
+    fn open_host_file_from_guest(
+        uc: &mut Unicorn<Win32Context>,
+        filename_ptr: u32,
+        mode: u32,
+    ) -> Option<(u32, String)> {
+        let filename = if filename_ptr != 0 {
+            uc.read_euc_kr(filename_ptr as u64)
+        } else {
+            String::new()
+        };
+        Self::open_host_file_by_name(uc, &filename, mode).map(|handle| (handle, filename))
+    }
+
+    fn close_streambuf_file_handle(uc: &mut Unicorn<Win32Context>, this_ptr: u32) {
+        let file_handle = Self::streambuf_file_handle(uc, this_ptr);
+        if file_handle == 0 {
+            return;
+        }
+
+        let context = uc.get_data();
+        let mut files = context.files.lock().unwrap();
+        files.remove(&file_handle);
+        drop(files);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_FILE_HANDLE_OFFSET, 0);
+    }
+
+    fn refill_streambuf_from_file(uc: &mut Unicorn<Win32Context>, this_ptr: u32) -> usize {
+        let file_handle = Self::streambuf_file_handle(uc, this_ptr);
+        if file_handle == 0 {
+            return 0;
+        }
+
+        let (buffer_ptr, capacity) = Self::ensure_streambuf_buffer(uc, this_ptr);
+        let mut data = vec![0u8; capacity];
+        let bytes_read = {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            if let Some(file) = files.get_mut(&file_handle) {
+                file.read(&mut data).unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        if bytes_read != 0 {
+            let _ = uc.mem_write(buffer_ptr as u64, &data[..bytes_read]);
+        }
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, 0);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET, bytes_read as u32);
+        bytes_read
+    }
+
+    fn prepare_streambuf_read(uc: &mut Unicorn<Win32Context>, this_ptr: u32) {
+        if Self::streambuf_available(uc, this_ptr) == 0 {
+            let _ = Self::refill_streambuf_from_file(uc, this_ptr);
+        }
+    }
+
+    fn streambuf_peek_byte(uc: &mut Unicorn<Win32Context>, this_ptr: u32) -> Option<u8> {
+        Self::prepare_streambuf_read(uc, this_ptr);
+        let buffer_ptr = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
+        let read_pos = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
+        let available = Self::streambuf_available(uc, this_ptr);
+        if buffer_ptr == 0 || available == 0 {
+            None
+        } else {
+            Some(uc.read_u8(buffer_ptr as u64 + read_pos as u64))
+        }
+    }
+
+    fn streambuf_take_byte(uc: &mut Unicorn<Win32Context>, this_ptr: u32) -> Option<u8> {
+        let value = Self::streambuf_peek_byte(uc, this_ptr)?;
+        let read_pos = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, read_pos + 1);
+        Some(value)
+    }
+
+    fn write_bytes_to_streambuf(uc: &mut Unicorn<Win32Context>, this_ptr: u32, bytes: &[u8]) -> usize {
+        if bytes.is_empty() {
+            return 0;
+        }
+
+        let file_handle = Self::streambuf_file_handle(uc, this_ptr);
+        if file_handle != 0 {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            if let Some(file) = files.get_mut(&file_handle) {
+                return file.write(bytes).unwrap_or(0);
+            }
+            return 0;
+        }
+
+        let buffer_ptr = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
+        let capacity = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_CAPACITY_OFFSET);
+        let write_pos =
+            Self::read_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET) as usize;
+        if buffer_ptr == 0 || capacity == 0 {
+            return 0;
+        }
+
+        let writable = bytes.len().min(capacity as usize).saturating_sub(write_pos);
+        if writable == 0 {
+            return 0;
+        }
+
+        let _ = uc.mem_write(buffer_ptr as u64 + write_pos as u64, &bytes[..writable]);
+        Self::write_streambuf_field(
+            uc,
+            this_ptr,
+            STREAMBUF_WRITE_POS_OFFSET,
+            (write_pos + writable) as u32,
+        );
+        writable
+    }
+
+    fn seek_streambuf_file(
+        uc: &mut Unicorn<Win32Context>,
+        this_ptr: u32,
+        position: SeekFrom,
+    ) -> Option<u32> {
+        let file_handle = Self::streambuf_file_handle(uc, this_ptr);
+        if file_handle == 0 {
+            return None;
+        }
+
+        let next = {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            let file = files.get_mut(&file_handle)?;
+            file.seek(position).ok()? as u32
+        };
+
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, 0);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET, 0);
+        Some(next)
+    }
+
     fn streambuf_copy_assign(uc: &mut Unicorn<Win32Context>, this_ptr: u32, other_ptr: u32) {
         if this_ptr == 0 || other_ptr == 0 {
             return;
@@ -405,24 +646,7 @@ impl MSVCP60 {
         if streambuf_ptr == 0 {
             return;
         }
-
-        let buffer_ptr = Self::read_streambuf_field(uc, streambuf_ptr, STREAMBUF_BUFFER_OFFSET);
-        let capacity = Self::read_streambuf_field(uc, streambuf_ptr, STREAMBUF_CAPACITY_OFFSET);
-        let write_pos =
-            Self::read_streambuf_field(uc, streambuf_ptr, STREAMBUF_WRITE_POS_OFFSET) as usize;
-
-        if buffer_ptr == 0 || capacity == 0 {
-            return;
-        }
-
-        let writable = bytes.len().min(capacity as usize).saturating_sub(write_pos);
-        if writable == 0 {
-            return;
-        }
-
-        let _ = uc.mem_write(buffer_ptr as u64 + write_pos as u64, &bytes[..writable]);
-        let next = (write_pos + writable) as u32;
-        Self::write_streambuf_field(uc, streambuf_ptr, STREAMBUF_WRITE_POS_OFFSET, next);
+        let _ = Self::write_bytes_to_streambuf(uc, streambuf_ptr, bytes);
     }
 
     fn streambuf_available(uc: &Unicorn<Win32Context>, this_ptr: u32) -> u32 {
@@ -899,6 +1123,103 @@ impl MSVCP60 {
         Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
     }
 
+    fn basic_streambuf_init(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        Self::init_streambuf_layout(uc, this_ptr, BASIC_STREAMBUF_VTABLE);
+        crate::emu_log!("[MSVCP60] (this={:#x}) basic_streambuf::_Init()", this_ptr);
+        Some(ApiHookResult::callee(0, None))
+    }
+
+    fn basic_streambuf_init_ranges(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        let arg0 = uc.read_arg(0);
+        let arg1 = uc.read_arg(1);
+        let arg2 = uc.read_arg(2);
+        let arg3 = uc.read_arg(3);
+        let arg4 = uc.read_arg(4);
+        let arg5 = uc.read_arg(5);
+
+        Self::init_streambuf_layout(uc, this_ptr, BASIC_STREAMBUF_VTABLE);
+        for ptr in [arg0, arg1, arg3, arg4] {
+            if Self::is_mapped_ptr(uc, ptr) {
+                uc.write_u32(ptr as u64, 0);
+            }
+        }
+        for ptr in [arg2, arg5] {
+            if Self::is_mapped_ptr(uc, ptr) {
+                uc.write_u32(ptr as u64, 0);
+            }
+        }
+
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) basic_streambuf::_Init({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+            this_ptr,
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5
+        );
+        Some(ApiHookResult::callee(6, None))
+    }
+
+    fn basic_streambuf_setg(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        let begin = uc.read_arg(0);
+        let current = uc.read_arg(1);
+        let end = uc.read_arg(2);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET, begin);
+        Self::write_streambuf_field(
+            uc,
+            this_ptr,
+            STREAMBUF_CAPACITY_OFFSET,
+            end.saturating_sub(begin),
+        );
+        Self::write_streambuf_field(
+            uc,
+            this_ptr,
+            STREAMBUF_READ_POS_OFFSET,
+            current.saturating_sub(begin),
+        );
+        Self::write_streambuf_field(
+            uc,
+            this_ptr,
+            STREAMBUF_WRITE_POS_OFFSET,
+            end.saturating_sub(begin),
+        );
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) basic_streambuf::setg({:#x}, {:#x}, {:#x})",
+            this_ptr,
+            begin,
+            current,
+            end
+        );
+        Some(ApiHookResult::callee(3, None))
+    }
+
+    fn basic_streambuf_setp(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        let begin = uc.read_arg(0);
+        let end = uc.read_arg(1);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET, begin);
+        Self::write_streambuf_field(
+            uc,
+            this_ptr,
+            STREAMBUF_CAPACITY_OFFSET,
+            end.saturating_sub(begin),
+        );
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, 0);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET, 0);
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) basic_streambuf::setp({:#x}, {:#x})",
+            this_ptr,
+            begin,
+            end
+        );
+        Some(ApiHookResult::callee(2, None))
+    }
+
     fn basic_streambuf_seekoff(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
         let ret_ptr = uc.read_arg(0);
@@ -907,6 +1228,29 @@ impl MSVCP60 {
         let dir_index = if has_hidden_ret { 2 } else { 1 };
         let off = uc.read_arg(off_index) as i32;
         let seekdir = uc.read_arg(dir_index);
+        if let Some(next) = Self::seek_streambuf_file(
+            uc,
+            this_ptr,
+            match seekdir {
+                1 => SeekFrom::Current(off as i64),
+                2 => SeekFrom::End(off as i64),
+                _ => SeekFrom::Start(off.max(0) as u64),
+            },
+        ) {
+            crate::emu_log!(
+                "[MSVCP60] (this={:#x}) basic_streambuf::seekoff({}, {}) -> {}",
+                this_ptr,
+                off,
+                seekdir,
+                next
+            );
+            return Some(Self::streambuf_return_fpos(
+                uc,
+                next,
+                3,
+                if has_hidden_ret { 4 } else { 3 },
+            ));
+        }
         let available = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET) as i32;
         let current = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET) as i32;
 
@@ -940,6 +1284,21 @@ impl MSVCP60 {
         let pos = uc.read_arg(pos_index);
         let mode_index = if has_hidden_ret { 3 } else { 2 };
         let mode = uc.read_arg(mode_index);
+        if let Some(next) = Self::seek_streambuf_file(uc, this_ptr, SeekFrom::Start(pos as u64)) {
+            crate::emu_log!(
+                "[MSVCP60] (this={:#x}) basic_streambuf::seekpos({}, {}) -> {}",
+                this_ptr,
+                pos,
+                mode,
+                next
+            );
+            return Some(Self::streambuf_return_fpos(
+                uc,
+                next,
+                3,
+                if has_hidden_ret { 4 } else { 3 },
+            ));
+        }
         let write_pos = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET);
         let next = pos.min(write_pos);
         Self::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, next);
@@ -963,26 +1322,7 @@ impl MSVCP60 {
         let ptr = uc.read_arg(0);
         let len = uc.read_arg(1) as usize;
         let bytes = Self::source_bytes_from_ptr(uc, ptr, Some(len));
-        let streambuf_ptr = this_ptr;
-        let buffer_ptr = Self::read_streambuf_field(uc, streambuf_ptr, STREAMBUF_BUFFER_OFFSET);
-        let capacity =
-            Self::read_streambuf_field(uc, streambuf_ptr, STREAMBUF_CAPACITY_OFFSET) as usize;
-        let write_pos =
-            Self::read_streambuf_field(uc, streambuf_ptr, STREAMBUF_WRITE_POS_OFFSET) as usize;
-
-        let written = if buffer_ptr != 0 && capacity > write_pos {
-            let writable = bytes.len().min(capacity - write_pos);
-            let _ = uc.mem_write(buffer_ptr as u64 + write_pos as u64, &bytes[..writable]);
-            Self::write_streambuf_field(
-                uc,
-                streambuf_ptr,
-                STREAMBUF_WRITE_POS_OFFSET,
-                (write_pos + writable) as u32,
-            );
-            writable
-        } else {
-            bytes.len()
-        };
+        let written = Self::write_bytes_to_streambuf(uc, this_ptr, &bytes);
 
         crate::emu_log!(
             "[MSVCP60] (this={:#x}) basic_streambuf::xsputn({:#x}, {}) -> {}",
@@ -998,6 +1338,7 @@ impl MSVCP60 {
         let this_ptr = Self::this_ptr(uc);
         let dst_ptr = uc.read_arg(0);
         let requested = uc.read_arg(1) as usize;
+        Self::prepare_streambuf_read(uc, this_ptr);
         let buffer_ptr = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
         let read_pos = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET) as usize;
         let available = Self::streambuf_available(uc, this_ptr) as usize;
@@ -1024,6 +1365,7 @@ impl MSVCP60 {
 
     fn basic_streambuf_underflow(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
+        Self::prepare_streambuf_read(uc, this_ptr);
         let buffer_ptr = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
         let read_pos = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
         let available = Self::streambuf_available(uc, this_ptr);
@@ -1059,6 +1401,7 @@ impl MSVCP60 {
 
     fn basic_streambuf_showmanyc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
+        Self::prepare_streambuf_read(uc, this_ptr);
         let value = Self::streambuf_available(uc, this_ptr) as i32;
         crate::emu_log!(
             "[MSVCP60] (this={:#x}) basic_streambuf::showmanyc() -> {}",
@@ -1071,6 +1414,7 @@ impl MSVCP60 {
     fn basic_streambuf_pbackfail(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
         let ch = uc.read_arg(0) as i32;
+        Self::prepare_streambuf_read(uc, this_ptr);
         let buffer_ptr = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
         let read_pos = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
         let result = if buffer_ptr != 0 && read_pos != 0 {
@@ -1090,6 +1434,28 @@ impl MSVCP60 {
             result
         );
         Some(ApiHookResult::callee(1, Some(result)))
+    }
+
+    fn basic_streambuf_sync(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        let file_handle = Self::streambuf_file_handle(uc, this_ptr);
+        let result = if file_handle != 0 {
+            let context = uc.get_data();
+            let mut files = context.files.lock().unwrap();
+            if let Some(file) = files.get_mut(&file_handle) {
+                file.flush().map(|_| 0).unwrap_or(-1)
+            } else {
+                -1
+            }
+        } else {
+            0
+        };
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) basic_streambuf::sync() -> {}",
+            this_ptr,
+            result
+        );
+        Some(ApiHookResult::callee(0, Some(result)))
     }
 
     fn basic_ostream_copy_ctor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -1201,6 +1567,15 @@ impl MSVCP60 {
         let pos = uc.read_arg(0);
         let _high = uc.read_arg(1);
         let streambuf_ptr = uc.read_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET);
+        if Self::seek_streambuf_file(uc, streambuf_ptr, SeekFrom::Start(pos as u64)).is_some() {
+            crate::emu_log!(
+                "[MSVCP60] (this={:#x}) basic_istream::seekg({:#x}) -> (this={:#x})",
+                this_ptr,
+                pos,
+                this_ptr
+            );
+            return Some(ApiHookResult::callee(2, Some(this_ptr as i32)));
+        }
         Self::write_streambuf_field(uc, streambuf_ptr, STREAMBUF_READ_POS_OFFSET, pos);
         crate::emu_log!(
             "[MSVCP60] (this={:#x}) basic_istream::seekg({:#x}) -> (this={:#x})",
@@ -1209,6 +1584,57 @@ impl MSVCP60 {
             this_ptr
         );
         Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
+    }
+
+    fn basic_istream_extract_unsigned_short(
+        uc: &mut Unicorn<Win32Context>,
+    ) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        let out_ptr = uc.read_arg(0);
+        let streambuf_ptr = uc.read_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET);
+
+        while let Some(byte) = Self::streambuf_peek_byte(uc, streambuf_ptr) {
+            if !(byte as char).is_ascii_whitespace() {
+                break;
+            }
+            let _ = Self::streambuf_take_byte(uc, streambuf_ptr);
+        }
+
+        let mut token = Vec::new();
+        while let Some(byte) = Self::streambuf_peek_byte(uc, streambuf_ptr) {
+            if !(byte as char).is_ascii_digit() {
+                break;
+            }
+            if let Some(next) = Self::streambuf_take_byte(uc, streambuf_ptr) {
+                token.push(next);
+            }
+        }
+
+        let mut state = uc.read_u32(this_ptr as u64 + IOS_STATE_OFFSET);
+        if token.is_empty() {
+            state |= 0x4;
+            if Self::streambuf_peek_byte(uc, streambuf_ptr).is_none() {
+                state |= 0x2;
+            }
+        } else if let Ok(text) = std::str::from_utf8(&token) {
+            if let Ok(value) = text.parse::<u16>() {
+                if out_ptr != 0 {
+                    uc.write_u16(out_ptr as u64, value);
+                }
+            } else {
+                state |= 0x4;
+            }
+        } else {
+            state |= 0x4;
+        }
+        uc.write_u32(this_ptr as u64 + IOS_STATE_OFFSET, state);
+
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) basic_istream::operator>>({:#x})",
+            this_ptr,
+            out_ptr
+        );
+        Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
     }
 
     fn basic_istream_getline(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -1256,8 +1682,7 @@ impl MSVCP60 {
     fn basic_filebuf_ctor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
         let file_ptr = uc.read_arg(0);
-        Self::init_streambuf_layout(uc, this_ptr, BASIC_STREAMBUF_VTABLE);
-        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET, file_ptr);
+        Self::init_filebuf_layout(uc, this_ptr, file_ptr, 0);
         crate::emu_log!(
             "[MSVCP60] (this={:#x}) basic_filebuf::basic_filebuf({:#x}) -> (this={:#x})",
             this_ptr,
@@ -1267,29 +1692,57 @@ impl MSVCP60 {
         Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
     }
 
+    fn basic_filebuf_init(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        let file_ptr = uc.read_arg(0);
+        let init_flag = uc.read_arg(1);
+        Self::init_filebuf_layout(uc, this_ptr, file_ptr, init_flag);
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) basic_filebuf::_Init({:#x}, {})",
+            this_ptr,
+            file_ptr,
+            init_flag
+        );
+        Some(ApiHookResult::callee(2, None))
+    }
+
     fn basic_filebuf_open(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
         let filename_ptr = uc.read_arg(0);
         let mode = uc.read_arg(1);
-        let _filename = if filename_ptr != 0 {
-            uc.read_string(filename_ptr as u64)
-        } else {
-            String::new()
-        };
-        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, 0);
-        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET, 0);
+        let (result, filename) =
+            if let Some((file_handle, filename)) = Self::open_host_file_from_guest(uc, filename_ptr, mode)
+            {
+                Self::close_streambuf_file_handle(uc, this_ptr);
+                Self::init_filebuf_layout(uc, this_ptr, file_handle, mode);
+                (this_ptr, filename)
+            } else {
+                (0, if filename_ptr != 0 {
+                    uc.read_euc_kr(filename_ptr as u64)
+                } else {
+                    String::new()
+                })
+            };
         crate::emu_log!(
-            "[MSVCP60] (this={:#x}) basic_filebuf::open({:#x}, {}) -> (this={:#x})",
+            "[MSVCP60] (this={:#x}) basic_filebuf::open(\"{}\", {}) -> (this={:#x})",
             this_ptr,
-            filename_ptr,
+            filename,
             mode,
-            this_ptr
+            result
         );
-        Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
+        Some(ApiHookResult::callee(2, Some(result as i32)))
+    }
+
+    fn basic_filebuf_initcvt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        crate::emu_log!("[MSVCP60] (this={:#x}) basic_filebuf::_Initcvt()", this_ptr);
+        Some(ApiHookResult::callee(0, None))
     }
 
     fn basic_filebuf_destructor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
+        let _ = Self::basic_streambuf_sync(uc);
+        Self::close_streambuf_file_handle(uc, this_ptr);
         crate::emu_log!(
             "[MSVCP60] (this={:#x}) basic_filebuf::~basic_filebuf()",
             this_ptr
@@ -1310,6 +1763,17 @@ impl MSVCP60 {
         let this_ptr = Self::this_ptr(uc);
         crate::emu_log!("[MSVCP60] (this={:#x}) basic_ios::~basic_ios()", this_ptr);
         Some(ApiHookResult::callee(0, None))
+    }
+
+    fn basic_ios_ctor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        Self::init_basic_ios_layout(uc, this_ptr, BASIC_IOS_VTABLE, 0);
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) basic_ios::basic_ios() -> (this={:#x})",
+            this_ptr,
+            this_ptr
+        );
+        Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
     }
 
     fn basic_ios_assign(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -1489,6 +1953,24 @@ impl MSVCP60 {
         Some(ApiHookResult::caller(Some(locimp_addr as i32)))
     }
 
+    fn locale_ctor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        let locimp_addr = Self::locale_impl_addr(uc);
+        Self::write_locale_value(uc, this_ptr, locimp_addr);
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) locale::locale() -> (this={:#x})",
+            this_ptr,
+            this_ptr
+        );
+        Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
+    }
+
+    fn locale_destructor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let this_ptr = Self::this_ptr(uc);
+        crate::emu_log!("[MSVCP60] (this={:#x}) locale::~locale()", this_ptr);
+        Some(ApiHookResult::callee(0, Some(this_ptr as i32)))
+    }
+
     fn locale_assign(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
         let other_ptr = uc.read_arg(0);
@@ -1575,6 +2057,29 @@ impl MSVCP60 {
             len
         );
         Some(ApiHookResult::callee(4, None))
+    }
+
+    fn fiopen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        let filename_ptr = uc.read_arg(0);
+        let mode = uc.read_arg(1);
+        let (handle, filename) =
+            if let Some((file_handle, filename)) = Self::open_host_file_from_guest(uc, filename_ptr, mode)
+            {
+                (file_handle, filename)
+            } else {
+                (0, if filename_ptr != 0 {
+                    uc.read_euc_kr(filename_ptr as u64)
+                } else {
+                    String::new()
+                })
+            };
+        crate::emu_log!(
+            "[MSVCP60] __Fiopen(\"{}\", {}) -> {:#x}",
+            filename,
+            mode,
+            handle
+        );
+        Some(ApiHookResult::callee(2, Some(handle as i32)))
     }
 
     fn winit_ctor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -1737,7 +2242,7 @@ impl MSVCP60 {
                     addr
                 }))
             }
-            "?_Id_cnt@facet@locale@std@@0HA" => {
+            "?_Id_cnt@facet@locale@std@@0HA" | "?_Id_cnt@id@locale@std@@0HA" => {
                 Some(Self::cached_proxy_export(uc, func_name, |uc| {
                     let addr = Self::alloc_zeroed(uc, 4);
                     crate::emu_log!(
@@ -1847,11 +2352,23 @@ impl MSVCP60 {
             "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z" => {
                 Self::basic_streambuf_copy_ctor(uc)
             }
+            "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXXZ" => {
+                Self::basic_streambuf_init(uc)
+            }
+            "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAPAD0PAH001@Z" => {
+                Self::basic_streambuf_init_ranges(uc)
+            }
             "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
                 Self::basic_streambuf_destructor(uc)
             }
             "??4?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z" => {
                 Self::basic_streambuf_assign(uc)
+            }
+            "?setg@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAD00@Z" => {
+                Self::basic_streambuf_setg(uc)
+            }
+            "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAD0@Z" => {
+                Self::basic_streambuf_setp(uc)
             }
             "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEXABVlocale@2@@Z" => {
                 Self::streambuf_imbue(uc)
@@ -1882,6 +2399,9 @@ impl MSVCP60 {
             }
             "?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHH@Z" => {
                 Self::basic_streambuf_pbackfail(uc)
+            }
+            "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ" => {
+                Self::basic_streambuf_sync(uc)
             }
 
             "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z" => {
@@ -1926,8 +2446,14 @@ impl MSVCP60 {
             "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z" => {
                 Self::basic_filebuf_ctor(uc)
             }
+            "?_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@12@@Z" => {
+                Self::basic_filebuf_init(uc)
+            }
             "?open@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAEPAV12@PBDH@Z" => {
                 Self::basic_filebuf_open(uc)
+            }
+            "?_Initcvt@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXXZ" => {
+                Self::basic_filebuf_initcvt(uc)
             }
             "??1?$basic_filebuf@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
                 Self::basic_filebuf_destructor(uc)
@@ -1936,6 +2462,7 @@ impl MSVCP60 {
                 Self::basic_ifstream_vbase_dtor(uc)
             }
 
+            "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IAE@XZ" => Self::basic_ios_ctor(uc),
             "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z" => {
                 Self::basic_ios_clear(uc)
             }
@@ -1962,6 +2489,8 @@ impl MSVCP60 {
             "??1Init@ios_base@std@@QAE@XZ" => Self::ios_base_init_dtor(uc),
 
             "?_Init@locale@std@@CAPAV_Locimp@12@XZ" => Self::locale_init(uc),
+            "??0locale@std@@QAE@XZ" => Self::locale_ctor(uc),
+            "??1locale@std@@QAE@XZ" => Self::locale_destructor(uc),
             "??4locale@std@@QAEAAV01@ABV01@@Z" => Self::locale_assign(uc),
             "?_Incref@facet@locale@std@@QAEXXZ" => Self::locale_facet_incref(uc),
             "?_Decref@facet@locale@std@@QAEPAV123@XZ" => Self::locale_facet_decref(uc),
@@ -1988,6 +2517,7 @@ impl MSVCP60 {
             "?_Xlen@std@@YAXXZ" => Self::xlen(uc),
             "?_Xran@std@@YAXXZ" => Self::xran(uc),
             "?_Xoff@std@@YAXXZ" => Self::xoff(uc),
+            "?__Fiopen@std@@YAPAU_iobuf@@PBDH@Z" => Self::fiopen(uc),
 
             "??0?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAE@XZ" => {
                 let this_ptr = Self::this_ptr(uc);
@@ -2015,6 +2545,9 @@ impl MSVCP60 {
                 );
                 Some(ApiHookResult::callee(0, None))
             }
+            "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV01@AAG@Z" => {
+                Self::basic_istream_extract_unsigned_short(uc)
+            }
 
             _ => {
                 crate::emu_log!("[!] MSVCP60 Unhandled: {}", func_name);
@@ -2038,6 +2571,7 @@ impl MSVCP60 {
 mod tests {
     use super::*;
     use crate::helper::UnicornHelper;
+    use std::fs;
     use unicorn_engine::{Arch, Mode};
 
     fn new_test_uc() -> Unicorn<'static, Win32Context> {
@@ -2242,5 +2776,89 @@ mod tests {
             MSVCP60::resolve_export(&mut uc, "?_Global@_Locimp@locale@std@@0PAV123@A").unwrap();
         assert_eq!(global_ptr, global_again);
         assert_eq!(uc.read_u32(global_again as u64), initial_locimp);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn locale_ctor_and_streambuf_init_fill_default_layout() {
+        let mut uc = new_test_uc();
+        let locale_obj = MSVCP60::alloc_zeroed(&mut uc, LOCALE_OBJECT_SIZE);
+        let streambuf_obj = MSVCP60::alloc_zeroed(&mut uc, STREAMBUF_OBJECT_SIZE);
+
+        uc.reg_write(RegisterX86::ECX, locale_obj as u64).unwrap();
+        write_call_frame(&mut uc, &[]);
+        let ctor_result = MSVCP60::handle(&mut uc, "??0locale@std@@QAE@XZ").unwrap();
+        assert_eq!(ctor_result.cleanup, StackCleanup::Callee(0));
+        assert_eq!(ctor_result.return_value, Some(locale_obj as i32));
+        assert_ne!(MSVCP60::read_locale_impl(&uc, locale_obj), 0);
+
+        uc.reg_write(RegisterX86::ECX, streambuf_obj as u64).unwrap();
+        write_call_frame(&mut uc, &[]);
+        let init_result = MSVCP60::handle(
+            &mut uc,
+            "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXXZ",
+        )
+        .unwrap();
+        assert_eq!(init_result.cleanup, StackCleanup::Callee(0));
+        assert_eq!(uc.read_u32(streambuf_obj as u64), MSVCP60::vtable_export_addr(&mut uc, BASIC_STREAMBUF_VTABLE));
+        assert_ne!(
+            uc.read_u32(streambuf_obj as u64 + STREAMBUF_LOCALE_OFFSET),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn filebuf_open_and_extract_unsigned_short_reads_host_file() {
+        let mut uc = new_test_uc();
+        let temp_path = std::env::temp_dir().join("emul4leaf_msvcp60_extract_u16.txt");
+        fs::write(&temp_path, b" 4321 ").unwrap();
+
+        let filebuf = MSVCP60::alloc_zeroed(&mut uc, STREAMBUF_OBJECT_SIZE);
+        let istream = MSVCP60::alloc_zeroed(&mut uc, STREAM_OBJECT_SIZE);
+        let out_value = MSVCP60::alloc_zeroed(&mut uc, 2);
+        let path_ptr = uc.alloc_str(temp_path.to_string_lossy().as_ref());
+
+        uc.reg_write(RegisterX86::ECX, filebuf as u64).unwrap();
+        write_call_frame(&mut uc, &[0]);
+        MSVCP60::handle(
+            &mut uc,
+            "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z",
+        )
+        .unwrap();
+
+        uc.reg_write(RegisterX86::ECX, filebuf as u64).unwrap();
+        write_call_frame(&mut uc, &[path_ptr, 1]);
+        let open_result = MSVCP60::handle(
+            &mut uc,
+            "?open@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAEPAV12@PBDH@Z",
+        )
+        .unwrap();
+        assert_eq!(open_result.return_value, Some(filebuf as i32));
+
+        uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
+        write_call_frame(&mut uc, &[filebuf, 0]);
+        MSVCP60::handle(
+            &mut uc,
+            "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z",
+        )
+        .unwrap();
+
+        uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
+        write_call_frame(&mut uc, &[out_value]);
+        let extract_result = MSVCP60::handle(
+            &mut uc,
+            "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV01@AAG@Z",
+        )
+        .unwrap();
+        assert_eq!(extract_result.return_value, Some(istream as i32));
+        assert_eq!(uc.read_u16(out_value as u64), 4321);
+        assert_eq!(uc.read_u32(istream as u64 + IOS_STATE_OFFSET) & 0x4, 0);
     }
 }

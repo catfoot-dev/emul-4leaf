@@ -510,7 +510,7 @@ impl WS2_32 {
                 packet_logger
                     .lock()
                     .unwrap()
-                    .log(PacketDirection::Recv, sock, &data);
+                    .log(PacketDirection::Recv, sock, &data, !peek);
                 crate::emu_log!(
                     "[WS2_32] recv({}, {:#x}, {}, {}) -> {} bytes",
                     sock,
@@ -721,7 +721,7 @@ impl WS2_32 {
             ctx.packet_logger
                 .lock()
                 .unwrap()
-                .log(PacketDirection::Send, sock, &data);
+                .log(PacketDirection::Send, sock, &data, true);
             crate::emu_log!(
                 "[WS2_32] send({}, {:#x}, {}, {}) -> {} bytes",
                 sock,
@@ -1076,7 +1076,7 @@ impl WS2_32 {
         packet_logger
             .lock()
             .unwrap()
-            .log(PacketDirection::Recv, sock, &data_to_distribute);
+            .log(PacketDirection::Recv, sock, &data_to_distribute, !peek);
 
         if bytes_recvd_addr != 0 {
             uc.write_u32(bytes_recvd_addr as u64, total_n as u32);
