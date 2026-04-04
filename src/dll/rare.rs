@@ -6,9 +6,11 @@ use cpal::{
     FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
+use minimp3::{Decoder as Mp3Decoder, Error as Mp3Error};
 use std::{
     collections::HashMap,
     fs,
+    io::Cursor,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::Ordering},
 };
@@ -82,6 +84,15 @@ pub(crate) struct RareWaveData {
     channels: usize,
     sample_rate: u32,
     samples: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedAudioSource {
+    File(PathBuf),
+    Packed {
+        display_name: String,
+        data: Vec<u8>,
+    },
 }
 
 /// Rare.dll의 사운드 객체 상태입니다.
@@ -624,7 +635,7 @@ impl Rare {
             return 0;
         }
 
-        let Some(path) = resolve_sound_path(&filename) else {
+        let Some(source) = resolve_sound_source(&filename) else {
             uc.get_data()
                 .last_error
                 .store(ERROR_FILE_NOT_FOUND, Ordering::SeqCst);
@@ -637,7 +648,12 @@ impl Rare {
             return 0;
         };
 
-        let wave = match decode_wave_file(&path) {
+        let display_name = match &source {
+            ResolvedAudioSource::File(path) => path.display().to_string(),
+            ResolvedAudioSource::Packed { display_name, .. } => display_name.clone(),
+        };
+
+        let wave = match decode_audio_source(&source) {
             Ok(wave) => Arc::new(wave),
             Err(err) => {
                 uc.get_data()
@@ -646,7 +662,7 @@ impl Rare {
                 crate::emu_log!(
                     "[RARE] RContext::OpenSound({:#x}, \"{}\", {}) -> {}",
                     context_ptr,
-                    path.display(),
+                    display_name,
                     open_mode,
                     err
                 );
@@ -654,7 +670,7 @@ impl Rare {
             }
         };
 
-        let sound_ptr = Self::create_sound_object(uc, context_ptr, &path, wave);
+        let sound_ptr = Self::create_sound_object(uc, context_ptr, &display_name, wave);
         uc.get_data().last_error.store(0, Ordering::SeqCst);
         sound_ptr
     }
@@ -662,7 +678,7 @@ impl Rare {
     fn create_sound_object(
         uc: &mut Unicorn<Win32Context>,
         context_ptr: u32,
-        path: &Path,
+        path: &str,
         wave: Arc<RareWaveData>,
     ) -> u32 {
         let vtable_ptr = Self::ensure_sound_vtable(uc);
@@ -675,7 +691,7 @@ impl Rare {
             sound_ptr,
             RareSoundState {
                 context_ptr,
-                path: path.display().to_string(),
+                path: path.to_string(),
                 wave,
                 volume: 0,
                 pan: 0,
@@ -1175,7 +1191,7 @@ fn mix_sound_into(
     sound.position_frames = position;
 }
 
-fn resolve_sound_path(filename: &str) -> Option<PathBuf> {
+fn resolve_sound_source(filename: &str) -> Option<ResolvedAudioSource> {
     let trimmed = filename.trim().trim_matches('"');
     if trimmed.is_empty() {
         return None;
@@ -1190,16 +1206,115 @@ fn resolve_sound_path(filename: &str) -> Option<PathBuf> {
     if normalized_path.extension().is_none() {
         candidates.push(PathBuf::from(format!("{normalized}.wav")));
         candidates.push(Path::new("Resources").join(format!("{normalized}.wav")));
+        candidates.push(PathBuf::from(format!("{normalized}.mp3")));
+        candidates.push(Path::new("Resources").join(format!("{normalized}.mp3")));
     }
 
     for candidate in candidates {
         if candidate.is_file() {
-            return Some(candidate);
+            return Some(ResolvedAudioSource::File(candidate));
         }
     }
 
     let wanted_name = normalized_path.file_name()?.to_str()?.to_string();
-    find_resource_file(Path::new("Resources"), &wanted_name)
+    let mut pack_names = vec![wanted_name.clone()];
+    let wanted_stem = normalized_path.file_stem()?.to_str()?.to_string();
+    if normalized_path.extension().is_none() {
+        pack_names.push(format!("{wanted_stem}.wav"));
+        pack_names.push(format!("{wanted_stem}.mp3"));
+    }
+
+    for pack_name in &pack_names {
+        if let Some(source) =
+            resolve_sound_source_from_pack(pack_name, Path::new("Resources/Sound.pak"))
+        {
+            return Some(source);
+        }
+        if let Some(source) = resolve_sound_source_from_pack(pack_name, Path::new("Resources/BGM.pak"))
+        {
+            return Some(source);
+        }
+    }
+
+    find_resource_file(Path::new("Resources"), &wanted_name).map(ResolvedAudioSource::File)
+}
+
+fn decode_audio_source(source: &ResolvedAudioSource) -> Result<RareWaveData, String> {
+    match source {
+        ResolvedAudioSource::File(path) => decode_audio_file(path),
+        ResolvedAudioSource::Packed { display_name, data } => {
+            decode_audio_bytes(display_name, data)
+        }
+    }
+}
+
+fn decode_audio_file(path: &Path) -> Result<RareWaveData, String> {
+    let data = fs::read(path).map_err(|err| format!("파일 읽기 실패: {err}"))?;
+    decode_audio_bytes(&path.display().to_string(), &data)
+}
+
+fn decode_audio_bytes(name_hint: &str, data: &[u8]) -> Result<RareWaveData, String> {
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
+        return decode_wave_bytes(data);
+    }
+
+    if name_hint.to_ascii_lowercase().ends_with(".mp3")
+        || data.starts_with(b"ID3")
+        || data.windows(2).any(|pair| pair[0] == 0xff && (pair[1] & 0xe0) == 0xe0)
+    {
+        return decode_mp3_bytes(data);
+    }
+
+    Err("지원하지 않는 오디오 포맷입니다".to_string())
+}
+
+fn resolve_sound_source_from_pack(filename: &str, pack_path: &Path) -> Option<ResolvedAudioSource> {
+    let wanted = filename.to_ascii_lowercase();
+    let data = fs::read(pack_path).ok()?;
+    let entry_count_raw = i32::from_le_bytes(data.get(0..4)?.try_into().ok()?);
+    let entry_count = if entry_count_raw < 0 {
+        (-entry_count_raw - 1) as usize
+    } else {
+        entry_count_raw as usize
+    };
+    let header_size = 4usize.checked_add(entry_count.checked_mul(28)?)?;
+    if data.len() < header_size {
+        return None;
+    }
+
+    for index in 0..entry_count {
+        let entry_offset = 4 + index * 28;
+        let entry = data.get(entry_offset..entry_offset + 28)?;
+        let name = entry[0..20]
+            .iter()
+            .map(|byte| byte ^ 0xff)
+            .take_while(|byte| *byte != 0)
+            .collect::<Vec<_>>();
+        let entry_name = String::from_utf8_lossy(&name).to_string();
+        if entry_name.to_ascii_lowercase() != wanted {
+            continue;
+        }
+
+        let start_marker = i32::from_le_bytes(entry[20..24].try_into().ok()?);
+        let end_marker = i32::from_le_bytes(entry[24..28].try_into().ok()?);
+        if start_marker >= 0 || end_marker >= 0 {
+            return None;
+        }
+
+        // pack 헤더 끝을 기준으로 1-based 음수 오프셋을 저장하는 포맷입니다.
+        let start = header_size.checked_add((-start_marker - 1) as usize)?;
+        let end = header_size.checked_add((-end_marker) as usize)?;
+        if start >= end || end > data.len() {
+            return None;
+        }
+
+        return Some(ResolvedAudioSource::Packed {
+            display_name: format!("{}::{}", pack_path.display(), entry_name),
+            data: data[start..end].to_vec(),
+        });
+    }
+
+    None
 }
 
 fn find_resource_file(root: &Path, wanted_name: &str) -> Option<PathBuf> {
@@ -1228,9 +1343,44 @@ fn find_resource_file(root: &Path, wanted_name: &str) -> Option<PathBuf> {
     None
 }
 
-fn decode_wave_file(path: &Path) -> Result<RareWaveData, String> {
-    let data = fs::read(path).map_err(|err| format!("파일 읽기 실패: {err}"))?;
-    decode_wave_bytes(&data)
+fn decode_mp3_bytes(data: &[u8]) -> Result<RareWaveData, String> {
+    let mut decoder = Mp3Decoder::new(Cursor::new(data));
+    let mut sample_rate = 0u32;
+    let mut channels = 0usize;
+    let mut samples = Vec::new();
+
+    loop {
+        match decoder.next_frame() {
+            Ok(frame) => {
+                if sample_rate == 0 {
+                    sample_rate = frame.sample_rate as u32;
+                    channels = frame.channels;
+                } else if sample_rate != frame.sample_rate as u32 || channels != frame.channels {
+                    return Err("프레임마다 MP3 오디오 설정이 달라 지원하지 않습니다".to_string());
+                }
+
+                samples.extend(
+                    frame
+                        .data
+                        .into_iter()
+                        .map(|sample| sample as f32 / i16::MAX as f32),
+                );
+            }
+            Err(Mp3Error::Eof) => break,
+            Err(Mp3Error::InsufficientData) => break,
+            Err(err) => return Err(format!("MP3 디코딩 실패: {err:?}")),
+        }
+    }
+
+    if sample_rate == 0 || channels == 0 || samples.is_empty() {
+        return Err("MP3 프레임을 읽지 못했습니다".to_string());
+    }
+
+    Ok(RareWaveData {
+        channels,
+        sample_rate,
+        samples,
+    })
 }
 
 fn decode_wave_bytes(data: &[u8]) -> Result<RareWaveData, String> {
