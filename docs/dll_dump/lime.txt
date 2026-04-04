@@ -1,0 +1,950 @@
+./Resources/Lime.dll:	file format coff-i386
+Characteristics 0x210e
+	executable
+	line numbers stripped
+	symbols stripped
+	32 bit words
+	DLL
+
+Time/Date               Tue Jan 21 09:53:11 2003
+Magic                   010b	(PE32)
+MajorLinkerVersion      6
+MinorLinkerVersion      0
+SizeOfCode              00034000
+SizeOfInitializedData   00014000
+SizeOfUninitializedData 00000000
+AddressOfEntryPoint     000335f3
+BaseOfCode              00001000
+BaseOfData              00035000
+ImageBase               10000000
+SectionAlignment        00001000
+FileAlignment           00001000
+MajorOSystemVersion     4
+MinorOSystemVersion     0
+MajorImageVersion       0
+MinorImageVersion       0
+MajorSubsystemVersion   4
+MinorSubsystemVersion   0
+Win32Version            00000000
+SizeOfImage             00049000
+SizeOfHeaders           00001000
+CheckSum                00000000
+Subsystem               00000002	(Windows GUI)
+DllCharacteristics      00000000
+SizeOfStackReserve      00100000
+SizeOfStackCommit       00001000
+SizeOfHeapReserve       00100000
+SizeOfHeapCommit        00001000
+LoaderFlags             00000000
+NumberOfRvaAndSizes     00000010
+
+The Data Directory
+Entry 0 00038630 00006f46 Export Directory [.edata (or where ever we found it)]
+Entry 1 00037730 000000dc Import Directory [parts of .idata]
+Entry 2 00000000 00000000 Resource Directory [.rsrc]
+Entry 3 00000000 00000000 Exception Directory [.pdata]
+Entry 4 00000000 00000000 Security Directory
+Entry 5 00047000 0000148c Base Relocation Directory [.reloc]
+Entry 6 00000000 00000000 Debug Directory
+Entry 7 00000000 00000000 Description Directory
+Entry 8 00000000 00000000 Special Directory
+Entry 9 00000000 00000000 Thread Storage Directory [.tls]
+Entry a 00000000 00000000 Load Configuration Directory
+Entry b 00000000 00000000 Bound Import Directory
+Entry c 00035000 000002a8 Import Address Table Directory
+Entry d 00000000 00000000 Delay Import Directory
+Entry e 00000000 00000000 CLR Runtime Header
+Entry f 00000000 00000000 Reserved
+
+The Import Tables:
+  lookup 000378cc time 00000000 fwd 00000000 name 00037b4e addr 000350c0
+
+    DLL Name: KERNEL32.dll
+    Hint/Ord  Name
+          93  DisableThreadLibraryCalls
+         770  lstrcpyA
+          27  CloseHandle
+         761  lstrcatA
+         385  GlobalAlloc
+         396  GlobalLock
+         403  GlobalUnlock
+         392  GlobalFree
+         613  SetEvent
+         430  InterlockedExchange
+          49  CreateEventA
+         662  Sleep
+
+  lookup 00037994 time 00000000 fwd 00000000 name 00037eea addr 00035188
+
+    DLL Name: USER32.dll
+    Hint/Ord  Name
+         175  DrawTextA
+         221  GetActiveWindow
+         132  DefWindowProcA
+         325  GetSystemMenu
+         135  DeleteMenu
+         292  GetMenuItemInfoA
+          62  CloseWindow
+         338  GetWindow
+         183  EnableWindow
+         657  UpdateWindow
+         603  SetWindowPos
+         476  PeekMessageA
+         252  GetCursorPos
+         515  ReleaseDC
+         402  IsWindowVisible
+         490  PtInRect
+         580  SetRect
+         242  GetClipboardData
+         446  MessageBoxA
+         532  SendMessageA
+         263  GetFocus
+         541  SetCapture
+         228  GetCapture
+         514  ReleaseCapture
+         522  ScreenToClient
+         187  EndPaint
+         642  TranslateMessage
+         149  DispatchMessageA
+         559  SetFocus
+         480  PostQuitMessage
+         410  LoadCursorA
+         618  ShowWindow
+         255  GetDesktopWindow
+         253  GetDC
+          12  BeginPaint
+          72  CreateCaret
+         138  DestroyCaret
+         227  GetAsyncKeyState
+         392  IsDialogMessageA
+         414  LoadIconA
+         613  ShowCaret
+         543  SetCaretPos
+         358  HideCaret
+         411  LoadCursorFromFileA
+         323  GetSysColor
+          58  ClientToScreen
+          60  CloseClipboard
+         547  SetClipboardData
+         180  EmptyClipboard
+         467  OpenClipboard
+         340  GetWindowDC
+         604  SetWindowRgn
+         209  EqualRect
+         348  GetWindowRect
+         274  GetKeyState
+         390  IsClipboardFormatAvailable
+         458  MsgWaitForMultipleObjects
+
+  lookup 00037824 time 00000000 fwd 00000000 name 00038124 addr 00035018
+
+    DLL Name: GDI32.dll
+    Hint/Ord  Name
+         373  GetTextMetricsA
+         462  SetBkMode
+         366  GetTextExtentPoint32A
+          54  CreateFontA
+          47  CreateDIBSection
+          42  CreateCompatibleDC
+          68  CreatePen
+         455  SelectObject
+         453  SelectClipRgn
+          72  CreateRectRgn
+         471  SetDIBitsToDevice
+         495  SetStretchBltMode
+         428  RealizePalette
+         456  SelectPalette
+          77  CreateSolidBrush
+         431  Rectangle
+         392  MoveToEx
+         388  LineTo
+          41  CreateCompatibleBitmap
+         148  EqualRgn
+         351  GetStockObject
+         361  GetTextColor
+         517  TextOutA
+         264  GetBkMode
+         492  SetROP2
+         274  GetCharWidthA
+         368  GetTextExtentPointA
+         461  SetBkColor
+         499  SetTextColor
+         350  GetRgnBox
+          30  CombineRgn
+          66  CreatePalette
+          80  DeleteDC
+         513  StretchDIBits
+          83  DeleteObject
+
+  lookup 00037814 time 00000000 fwd 00000000 name 00038180 addr 00035008
+
+    DLL Name: Core.dll
+    Hint/Ord  Name
+         303  ?Logf@@YAHPBDZZ
+           6  ??0SystemError@@QAE@PBD@Z
+         326  ?PushMessage@Exception@@QAEXPBD@Z
+
+  lookup 00037a84 time 00000000 fwd 00000000 name 00038348 addr 00035278
+
+    DLL Name: WinCore.dll
+    Hint/Ord  Name
+         368  ?WndProc@TWindow@@UAEHAAUTMessage@@@Z
+         206  ?FindWindowA@TWindow@@SAPAV1@PAUHWND__@@@Z
+         266  ?IsKindOf@TWindow@@QBE_NPBVTWindowClass@@@Z
+         237  ?GetPreTranslateWindow@TWindow@@SAPAV1@PAUHWND__@@@Z
+         187  ?Create@TWindow@@QAEXPAV1@PBDHHHHIIPAUHMENU__@@@Z
+         354  ?StaticClass@TWindow@@2VTWindowClass@@B
+         192  ?Destroy@TWindow@@QAEXXZ
+         307  ?RegisterClassA@TWindow@@QAEXIPAUHICON__@@0PAUHBRUSH__@@@Z
+         137  ??_7TWindow@@6B@
+          78  ??1TWindow@@QAE@XZ
+          50  ??0TWindow@@QAE@PAUHWND__@@@Z
+
+  lookup 00037a7c time 00000000 fwd 00000000 name 00038362 addr 00035270
+
+    DLL Name: WINMM.dll
+    Hint/Ord  Name
+         152  timeGetTime
+
+  lookup 000378b4 time 00000000 fwd 00000000 name 000383d6 addr 000350a8
+
+    DLL Name: IMM32.dll
+    Hint/Ord  Name
+          64  ImmIsUIMessageA
+          33  ImmGetConversionStatus
+          30  ImmGetContext
+          79  ImmReleaseContext
+          92  ImmSetConversionStatus
+
+  lookup 0003780c time 00000000 fwd 00000000 name 000383f4 addr 00035000
+
+    DLL Name: COMCTL32.dll
+    Hint/Ord  Name
+          77  _TrackMouseEvent
+
+  lookup 00037900 time 00000000 fwd 00000000 name 00038472 addr 000350f4
+
+    DLL Name: MSVCP60.dll
+    Hint/Ord  Name
+         158  ??0Init@ios_base@std@@QAE@XZ
+         165  ??0_Winit@std@@QAE@XZ
+         269  ??1_Winit@std@@QAE@XZ
+         265  ??1Init@ios_base@std@@QAE@XZ
+
+  lookup 00037914 time 00000000 fwd 00000000 name 00038586 addr 00035108
+
+    DLL Name: MSVCRT.dll
+    Hint/Ord  Name
+         424  _setjmp3
+         690  sprintf
+         704  strncmp
+         599  fopen
+         614  fwrite
+         588  fclose
+         656  longjmp
+         657  malloc
+         709  strstr
+         605  fread
+         705  strncpy
+          15  ??2@YAPAXI@Z
+          65  _CxxThrowException
+          73  __CxxFrameHandler
+         241  _ftol
+         610  fseek
+         612  ftell
+         606  free
+         449  _stricmp
+         591  fflush
+         693  sscanf
+         618  getenv
+          85  __dllonexit
+         390  _onexit
+         202  _except_handler3
+          46  ?terminate@@YAXXZ
+          14  ??1type_info@@UAE@XZ
+         271  _initterm
+         157  _adjust_fdiv
+         445  _strcmpi
+         732  vsprintf
+
+Export Table:
+ DLL name: Lime.dll
+ Ordinal base: 1
+ Ordinal      RVA  Name
+       1   0x4b90  ??0DSprite@@QAE@PAD@Z
+       2   0x4b70  ??0DSprite@@QAE@XZ
+       3  0x1afc0  ??0LAdjust@@QAE@AAV0@@Z
+       4  0x1b210  ??0LAdjust@@QAE@PAVLCtrlManager@@G@Z
+       5  0x1b1a0  ??0LAdjust@@QAE@XZ
+       6   0x4080  ??0LBorder@@QAE@AAV0@@Z
+       7  0x1f7a0  ??0LBorder@@QAE@XZ
+       8   0x6e80  ??0LBuffer@@QAE@AAV0@@Z
+       9   0x6df0  ??0LBuffer@@QAE@XZ
+      10   0xf6d0  ??0LButton@@QAE@AAV0@@Z
+      11   0xf9a0  ??0LButton@@QAE@PAVLCtrlManager@@G@Z
+      12   0xf950  ??0LButton@@QAE@XZ
+      13  0x114a0  ??0LColorConsoleView@@QAE@ABV0@@Z
+      14  0x11ec0  ??0LColorConsoleView@@QAE@PAVLCtrlManager@@G@Z
+      15  0x11e90  ??0LColorConsoleView@@QAE@XZ
+      16   0x3240  ??0LCombo@@QAE@ABV0@@Z
+      17  0x10ac0  ??0LCombo@@QAE@PAVLCtrlManager@@G@Z
+      18  0x10aa0  ??0LCombo@@QAE@XZ
+      19  0x11100  ??0LConsoleView@@QAE@ABV0@@Z
+      20  0x11820  ??0LConsoleView@@QAE@PAVLCtrlManager@@G@Z
+      21  0x117f0  ??0LConsoleView@@QAE@XZ
+      22   0x1930  ??0LControl@@QAE@ABV0@@Z
+      23  0x20190  ??0LControl@@QAE@PAVLCtrlManager@@G@Z
+      24  0x20130  ??0LControl@@QAE@XZ
+      25  0x1b680  ??0LControlBar@@QAE@ABV0@@Z
+      26  0x1b970  ??0LControlBar@@QAE@PAVLCtrlManager@@G@Z
+      27  0x1b950  ??0LControlBar@@QAE@XZ
+      28   0x17c0  ??0LCtrlGroup@@QAE@ABV0@@Z
+      29  0x20880  ??0LCtrlGroup@@QAE@XZ
+      30   0x15c0  ??0LCtrlManager@@QAE@AAV0@@Z
+      31   0xd570  ??0LCtrlManager@@QAE@XZ
+      32   0xf340  ??0LCursorManager@@QAE@XZ
+      33   0x1b70  ??0LDialog@@QAE@AAV0@@Z
+      34   0x1d30  ??0LDialog@@QAE@XZ
+      35   0x2dc0  ??0LEdit@@QAE@ABV0@@Z
+      36  0x12650  ??0LEdit@@QAE@PAVLCtrlManager@@G@Z
+      37  0x12630  ??0LEdit@@QAE@XZ
+      38   0x8320  ??0LImage@@QAE@AAV0@@Z
+      39   0x82a0  ??0LImage@@QAE@XZ
+      40   0xaa80  ??0LImageAdjust@@QAE@AAVLBuffer@@@Z
+      41   0xaa40  ??0LImageAdjust@@QAE@AAVLImage@@@Z
+      42   0xa950  ??0LImageAdjust@@QAE@ABV0@@Z
+      43   0xaa10  ??0LImageAdjust@@QAE@XZ
+      44  0x14b40  ??0LImageList@@QAE@AAV0@@Z
+      45  0x14dc0  ??0LImageList@@QAE@PAVLCtrlManager@@G@Z
+      46  0x14d70  ??0LImageList@@QAE@XZ
+      47  0x1d3b0  ??0LLed@@QAE@AAV0@@Z
+      48  0x1d5f0  ??0LLed@@QAE@PAVLCtrlManager@@G@Z
+      49  0x1d590  ??0LLed@@QAE@XZ
+      50   0x2250  ??0LListView@@QAE@ABV0@@Z
+      51  0x15890  ??0LListView@@QAE@PAVLCtrlManager@@G@Z
+      52  0x15860  ??0LListView@@QAE@XZ
+      53  0x1d950  ??0LMeter@@QAE@AAV0@@Z
+      54  0x1dd30  ??0LMeter@@QAE@PAVLCtrlManager@@G@Z
+      55  0x1dcb0  ??0LMeter@@QAE@XZ
+      56   0x3eb0  ??0LPicture@@QAE@AAV0@@Z
+      57  0x18010  ??0LPicture@@QAE@PAVLCtrlManager@@G@Z
+      58  0x17fc0  ??0LPicture@@QAE@XZ
+      59   0x2810  ??0LScrollBar@@QAE@ABV0@@Z
+      60  0x184b0  ??0LScrollBar@@QAE@PAVLCtrlManager@@G@Z
+      61  0x18490  ??0LScrollBar@@QAE@XZ
+      62  0x1e390  ??0LSelect@@QAE@AAV0@@Z
+      63  0x1e690  ??0LSelect@@QAE@PAVLCtrlManager@@G@Z
+      64  0x1e620  ??0LSelect@@QAE@XZ
+      65  0x1ecb0  ??0LSignpost@@QAE@AAV0@@Z
+      66  0x1f130  ??0LSignpost@@QAE@PAVLCtrlManager@@G@Z
+      67  0x1f0d0  ??0LSignpost@@QAE@XZ
+      68   0x3bf0  ??0LStatic@@QAE@ABV0@@Z
+      69  0x19fb0  ??0LStatic@@QAE@PAVLCtrlManager@@G@Z
+      70  0x19f90  ??0LStatic@@QAE@XZ
+      71   0xd3c0  ??0LTickManager@@QAE@XZ
+      72  0x1a770  ??0LTitle@@QAE@ABV0@@Z
+      73  0x1a9f0  ??0LTitle@@QAE@PAVLCtrlManager@@G@Z
+      74  0x1a9d0  ??0LTitle@@QAE@XZ
+      75   0x4330  ??0LToolTip@@QAE@AAV0@@Z
+      76   0x46f0  ??0LToolTip@@QAE@XZ
+      77   0x4ac0  ??0RFile@@QAE@ABV0@@Z
+      78   0xcf80  ??0RFile@@QAE@XZ
+      79   0x4bd0  ??1DSprite@@QAE@XZ
+      80  0x1b290  ??1LAdjust@@UAE@XZ
+      81  0x1f830  ??1LBorder@@UAE@XZ
+      82   0x6ec0  ??1LBuffer@@UAE@XZ
+      83   0xfa00  ??1LButton@@UAE@XZ
+      84  0x11f00  ??1LColorConsoleView@@UAE@XZ
+      85  0x10ae0  ??1LCombo@@UAE@XZ
+      86  0x11850  ??1LConsoleView@@UAE@XZ
+      87  0x20200  ??1LControl@@UAE@XZ
+      88  0x1b990  ??1LControlBar@@UAE@XZ
+      89  0x208a0  ??1LCtrlGroup@@UAE@XZ
+      90   0xd610  ??1LCtrlManager@@UAE@XZ
+      91   0xb330  ??1LCursorManager@@QAE@XZ
+      92   0x1d50  ??1LDialog@@UAE@XZ
+      93  0x12670  ??1LEdit@@UAE@XZ
+      94   0x8350  ??1LImage@@UAE@XZ
+      95   0xaa30  ??1LImageAdjust@@UAE@XZ
+      96  0x14e20  ??1LImageList@@UAE@XZ
+      97  0x1d660  ??1LLed@@UAE@XZ
+      98  0x158d0  ??1LListView@@UAE@XZ
+      99  0x1ddc0  ??1LMeter@@UAE@XZ
+     100  0x18070  ??1LPicture@@UAE@XZ
+     101  0x184d0  ??1LScrollBar@@UAE@XZ
+     102  0x1e710  ??1LSelect@@UAE@XZ
+     103  0x1f1a0  ??1LSignpost@@UAE@XZ
+     104  0x19fd0  ??1LStatic@@UAE@XZ
+     105  0x1aa20  ??1LTitle@@UAE@XZ
+     106   0x4710  ??1LToolTip@@UAE@XZ
+     107   0xcfa0  ??1RFile@@UAE@XZ
+     108   0x4aa0  ??4DSprite@@QAEAAV0@ABV0@@Z
+     109  0x1b0a0  ??4LAdjust@@QAEAAV0@AAV0@@Z
+     110   0x4150  ??4LBorder@@QAEAAV0@AAV0@@Z
+     111   0x6ed0  ??4LBuffer@@QAEAAV0@AAV0@@Z
+     112   0xf800  ??4LButton@@QAEAAV0@AAV0@@Z
+     113  0x11630  ??4LColorConsoleView@@QAEAAV0@ABV0@@Z
+     114   0x32e0  ??4LCombo@@QAEAAV0@ABV0@@Z
+     115  0x11250  ??4LConsoleView@@QAEAAV0@ABV0@@Z
+     116   0x19b0  ??4LControl@@QAEAAV0@ABV0@@Z
+     117  0x1b7c0  ??4LControlBar@@QAEAAV0@ABV0@@Z
+     118   0x1840  ??4LCtrlGroup@@QAEAAV0@ABV0@@Z
+     119   0x16b0  ??4LCtrlManager@@QAEAAV0@AAV0@@Z
+     120   0xf2e0  ??4LCursorManager@@QAEAAV0@ABV0@@Z
+     121   0x4450  ??4LDialog@@QAEAAV0@AAV0@@Z
+     122   0x2f50  ??4LEdit@@QAEAAV0@ABV0@@Z
+     123   0x8360  ??4LImage@@QAEAAV0@AAV0@@Z
+     124   0xa980  ??4LImageAdjust@@QAEAAV0@ABV0@@Z
+     125  0x14c40  ??4LImageList@@QAEAAV0@AAV0@@Z
+     126  0x1d490  ??4LLed@@QAEAAV0@AAV0@@Z
+     127   0x2440  ??4LListView@@QAEAAV0@ABV0@@Z
+     128  0x1daf0  ??4LMeter@@QAEAAV0@AAV0@@Z
+     129   0x3f80  ??4LPicture@@QAEAAV0@AAV0@@Z
+     130   0x28e0  ??4LScrollBar@@QAEAAV0@ABV0@@Z
+     131  0x1e4c0  ??4LSelect@@QAEAAV0@AAV0@@Z
+     132  0x1eef0  ??4LSignpost@@QAEAAV0@AAV0@@Z
+     133   0x3ce0  ??4LStatic@@QAEAAV0@ABV0@@Z
+     134   0x1a90  ??4LTickManager@@QAEAAV0@ABV0@@Z
+     135  0x1a870  ??4LTitle@@QAEAAV0@ABV0@@Z
+     136   0x4450  ??4LToolTip@@QAEAAV0@AAV0@@Z
+     137   0x4af0  ??4RFile@@QAEAAV0@ABV0@@Z
+     138  0x354e4  ??_7LAdjust@@6B@
+     139  0x353c4  ??_7LBorder@@6B@
+     140  0x353e8  ??_7LBuffer@@6B@
+     141  0x35414  ??_7LButton@@6B@
+     142  0x35468  ??_7LColorConsoleView@@6B@
+     143  0x35354  ??_7LCombo@@6B@
+     144  0x35430  ??_7LConsoleView@@6B@
+     145  0x352c8  ??_7LControl@@6B@
+     146  0x35504  ??_7LControlBar@@6B@
+     147  0x352c4  ??_7LCtrlGroup@@6B@
+     148  0x352a8  ??_7LCtrlManager@@6B@
+     149  0x352e4  ??_7LDialog@@6B@
+     150  0x35338  ??_7LEdit@@6B@
+     151  0x353ec  ??_7LImage@@6B@
+     152  0x353f0  ??_7LImageAdjust@@6B@
+     153  0x354a0  ??_7LImageList@@6B@
+
+     154  0x35520  ??_7LLed@@6B@
+     155  0x35300  ??_7LListView@@6B@
+     156  0x3553c  ??_7LMeter@@6B@
+     157  0x353a8  ??_7LPicture@@6B@
+     158  0x3531c  ??_7LScrollBar@@6B@
+     159  0x35560  ??_7LSelect@@6B@
+     160  0x35590  ??_7LSignpost@@6B@
+     161  0x3538c  ??_7LStatic@@6B@
+     162  0x354c8  ??_7LTitle@@6B@
+     163  0x353c8  ??_7LToolTip@@6B@
+     164  0x353e4  ??_7RFile@@6B@
+     165  0x15160  ?ADD@LImageList@@QAEXVLImage@@@Z
+     166  0x12f80  ?BackSpaceKey@LEdit@@IAEHXZ
+     167   0xaca0  ?Blend@LImageAdjust@@QAEXVLImage@@HHHHH@Z
+     168  0x11c70  ?CalcDrawNum@LConsoleView@@IAEXXZ
+     169   0x7fd0  ?Change@LBuffer@@QAEHHHH@Z
+     170   0xa790  ?Change@LImage@@QAEHHHH@Z
+     171  0x1cbb0  ?CheckBorder@LControlBar@@IAEHHH@Z
+     172   0xfdb0  ?CheckMessageRgn@LButton@@UAEHUTPoint@@@Z
+     173  0x207c0  ?CheckMessageRgn@LControl@@UAEHUTPoint@@@Z
+     174  0x1e900  ?CheckMessageRgn@LMeter@@UAEHUTPoint@@@Z
+     175  0x1e900  ?CheckMessageRgn@LSelect@@UAEHUTPoint@@@Z
+     176  0x1e900  ?CheckMessageRgn@LSignpost@@UAEHUTPoint@@@Z
+     177   0x7090  ?CheckRgn@LBuffer@@QAEHHH@Z
+     178   0x8790  ?CheckRgn@LImage@@QAEHHH@Z
+     179   0x7120  ?Clear@LBuffer@@QAEXE@Z
+     180   0x8820  ?Clear@LImage@@QAEXE@Z
+     181   0xd280  ?Close@RFile@@QAEXXZ
+     182   0x4750  ?Composition@LToolTip@@IAEXPBD@Z
+     183  0x13180  ?CopyText@LEdit@@IAEXXZ
+     184  0x1b2f0  ?Create@LAdjust@@QAEXHHHH@Z
+
+     185  0x1f8b0  ?Create@LBorder@@QAEXPAUHWND__@@H@Z
+     186   0xfb30  ?Create@LButton@@QAEXPADHHHHJ@Z
+     187   0xfa60  ?Create@LButton@@QAEXVLImage@@HHHHJ@Z
+     188  0x10af0  ?Create@LCombo@@QAEXHHHHH@Z
+     189  0x11900  ?Create@LConsoleView@@QAEXHHHHJ@Z
+     190  0x20280  ?Create@LControl@@QAEXHHHH@Z
+     191  0x1ba10  ?Create@LControlBar@@QAEXHHHH@Z
+     192   0xd6c0  ?Create@LCtrlManager@@QAEXPAVTWindow@@HHHHIIPBD@Z
+     193   0x1d60  ?Create@LDialog@@QAEXPAVTWindow@@HHHH@Z
+     194  0x126a0  ?Create@LEdit@@QAEXPADHHHH@Z
+     195  0x14e80  ?Create@LImageList@@QAEXHHHHJ@Z
+     196  0x14f00  ?Create@LImageList@@QAEXVLImage@@HHHHHJ@Z
+     197  0x1d6c0  ?Create@LLed@@QAEXHHHHHJ@Z
+     198  0x159a0  ?Create@LListView@@QAEXHHHHI@Z
+     199  0x1de40  ?Create@LMeter@@QAEXHHHHJ@Z
+     200  0x181a0  ?Create@LPicture@@QAEXHHHHJ@Z
+     201  0x180d0  ?Create@LPicture@@QAEXPADHHHHJ@Z
+     202  0x18120  ?Create@LPicture@@QAEXVLImage@@HHHHJ@Z
+     203  0x184e0  ?Create@LScrollBar@@QAEXHHHHHII@Z
+     204  0x1e780  ?Create@LSelect@@QAEXHHHHJ@Z
+     205  0x1f200  ?Create@LSignpost@@QAEXHHHH@Z
+     206  0x19fe0  ?Create@LStatic@@QAEXPADHHHH0H@Z
+     207  0x1aa30  ?Create@LTitle@@QAEXPADHHHH0H@Z
+     208   0x4720  ?Create@LToolTip@@QAEXPAVTWindow@@PBD@Z
+     209   0xee00  ?CreateCaret@LCtrlManager@@QAEXHH@Z
+     210   0x81c0  ?CreateDIBPalette@LBuffer@@IAEPAUHPALETTE__@@XZ
+     211   0x6f80  ?CreateImage@LBuffer@@QAEHHHH@Z
+     212   0x8450  ?CreateImage@LImage@@QAEHHHH@Z
+     213  0x46b80  ?CursorManager@@3VLCursorManager@@A
+     214  0x15e40  ?DeleteAllItems@LListView@@QAEXXZ
+     215  0x10d70  ?DeleteColumn@LCombo@@QAEXH@Z
+     216  0x15ba0  ?DeleteColumn@LListView@@QAEXH@Z
+     217  0x1bb20  ?DeleteCtrl@LControlBar@@QAEXPAVLControl@@@Z
+     218  0x20960  ?DeleteCtrl@LCtrlGroup@@QAEXPAVLControl@@@Z
+     219   0xd8e0  ?DeleteCtrl@LCtrlManager@@QAEXPAVLControl@@@Z
+     220  0x10ed0  ?DeleteItem@LCombo@@QAEXH@Z
+     221  0x15da0  ?DeleteItem@LListView@@QAEXH@Z
+     222  0x130c0  ?DeleteKey@LEdit@@IAEHXZ
+     223  0x12020  ?DeleteText@LColorConsoleView@@UAEXH@Z
+     224  0x11a80  ?DeleteText@LConsoleView@@UAEXH@Z
+     225  0x134b0  ?DeleteText@LEdit@@IAEHXZ
+     226  0x10c90  ?Destroy@LCombo@@UAEXXZ
+     227   0xb330  ?Destroy@LControl@@UAEXXZ
+     228   0xee30  ?DestroyCaret@LCtrlManager@@QAEXXZ
+     229   0x1dd0  ?DoModal@LDialog@@QAEHXZ
+     230   0x12f0  ?Draw3DEdge@@YAHPAUHDC__@@HHHHKK@Z
+     231   0x11e0  ?Draw3DFace@@YAHPAUHDC__@@HHHHKKK@Z
+     232   0x6140  ?Draw@DSprite@@QAEXAAVLBuffer@@HHJHH@Z
+     233   0x5370  ?Draw@DSprite@@QAEXAAVLImage@@HHJHHH@Z
+     234   0x4f40  ?Draw@DSprite@@QAEXPAEJJJJJ@Z
+     235   0x7ae0  ?Draw@LBuffer@@QAEHAAV1@HHHHHHH@Z
+     236   0x75f0  ?Draw@LBuffer@@QAEHAAVLImage@@HHHHHHH@Z
+     237   0x7450  ?Draw@LBuffer@@QAEHPAUHDC__@@HH@Z
+     238   0x74e0  ?Draw@LBuffer@@QAEHPAUHDC__@@HHHHHHHH@Z
+     239   0x8eb0  ?Draw@LImage@@QAEHAAV1@HHHHHHHHH@Z
+     240   0x9b20  ?Draw@LImage@@QAEHAAVLBuffer@@HHHHHHHHH@Z
+     241   0x8dc0  ?Draw@LImage@@QAEHPAUHDC__@@HH@Z
+     242   0x8e00  ?Draw@LImage@@QAEHPAUHDC__@@HHHHHHHH@Z
+     243  0x154c0  ?Draw@LImageList@@QAEXAAVLImage@@HHHH@Z
+     244  0x1faa0  ?DrawBorder@LBorder@@QAEXPAUHRGN__@@@Z
+     245   0x67a0  ?DrawFlip@DSprite@@QAEXAAVLBuffer@@HHJHH@Z
+     246   0x5af0  ?DrawFlip@DSprite@@QAEXAAVLImage@@HHJHH@Z
+     247   0x5150  ?DrawFlip@DSprite@@QAEXPAEJJJJJ@Z
+     248   0x9690  ?DrawFlip@LImage@@QAEHAAV1@HHHHHHHHH@Z
+     249   0xa300  ?DrawFlip@LImage@@QAEHAAVLBuffer@@HHHHHHHHH@Z
+     250   0x13b0  ?DrawTriangle@@YAHPAUHDC__@@HHJ@Z
+     251  0x205d0  ?Enabled@LControl@@QAEXH@Z
+     252  0x1bcf0  ?Enabled@LControlBar@@QAEXHI@Z
+     253  0x20a60  ?Enabled@LCtrlGroup@@QAEXH@Z
+     254   0x1fb0  ?EndDialog@LDialog@@QAEXH@Z
+     255   0x8760  ?FindDIBColorTable@LImage@@QAEPAEXZ
+     256   0x8740  ?FindDIBits@LImage@@QAEPAEXZ
+     257   0x8170  ?Free@LBuffer@@IAEXXZ
+     258   0xa910  ?Free@LImage@@IAEXXZ
+     259   0xb330  ?FreeLBufferDC@LBuffer@@IAEXXZ
+     260   0xb330  ?FreeLImageDC@LImage@@IAEXXZ
+     261   0xd430  ?GetBackColor@LButton@@QAEKXZ
+     262  0x16310  ?GetBackColor@LConsoleView@@QAEKXZ
+     263  0x16230  ?GetBackColor@LListView@@QAEKXZ
+     264  0x1a1f0  ?GetBackColor@LStatic@@QAEKXZ
+     265  0x1ac70  ?GetBackColor@LTitle@@QAEKXZ
+     266  0x1fb60  ?GetBorderSize@LBorder@@QAEHH@Z
+     267  0x1bd90  ?GetBorderSize@LControlBar@@QAEHH@Z
+     268   0x1130  ?GetBrightColor@@YAKKH@Z
+     269   0xdba0  ?GetButton@LCombo@@QAEPAVLControl@@XZ
+     270  0x12ad0  ?GetCharPosition@LEdit@@IAE?AUtagPOINT@@HHH@Z
+     271   0xd560  ?GetClass@LCtrlManager@@UBEPBVTWindowClass@@XZ
+     272   0x1d20  ?GetClass@LDialog@@UBEPBVTWindowClass@@XZ
+     273   0x46e0  ?GetClass@LToolTip@@UBEPBVTWindowClass@@XZ
+     274  0x187b0  ?GetClicked@LScrollBar@@IAEIHH@Z
+     275  0x1fb40  ?GetClientHeight@LBorder@@QAEHXZ
+     276  0x1bd70  ?GetClientHeight@LControlBar@@QAEHXZ
+     277  0x1fb20  ?GetClientWidth@LBorder@@QAEHXZ
+     278  0x1bd50  ?GetClientWidth@LControlBar@@QAEHXZ
+     279   0x7360  ?GetClipRect@LBuffer@@QAEXPAUtagRECT@@@Z
+     280   0x89f0  ?GetClipRect@LImage@@QAEXPAUtagRECT@@@Z
+     281   0x72a0  ?GetColorKey@LBuffer@@QAEEXZ
+     282   0x8960  ?GetColorKey@LImage@@QAEEXZ
+     283  0x15510  ?GetColorKey@LImageList@@QAEEXZ
+     284  0x18290  ?GetColorKey@LPicture@@QAEHXZ
+     285   0x8a30  ?GetColorNum@LImage@@QAEHXZ
+     286  0x16310  ?GetColumnRepeat@LListView@@QAEHXZ
+     287   0xda70  ?GetCtrlCount@LCtrlManager@@QAEGXZ
+     288   0xda50  ?GetCtrlFirst@LCtrlManager@@QAEPAVLControl@@XZ
+     289   0xda60  ?GetCtrlLast@LCtrlManager@@QAEPAVLControl@@XZ
+     290   0xf350  ?GetCursor@LCursorManager@@QAEPAUHICON__@@H@Z
+     291   0x1080  ?GetDarkColor@@YAKKH@Z
+     292   0xda60  ?GetDrawLayer@LControl@@QAEHXZ
+     293  0x11b90  ?GetDrawLine@LConsoleView@@QAEHXZ
+     294  0x16380  ?GetDrawLine@LListView@@QAEHXZ
+     295  0x11be0  ?GetDrawLineNum@LConsoleView@@QAEHXZ
+     296  0x16390  ?GetDrawLineNum@LListView@@QAEHXZ
+     297  0x15150  ?GetDrawNum@LImageList@@QAEHXZ
+     298  0x18640  ?GetEdit@LCombo@@QAEPAVLControl@@XZ
+     299  0x1b390  ?GetFaceColor@LButton@@QAEKXZ
+     300  0x11c50  ?GetFaceColor@LConsoleView@@QAEKXZ
+     301  0x16220  ?GetFaceColor@LListView@@QAEKXZ
+     302  0x16220  ?GetFontColor@LButton@@QAEKXZ
+     303  0x11c60  ?GetFontColor@LConsoleView@@QAEKXZ
+     304  0x16240  ?GetFontColor@LListView@@QAEKXZ
+     305  0x1a1d0  ?GetFontColor@LStatic@@QAEKXZ
+     306  0x1ac40  ?GetFontColor@LTitle@@QAEKXZ
+     307   0xd430  ?GetFontHeight@LConsoleView@@QAEHXZ
+     308   0x14f0  ?GetFontInfo@@YAHPAUHFONT__@@AAUtagTEXTMETRICA@@@Z
+     309   0xdba0  ?GetFormat@LLed@@QAEHXZ
+     310  0x1a1b0  ?GetFormat@LStatic@@QAEIXZ
+     311   0xda50  ?GetGroupIndex@LControl@@QAEHXZ
+     312   0x7100  ?GetHandle@LBuffer@@QAEPAEXZ
+     313  0x12f00  ?GetHangleWidth@LEdit@@IAEHXZ
+     314   0x73b0  ?GetHeight@LBuffer@@QAEHXZ
+     315   0x8a80  ?GetHeight@LImage@@QAEHXZ
+     316   0x8a90  ?GetImage@LImage@@QAE?AV1@HHHH@Z
+     317  0x150c0  ?GetImage@LImageList@@QAE?AVLImage@@HHHHH@Z
+     318   0x7380  ?GetImageBit@LBuffer@@QAEHXZ
+     319   0x8a10  ?GetImageBit@LImage@@QAEHXZ
+     320  0x16390  ?GetImageCount@LImageList@@QAEHXZ
+     321   0x73c0  ?GetImageDC@LBuffer@@QAEPAUHDC__@@HHHH@Z
+     322   0x8ba0  ?GetImageDC@LImage@@QAEPAUHDC__@@HHHH@Z
+     323   0x8c20  ?GetImageRegion@LImage@@QAEPAUHRGN__@@XZ
+     324  0x15f20  ?GetItem@LListView@@QAEHPAUtagLLVITEM@@@Z
+     325  0x16130  ?GetItemCount@LListView@@QAEHXZ
+     326  0x16040  ?GetItemImage@LListView@@QAEHHH@Z
+     327  0x16000  ?GetItemText@LListView@@QAEPADHH@Z
+     328   0xdc00  ?GetLBuffer@LCtrlManager@@QAEXAAVLImage@@@Z
+     329   0x7440  ?GetLBufferDC@LBuffer@@QAEPAUHDC__@@XZ
+     330   0xdba0  ?GetLCapture@LCtrlManager@@QAEPAVLControl@@XZ
+     331  0x16220  ?GetLCursor@LCtrlManager@@QAEHXZ
+     332  0x18640  ?GetLFocus@LCtrlManager@@QAEPAVLControl@@XZ
+     333  0x18640  ?GetLed@LLed@@QAEHXZ
+     334  0x11b80  ?GetListView@LCombo@@QAEPAVLControl@@XZ
+     335  0x1f410  ?GetNum@LSignpost@@QAEHH@Z
+     336   0x7190  ?GetPalette@LBuffer@@QAEHPAUtagRGBQUAD@@@Z
+     337   0x88a0  ?GetPalette@LImage@@QAEHPAUtagRGBQUAD@@@Z
+     338  0x18250  ?GetPicture@LAdjust@@QAE?AVLImage@@HHHH@Z
+     339  0x18250  ?GetPicture@LPicture@@QAE?AVLImage@@HHHH@Z
+     340  0x1dfd0  ?GetPoint@LMeter@@QAEHXZ
+     341  0x12bb0  ?GetPositionChar@LEdit@@IAE?AUtagPOINT@@HHH@Z
+     342   0xd750  ?GetPreTranslateWindow@LCtrlManager@@SAPAVTWindow@@PAUHWND__@@@Z
+     343  0x11b80  ?GetPushed@LButton@@QAEHXZ
+     344  0x11b90  ?GetScrollBar@LCombo@@QAEPAVLControl@@XZ
+     345  0x18640  ?GetScrollPos@LScrollBar@@QAEHXZ
+     346  0x18670  ?GetScrollRange@LScrollBar@@QAEHPAUtagSIZE@@H@Z
+     347  0x1b390  ?GetSelect@LImageList@@QAEHXZ
+     348  0x1e8c0  ?GetSelect@LSelect@@QAEHXZ
+     349  0x15fc0  ?GetSelectItem@LListView@@QAEHAAH0@Z
+     350  0x163a0  ?GetSelected@LListView@@IAEHHHAAH00@Z
+     351  0x11b80  ?GetSize@LConsoleView@@QAEHXZ
+     352  0x1b390  ?GetState@LAdjust@@QAEHXZ
+     353  0x128f0  ?GetText@LEdit@@QAEHPADH@Z
+     354  0x1a0c0  ?GetText@LStatic@@QAEHPADH@Z
+     355  0x1a110  ?GetText@LStatic@@QAEPBDXZ
+     356  0x128f0  ?GetText@LTitle@@QAEHPADH@Z
+     357  0x1a110  ?GetText@LTitle@@QAEPBDXZ
+     358  0x129e0  ?GetTextLimit@LEdit@@QAEHXZ
+     359   0xd430  ?GetTickRate@LTickManager@@QAEHXZ
+     360  0x20420  ?GetToolTip@LControl@@QAEPADXZ
+     361   0x73a0  ?GetWidth@LBuffer@@QAEHXZ
+     362   0x8a70  ?GetWidth@LImage@@QAEHXZ
+     363  0x20630  ?Group@LControl@@QAEXH@Z
+     364   0x8140  ?InitDIB@LBuffer@@IAEHH@Z
+     365  0x10cd0  ?InsertColumn@LCombo@@QAEXHHI@Z
+     366  0x15a60  ?InsertColumn@LListView@@QAEXHUtagLLVCOLUMN@@@Z
+     367  0x1bb10  ?InsertCtrl@LControlBar@@QAEXPAVLControl@@@Z
+     368  0x20930  ?InsertCtrl@LCtrlGroup@@QAEXPAVLControl@@@Z
+     369   0xd860  ?InsertCtrl@LCtrlManager@@QAEXPAVLControl@@I@Z
+     370  0x10d80  ?InsertItem@LCombo@@QAEXHHPBDHI@Z
+     371  0x15c60  ?InsertItem@LListView@@QAEXUtagLLVITEM@@@Z
+     372  0x120d0  ?InsertText@LColorConsoleView@@QAEXHPBDK@Z
+     373  0x11fb0  ?InsertText@LColorConsoleView@@UAEXHPBD@Z
+     374  0x11a00  ?InsertText@LConsoleView@@UAEXHPBD@Z
+     375  0x20760  ?Invalidate@LControl@@UAEXPAUTRect@@H@Z
+     376   0xd840  ?Invalidate@LCtrlManager@@QAEXH@Z
+     377   0xaac0  ?Invert@LImageAdjust@@QAEXHHHH@Z
+     378   0x4f30  ?IsDataNull@DSprite@@QAEHXZ
+     379   0x8780  ?IsDataNull@LBuffer@@QAEHXZ
+     380   0x8780  ?IsDataNull@LImage@@QAEHXZ
+     381   0xee70  ?IsDialogMessageA@LCtrlManager@@IAEHPAUtagMSG@@@Z
+     382  0x20660  ?IsEnabled@LControl@@QAEHXZ
+     383  0x20690  ?IsGroup@LControl@@QAEHXZ
+     384   0x1550  ?IsHan@@YAHPADH@Z
+     385  0x20720  ?IsLCMStyle@LControl@@QAEHJ@Z
+     386  0x206d0  ?IsStyle@LControl@@QAEHJ@Z
+     387  0x20670  ?IsTabStop@LControl@@QAEHXZ
+     388  0x20680  ?IsTopCtrl@LControl@@QAEHXZ
+     389  0x20650  ?IsVisible@LControl@@QAEHXZ
+     390   0x35a0  ?LHideListDialog@@YAHXZ
+     391   0x4670  ?LHideToolTip@@YAHXZ
+     392   0x3570  ?LShowListDialog@@YAHPAVTWindow@@HHHHPAVLControl@@@Z
+     393   0x4590  ?LShowToolTip@@YAHPAVTWindow@@PAVLControl@@@Z
+     394   0xac90  ?Lighten@LImageAdjust@@QAEXVLImage@@HHHH@Z
+     395   0x4be0  ?Load@DSprite@@QAEJPAD@Z
+     396   0xb0f0  ?LoadBMP@LImage@@IAEHPAD@Z
+     397   0xc0d0  ?LoadGIF@LImage@@IAEHPAD@Z
+     398   0x8550  ?LoadImageA@LImage@@QAEHPAD@Z
+     399   0xc910  ?LoadJPG@LImage@@IAEHPAD@Z
+     400  0x1b310  ?LoadPicture@LAdjust@@QAEXPAD@Z
+     401  0x181f0  ?LoadPicture@LPicture@@QAEXPAD@Z
+     402  0x1fc10  ?MakeBorder@LBorder@@IAEXXZ
+     403  0x1bc10  ?Move@LControlBar@@QAEXHHI@Z
+     404  0x209e0  ?Move@LCtrlGroup@@QAEXHH@Z
+     405  0x119a0  ?MoveControl@LConsoleView@@UAEXHHHHH@Z
+     406  0x202a0  ?MoveControl@LControl@@UAEXHHHHH@Z
+     407  0x1bb80  ?MoveTo@LControlBar@@QAEXHHI@Z
+     408  0x209a0  ?MoveTo@LCtrlGroup@@QAEXHH@Z
+     409  0x148d0  ?OnActivate@LToolTip@@IAEHG_NPAUHWND__@@@Z
+     410   0x4a80  ?OnActivateApp@LToolTip@@IAEH_NK@Z
+     411  0x14190  ?OnChar@LEdit@@IAEHIII@Z
+     412   0x20e0  ?OnClose@LDialog@@QAEHXZ
+     413  0x20830  ?OnCreate@LToolTip@@IAEHPAUtagCREATESTRUCTA@@@Z
+     414   0x20a0  ?OnDestroy@LDialog@@QAEHXZ
+     415   0x4a40  ?OnDestroy@LToolTip@@IAEHXZ
+     416  0x148d0  ?OnImeChar@LEdit@@IAEHIII@Z
+     417  0x14440  ?OnImeComposition@LEdit@@IAEHKK@Z
+     418  0x143a0  ?OnImeEndComposition@LEdit@@IAEHXZ
+     419  0x143e0  ?OnImeNotify@LEdit@@IAEHKK@Z
+     420  0x14350  ?OnImeStartComposition@LEdit@@IAEHXZ
+     421  0x10a70  ?OnKeyDown@LButton@@IAEHHI@Z
+     422  0x13dd0  ?OnKeyDown@LEdit@@IAEHHI@Z
+     423  0x13d70  ?OnKeyUp@LEdit@@IAEHHI@Z
+     424  0x10800  ?OnLButtonDoubleClick@LButton@@IAEHIFF@Z
+     425  0x13d10  ?OnLButtonDoubleClick@LEdit@@IAEHIFF@Z
+     426  0x19ec0  ?OnLButtonDoubleClick@LScrollBar@@IAEHIFF@Z
+     427  0x10780  ?OnLButtonDown@LButton@@IAEHIFF@Z
+     428  0x1d280  ?OnLButtonDown@LControlBar@@IAEHIFF@Z
+     429  0x13be0  ?OnLButtonDown@LEdit@@IAEHIFF@Z
+     430  0x157c0  ?OnLButtonDown@LImageList@@IAEHIFF@Z
+     431  0x17ef0  ?OnLButtonDown@LListView@@IAEHIFF@Z
+     432  0x19de0  ?OnLButtonDown@LScrollBar@@IAEHIFF@Z
+     433  0x1ea20  ?OnLButtonDown@LSelect@@MAEHIFF@Z
+     434  0x107e0  ?OnLButtonUp@LButton@@IAEHIFF@Z
+     435  0x1d300  ?OnLButtonUp@LControlBar@@IAEHIFF@Z
+     436  0x13c70  ?OnLButtonUp@LEdit@@IAEHIFF@Z
+     437  0x19e90  ?OnLButtonUp@LScrollBar@@IAEHIFF@Z
+     438  0x13b10  ?OnLKillFocus@LEdit@@IAEHXZ
+     439  0x10a00  ?OnLMouseHover@LButton@@IAEHXZ
+     440  0x26020  ?OnLMouseHover@LSelect@@MAEHXZ
+     441  0x10a30  ?OnLMouseLeave@LButton@@IAEHXZ
+     442  0x1d260  ?OnLMouseLeave@LControlBar@@IAEHXZ
+     443  0x17ea0  ?OnLMouseLeave@LListView@@IAEHXZ
+     444  0x1ebd0  ?OnLMouseLeave@LSelect@@MAEHXZ
+     445  0x13a60  ?OnLSetFocus@LEdit@@IAEHXZ
+     446  0x148e0  ?OnLTimeTick@LEdit@@IAEHGK@Z
+     447  0x19ee0  ?OnLTimeTick@LScrollBar@@IAEHGK@Z
+     448   0xd7b0  ?OnLTimeTick@LToolTip@@IAEHGK@Z
+     449  0x109a0  ?OnMButtonDoubleClick@LButton@@IAEHIFF@Z
+     450  0x10900  ?OnMButtonDown@LButton@@IAEHIFF@Z
+     451  0x10970  ?OnMButtonUp@LButton@@IAEHIFF@Z
+     452  0x109d0  ?OnMouseMove@LButton@@IAEHIFF@Z
+     453  0x1cfb0  ?OnMouseMove@LControlBar@@IAEHIFF@Z
+     454  0x13b50  ?OnMouseMove@LEdit@@IAEHIFF@Z
+     455  0x17e00  ?OnMouseMove@LListView@@IAEHIFF@Z
+     456  0x148d0  ?OnMouseMove@LMeter@@MAEHIFF@Z
+     457  0x19ad0  ?OnMouseMove@LScrollBar@@IAEHIFF@Z
+     458  0x1eb30  ?OnMouseMove@LSelect@@MAEHIFF@Z
+     459  0x148d0  ?OnMouseMove@LSignpost@@MAEHIFF@Z
+     460  0x10a60  ?OnMouseWheel@LButton@@IAEHGFFF@Z
+     461  0x11e40  ?OnMouseWheel@LConsoleView@@MAEHGFFF@Z
+     462  0x15750  ?OnMouseWheel@LImageList@@IAEHGFFF@Z
+     463   0x1ff0  ?OnNcCreate@LDialog@@QAEHPAUtagCREATESTRUCTA@@@Z
+     464  0x1af10  ?OnNcHitTest@LTitle@@IAEHHH@Z
+     465  0x1b3c0  ?OnPaint@LAdjust@@MAEHPAVLBuffer@@@Z
+     466   0xfe10  ?OnPaint@LButton@@IAEHPAVLBuffer@@@Z
+     467  0x121a0  ?OnPaint@LColorConsoleView@@MAEHPAVLBuffer@@@Z
+     468  0x20830  ?OnPaint@LCombo@@IAEHPAVLBuffer@@@Z
+     469  0x11c90  ?OnPaint@LConsoleView@@MAEHPAVLBuffer@@@Z
+     470  0x1bef0  ?OnPaint@LControlBar@@IAEHPAVLBuffer@@@Z
+     471  0x13540  ?OnPaint@LEdit@@IAEHPAVLBuffer@@@Z
+     472  0x15520  ?OnPaint@LImageList@@IAEHPAVLBuffer@@@Z
+     473  0x1d770  ?OnPaint@LLed@@IAEHPAVLBuffer@@@Z
+     474  0x165b0  ?OnPaint@LListView@@IAEHPAVLBuffer@@@Z
+     475  0x1e080  ?OnPaint@LMeter@@MAEHPAVLBuffer@@@Z
+     476  0x182d0  ?OnPaint@LPicture@@IAEHPAVLBuffer@@@Z
+     477  0x18bd0  ?OnPaint@LScrollBar@@IAEHPAVLBuffer@@@Z
+     478  0x1e950  ?OnPaint@LSelect@@MAEHPAVLBuffer@@@Z
+     479  0x1f440  ?OnPaint@LSignpost@@MAEHPAVLBuffer@@@Z
+     480  0x1a200  ?OnPaint@LStatic@@IAEHPAVLBuffer@@@Z
+     481  0x1acc0  ?OnPaint@LTitle@@IAEHPAVLBuffer@@@Z
+     482  0x108d0  ?OnRButtonDoubleClick@LButton@@IAEHIFF@Z
+     483  0x10830  ?OnRButtonDown@LButton@@IAEHIFF@Z
+     484  0x108a0  ?OnRButtonUp@LButton@@IAEHIFF@Z
+     485  0x1af20  ?OnSize@LTitle@@IAEHIHH@Z
+     486  0x10ff0  ?OnpButtonClicked@LCombo@@IAEHXZ
+     487  0x10fd0  ?OnpEditChanged@LCombo@@IAEHXZ
+     488  0x10fb0  ?OnpEditCommand@LCombo@@IAEHXZ
+     489   0xcfc0  ?Open@RFile@@QAEHPADW4Rare_OpenFile@@@Z
+     490  0x13220  ?PasteText@LEdit@@IAEHXZ
+     491   0xd7b0  ?PreTranslateCtrlMessage@LCtrlManager@@UAEHPAVLControl@@AAUTMessage@@@Z
+     492   0xd790  ?PreTranslateMessage@LCtrlManager@@UAE_NPAUtagMSG@@@Z
+     493  0x1af40  ?ProcMessage@LAdjust@@MAEHAAUTMessage@@@Z
+     494   0xf410  ?ProcMessage@LButton@@MAEHAAUTMessage@@@Z
+     495  0x113f0  ?ProcMessage@LColorConsoleView@@MAEHAAUTMessage@@@Z
+     496   0x3140  ?ProcMessage@LCombo@@MAEHAAUTMessage@@@Z
+     497  0x11050  ?ProcMessage@LConsoleView@@MAEHAAUTMessage@@@Z
+     498  0x20830  ?ProcMessage@LControl@@UAEHAAUTMessage@@@Z
+     499  0x1b560  ?ProcMessage@LControlBar@@MAEHAAUTMessage@@@Z
+     500   0x2a00  ?ProcMessage@LEdit@@MAEHAAUTMessage@@@Z
+     501  0x14a70  ?ProcMessage@LImageList@@MAEHAAUTMessage@@@Z
+     502  0x1d330  ?ProcMessage@LLed@@MAEHAAUTMessage@@@Z
+     503   0x2160  ?ProcMessage@LListView@@MAEHAAUTMessage@@@Z
+     504  0x1d8a0  ?ProcMessage@LMeter@@MAEHAAUTMessage@@@Z
+     505   0x3e30  ?ProcMessage@LPicture@@MAEHAAUTMessage@@@Z
+     506   0x26c0  ?ProcMessage@LScrollBar@@MAEHAAUTMessage@@@Z
+     507  0x1e280  ?ProcMessage@LSelect@@MAEHAAUTMessage@@@Z
+     508  0x1ec00  ?ProcMessage@LSignpost@@MAEHAAUTMessage@@@Z
+     509   0x3b70  ?ProcMessage@LStatic@@MAEHAAUTMessage@@@Z
+     510  0x1a6c0  ?ProcMessage@LTitle@@MAEHAAUTMessage@@@Z
+     511  0x12150  ?PutLine@LColorConsoleView@@QAEXPBDK@Z
+     512  0x12080  ?PutLine@LColorConsoleView@@UAEXPBD@Z
+     513  0x11ac0  ?PutLine@LConsoleView@@UAEXPBD@Z
+     514  0x11b40  ?PutLinef@LConsoleView@@UAAXPBDZZ
+     515   0xd320  ?Read@RFile@@QAEHPAXH@Z
+     516   0x4db0  ?ReallocImage@DSprite@@QAEXPAUSPRITE@@@Z
+     517   0xd3f0  ?RegistCtrlManager@LTickManager@@QAEPAV1@PAVLCtrlManager@@@Z
+     518   0xf030  ?RegisterClassA@LCtrlManager@@MAEXXZ
+     519   0x1da0  ?RegisterClassA@LDialog@@MAEXXZ
+     520   0x4ee0  ?Release@DSprite@@QAEXXZ
+     521   0xdbe0  ?ReleaseLCapture@LCtrlManager@@QAEXXZ
+     522  0x152b0  ?Remove@LImageList@@QAEXH@Z
+     523   0xf400  ?RemoveAllCursor@LCursorManager@@QAEXXZ
+     524   0xd450  ?RemoveCtrlManager@LTickManager@@QAEXPAVLCtrlManager@@@Z
+     525   0xf3d0  ?RemoveCursor@LCursorManager@@QAEXH@Z
+     526  0x15440  ?Replace@LImageList@@QAEXVLImage@@H@Z
+     527  0x20700  ?ResetLCMStyle@LControl@@QAEXJ@Z
+     528  0x206b0  ?ResetStyle@LControl@@QAEXJ@Z
+     529  0x1fbb0  ?Resize@LBorder@@IAEXXZ
+     530  0x12d80  ?ReviseDrawNum@LEdit@@IAEXXZ
+     531   0xb230  ?SaveBMP@LImage@@IAEHPAD@Z
+     532  0x20830  ?SaveGIF@LImage@@IAEHPAD@Z
+     533   0x8640  ?SaveImage@LImage@@QAEHPAD@Z
+     534   0xc9e0  ?SaveJPG@LImage@@IAEHPAD@Z
+     535   0xd2b0  ?Seek@RFile@@QAEHHH@Z
+     536  0x20840  ?SendCommandMessage@LControl@@IAEHG@Z
+     537   0xdcf0  ?SendCtrlMessage@LCtrlManager@@IAEHAAUTMessage@@AAH@Z
+     538   0xd440  ?SetBackColor@LButton@@QAEXK@Z
+     539  0x186c0  ?SetBackColor@LConsoleView@@QAEXK@Z
+     540  0x12890  ?SetBackColor@LEdit@@QAEXK@Z
+     541  0x14fe0  ?SetBackColor@LImageList@@QAEXK@Z
+     542  0x16200  ?SetBackColor@LListView@@QAEXK@Z
+     543  0x1a1e0  ?SetBackColor@LStatic@@QAEXK@Z
+     544  0x1ac50  ?SetBackColor@LTitle@@QAEXKH@Z
+     545  0x1dea0  ?SetBackImage@LMeter@@QAEXVLImage@@H@Z
+     546  0x1e7e0  ?SetBackImage@LSelect@@QAEXVLImage@@H@Z
+     547  0x1f280  ?SetBackImage@LSignpost@@QAEXVLImage@@H@Z
+     548  0x186c0  ?SetButtonSize@LScrollBar@@QAEXH@Z
+     549   0xfc80  ?SetCaption@LButton@@QAEXPAD@Z
+     550   0xee40  ?SetCaretPos@LCtrlManager@@QAEXHH@Z
+     551   0x72c0  ?SetClipRect@LBuffer@@QAEXHHHH@Z
+     552   0x8980  ?SetClipRect@LImage@@QAEXHHHH@Z
+     553   0x72b0  ?SetColorKey@LBuffer@@QAEXE@Z
+     554   0xfcd0  ?SetColorKey@LButton@@QAEXH@Z
+     555   0x8970  ?SetColorKey@LImage@@QAEXE@Z
+     556  0x182a0  ?SetColorKey@LImageList@@QAEXE@Z
+     557  0x182a0  ?SetColorKey@LPicture@@QAEXE@Z
+     558  0x162f0  ?SetColumnRepeat@LListView@@QAEXH@Z
+     559   0xf390  ?SetCursor@LCursorManager@@QAEXHPAD@Z
+     560  0x1e000  ?SetDivImage@LMeter@@QAEXVLImage@@HHH@Z
+     561  0x1e070  ?SetDivStep@LMeter@@QAEXH@Z
+     562  0x20750  ?SetDrawLayer@LControl@@QAEXH@Z
+     563  0x11ba0  ?SetDrawLine@LConsoleView@@QAEXH@Z
+     564  0x16320  ?SetDrawLine@LListView@@QAEXH@Z
+     565  0x1be90  ?SetDrawMode@LControlBar@@QAEXHH@Z
+     566  0x161c0  ?SetDrawMode@LListView@@QAEXHEH@Z
+     567  0x182b0  ?SetDrawMode@LPicture@@QAEXHE@Z
+     568  0x15130  ?SetDrawNum@LImageList@@QAEXH@Z
+     569   0xfc00  ?SetFaceColor@LButton@@QAEXK@Z
+     570  0x186b0  ?SetFaceColor@LConsoleView@@QAEXK@Z
+     571  0x128b0  ?SetFaceColor@LEdit@@QAEXK@Z
+     572  0x15000  ?SetFaceColor@LImageList@@QAEXK@Z
+     573  0x161f0  ?SetFaceColor@LListView@@QAEXK@Z
+     574   0xd980  ?SetFirstCtrl@LCtrlManager@@QAEXPAVLControl@@@Z
+     575  0x11bf0  ?SetFont@LConsoleView@@QAEXPBDH@Z
+     576  0x127a0  ?SetFont@LEdit@@QAEXPADH@Z
+     577  0x16250  ?SetFont@LListView@@QAEXPADH@Z
+     578  0x1a120  ?SetFont@LStatic@@QAEXPADH@Z
+     579  0x1ab60  ?SetFont@LTitle@@QAEXPADHH@Z
+     580  0x161f0  ?SetFontColor@LButton@@QAEXK@Z
+     581  0x11c40  ?SetFontColor@LConsoleView@@QAEXK@Z
+     582  0x12870  ?SetFontColor@LEdit@@QAEXK@Z
+     583  0x16210  ?SetFontColor@LListView@@QAEXK@Z
+     584  0x1a1c0  ?SetFontColor@LStatic@@QAEXK@Z
+     585  0x1ac20  ?SetFontColor@LTitle@@QAEXKH@Z
+     586  0x1a190  ?SetFontHeight@LStatic@@QAEXH@Z
+     587  0x1ac00  ?SetFontHeight@LTitle@@QAEXHH@Z
+     588  0x1a160  ?SetFontName@LStatic@@QAEXPAD@Z
+     589  0x1abb0  ?SetFontName@LTitle@@QAEXPADH@Z
+     590  0x1d710  ?SetFormat@LLed@@QAEXH@Z
+     591  0x1a1a0  ?SetFormat@LStatic@@QAEXI@Z
+     592  0x1ac80  ?SetFormat@LTitle@@QAEXHHHHH@Z
+     593  0x20740  ?SetGroupIndex@LControl@@QAEXH@Z
+     594   0x7110  ?SetHandle@LBuffer@@QAEXPAE@Z
+     595  0x1f8c0  ?SetImage@LBorder@@QAEXVLImage@@@Z
+     596   0xfc10  ?SetImage@LButton@@QAEXVLImage@@@Z
+     597  0x15040  ?SetImage@LImageList@@QAEXVLImage@@H@Z
+     598  0x15120  ?SetImageCount@LImageList@@QAEXH@Z
+     599  0x16140  ?SetImageList@LListView@@QAEXPAVLImage@@@Z
+     600   0xd7c0  ?SetInvalidate@LCtrlManager@@QAEXPAUTRect@@H@Z
+     601  0x15e80  ?SetItem@LListView@@QAEHPBUtagLLVITEM@@@Z
+     602  0x16080  ?SetItemText@LListView@@QAEXHHPADH@Z
+     603  0x206f0  ?SetLCMStyle@LControl@@QAEXJ@Z
+     604   0xdbb0  ?SetLCapture@LCtrlManager@@QAEXPAVLControl@@@Z
+     605  0x161f0  ?SetLCursor@LCtrlManager@@QAEXH@Z
+     606   0xda80  ?SetLFocus@LCtrlManager@@QAEPAVLControl@@PAV2@@Z
+     607  0x1d700  ?SetLed@LLed@@QAEXH@Z
+     608  0x1d720  ?SetLedImage@LLed@@QAEXVLImage@@@Z
+     609  0x1f2e0  ?SetLedImage@LSignpost@@QAEXVLImage@@@Z
+     610  0x1dfe0  ?SetMeterRange@LMeter@@QAEXHH@Z
+     611  0x1bb30  ?SetMoveLimit@LControlBar@@QAEXHHHH@Z
+     612  0x1f3d0  ?SetNum@LSignpost@@QAEXHHHHHH@Z
+     613  0x1f420  ?SetNumColor@LSignpost@@QAEXHK@Z
+     614  0x186a0  ?SetPageStep@LScrollBar@@QAEXH@Z
+     615   0x7210  ?SetPalette@LBuffer@@QAEHPAUtagRGBQUAD@@@Z
+     616   0x8900  ?SetPalette@LImage@@QAEHPAUtagRGBQUAD@@@Z
+     617  0x1b330  ?SetPicture@LAdjust@@QAEXVLImage@@@Z
+     618  0x18200  ?SetPicture@LPicture@@QAEXVLImage@@@Z
+     619  0x1df80  ?SetPoint@LMeter@@QAEXH@Z
+     620  0x1df00  ?SetPointImage@LMeter@@QAEXVLImage@@UtagPOINT@@1@Z
+     621  0x1f910  ?SetPosition@LBorder@@QAEXHHHHI@Z
+     622   0xfd10  ?SetPushed@LButton@@QAEXH@Z
+     623  0x1fa20  ?SetRegion@LBorder@@QAEXXZ
+     624  0x20510  ?SetResourceImage@LControl@@QAEHVLImage@@@Z
+     625  0x20430  ?SetResourcePosition@LControl@@QAEHHHHHHHH@Z
+     626  0x18580  ?SetScrollPos@LScrollBar@@QAEXHH@Z
+     627  0x18650  ?SetScrollRange@LScrollBar@@QAEXHH@Z
+     628  0x128d0  ?SetSelColor@LEdit@@QAEXK@Z
+     629  0x15020  ?SetSelColor@LImageList@@QAEXK@Z
+     630  0x12a70  ?SetSelect@LEdit@@QAEXH@Z
+     631  0x1b3a0  ?SetSelect@LImageList@@QAEXH@Z
+     632  0x1e8b0  ?SetSelect@LSelect@@QAEXH@Z
+     633  0x1e840  ?SetSelectImage@LSelect@@QAEXVLImage@@HHH@Z
+     634  0x1f940  ?SetSize@LBorder@@QAEXHHHHH@Z
+     635  0x1bb60  ?SetSizeLimit@LControlBar@@QAEXHH@Z
+     636  0x1b3a0  ?SetState@LAdjust@@QAEXH@Z
+     637  0x206a0  ?SetStyle@LControl@@QAEXJ@Z
+     638  0x12140  ?SetText@LColorConsoleView@@QAEXHPADK@Z
+     639  0x12070  ?SetText@LColorConsoleView@@UAEXHPAD@Z
+     640  0x12070  ?SetText@LConsoleView@@UAEXHPAD@Z
+     641  0x12920  ?SetText@LEdit@@QAEXPAD@Z
+     642  0x1f330  ?SetText@LSignpost@@QAEXPADHHH@Z
+     643  0x1a080  ?SetText@LStatic@@QAEXPADH@Z
+     644  0x1ab00  ?SetText@LTitle@@QAEXPADH@Z
+     645  0x1f3b0  ?SetTextColor@LSignpost@@QAEXHK@Z
+     646  0x129f0  ?SetTextLimit@LEdit@@QAEXH@Z
+     647  0x186b0  ?SetThumbSize@LScrollBar@@QAEXH@Z
+     648   0xd440  ?SetTickRate@LTickManager@@QAEXH@Z
+     649  0x203c0  ?SetToolTip@LControl@@QAEXPBD@Z
+     650   0xfce0  ?SetTransparent@LButton@@QAEXH@Z
+     651  0x161e0  ?SizeChanged@LCtrlManager@@UAEXPAVLControl@@@Z
+     652  0x119d0  ?SizeControl@LConsoleView@@UAEXHHH@Z
+     653  0x20340  ?SizeControl@LControl@@UAEXHHH@Z
+     654  0x1beb0  ?SizeControl@LControlBar@@UAEXHHH@Z
+     655  0x161e0  ?Sort@LListView@@QAEXH@Z
+     656   0xd9f0  ?SortDrawLayer@LCtrlManager@@QAEXXZ
+     657  0x46b70  ?StaticClass@LCtrlManager@@2VTWindowClass@@B
+     658  0x41420  ?StaticClass@LDialog@@2VTWindowClass@@B
+     659  0x41438  ?StaticClass@LToolTip@@2VTWindowClass@@B
+     660  0x205f0  ?TabStop@LControl@@QAEXH@Z
+     661   0xd380  ?Tell@RFile@@QAEHXZ
+     662  0x186d0  ?ThumbPosToScrollPos@LScrollBar@@IAEIH@Z
+     663  0x46ae8  ?TickLManager@@3VLTickManager@@A
+     664  0x20610  ?TopCtrl@LControl@@QAEXH@Z
+     665   0xf060  ?UpdateCtrl@LCtrlManager@@IAEXXZ
+     666   0xf2c0  ?UpdateLock@LCtrlManager@@IAEXXZ
+     667   0xd480  ?UpdateTick@LTickManager@@QAEXXZ
+     668   0xf2d0  ?UpdateUnLock@LCtrlManager@@IAEXXZ
+     669  0x10f80  ?Visible@LCombo@@QAEXH@Z
+     670  0x205b0  ?Visible@LControl@@QAEXH@Z
+     671  0x1bca0  ?Visible@LControlBar@@QAEXHI@Z
+     672  0x20a20  ?Visible@LCtrlGroup@@QAEXH@Z
+     673   0xdc60  ?WndProc@LCtrlManager@@UAEHAAUTMessage@@@Z
+     674   0x1ab0  ?WndProc@LDialog@@UAEHAAUTMessage@@@Z
+     675   0x4270  ?WndProc@LToolTip@@MAEHAAUTMessage@@@Z

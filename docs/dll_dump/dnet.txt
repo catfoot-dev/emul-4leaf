@@ -1,0 +1,265 @@
+./Resources/DNet.dll:	file format coff-i386
+Characteristics 0x210e
+	executable
+	line numbers stripped
+	symbols stripped
+	32 bit words
+	DLL
+
+Time/Date               Tue Jan 21 09:52:29 2003
+Magic                   010b	(PE32)
+MajorLinkerVersion      6
+MinorLinkerVersion      0
+SizeOfCode              00006000
+SizeOfInitializedData   00005000
+SizeOfUninitializedData 00000000
+AddressOfEntryPoint     000061fa
+BaseOfCode              00001000
+BaseOfData              00007000
+ImageBase               30000000
+SectionAlignment        00001000
+FileAlignment           00001000
+MajorOSystemVersion     4
+MinorOSystemVersion     0
+MajorImageVersion       0
+MinorImageVersion       5
+MajorSubsystemVersion   4
+MinorSubsystemVersion   0
+Win32Version            00000000
+SizeOfImage             0000c000
+SizeOfHeaders           00001000
+CheckSum                00000000
+Subsystem               00000002	(Windows GUI)
+DllCharacteristics      00000000
+SizeOfStackReserve      00100000
+SizeOfStackCommit       00001000
+SizeOfHeapReserve       00100000
+SizeOfHeapCommit        00001000
+LoaderFlags             00000000
+NumberOfRvaAndSizes     00000010
+
+The Data Directory
+Entry 0 00008740 000012a8 Export Directory [.edata (or where ever we found it)]
+Entry 1 00008158 00000078 Import Directory [parts of .idata]
+Entry 2 00000000 00000000 Resource Directory [.rsrc]
+Entry 3 00000000 00000000 Exception Directory [.pdata]
+Entry 4 00000000 00000000 Security Directory
+Entry 5 0000b000 00000610 Base Relocation Directory [.reloc]
+Entry 6 00007110 0000001c Debug Directory
+Entry 7 00000000 00000000 Description Directory
+Entry 8 00000000 00000000 Special Directory
+Entry 9 00000000 00000000 Thread Storage Directory [.tls]
+Entry a 00000000 00000000 Load Configuration Directory
+Entry b 00000000 00000000 Bound Import Directory
+Entry c 00007000 00000108 Import Address Table Directory
+Entry d 00000000 00000000 Delay Import Directory
+Entry e 00000000 00000000 CLR Runtime Header
+Entry f 00000000 00000000 Reserved
+
+The Import Tables:
+  lookup 00008220 time 00000000 fwd 00000000 name 00008300 addr 00007050
+
+    DLL Name: KERNEL32.dll
+    Hint/Ord  Name
+         365  GetTickCount
+         662  Sleep
+         282  GetLastError
+          93  DisableThreadLibraryCalls
+
+  lookup 00008280 time 00000000 fwd 00000000 name 00008318 addr 000070b0
+
+    DLL Name: WS2_32.dll
+    Hint/Ord  Name
+         115
+          10
+         116
+           7
+         111
+          16
+          22
+          19
+           5
+          12
+          15
+          13
+           2
+          21
+           3
+          23
+           4
+           1
+         151
+          53  WSASend
+          18
+
+  lookup 000081d0 time 00000000 fwd 00000000 name 000085c8 addr 00007000
+
+    DLL Name: Core.dll
+    Hint/Ord  Name
+          63  ??1TThread@@UAE@XZ
+         236  ?FormatTimeString@@YAPADPADABJ@Z
+          11  ??0TAutoMutex@@QAE@ABV0@@Z
+         395  ?Unlock@TMutex@@QAE_NXZ
+         363  ?Run@TThread@@QAE_NXZ
+         326  ?PushMessage@Exception@@QAEXPBD@Z
+         103  ??6@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@AAV01@AAVException@@@Z
+         242  ?GetErrorString@@YAPBDH@Z
+         197  ?Close@TThread@@QAE_NXZ
+          43  ??0TThread@@QAE@XZ
+         302  ?Log@@3V?$basic_ostream@DU?$char_traits@D@std@@@std@@A
+         320  ?Printf@@YAHAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@PBDZZ
+         323  ?Printfv@@YAHAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@PBDPAD@Z
+         327  ?PushMessagef@Exception@@QAAXPBDZZ
+         144  ??_7TThread@@6B@
+         299  ?Lock@TMutex@@QAE_NXZ
+          12  ??0TAutoMutex@@QAE@XZ
+          53  ??1TAutoMutex@@QAE@XZ
+         303  ?Logf@@YAHPBDZZ
+
+  lookup 00008234 time 00000000 fwd 00000000 name 00008642 addr 00007064
+
+    DLL Name: MSVCP60.dll
+    Hint/Ord  Name
+         265  ??1Init@ios_base@std@@QAE@XZ
+         165  ??0_Winit@std@@QAE@XZ
+         269  ??1_Winit@std@@QAE@XZ
+         158  ??0Init@ios_base@std@@QAE@XZ
+
+  lookup 00008248 time 00000000 fwd 00000000 name 000086b0 addr 00007078
+
+    DLL Name: MSVCRT.dll
+    Hint/Ord  Name
+         202  _except_handler3
+         390  _onexit
+          85  __dllonexit
+          46  ?terminate@@YAXXZ
+          65  _CxxThrowException
+          15  ??2@YAPAXI@Z
+          73  __CxxFrameHandler
+         720  time
+          14  ??1type_info@@UAE@XZ
+         271  _initterm
+         657  malloc
+         157  _adjust_fdiv
+         606  free
+
+Export Table:
+ DLL name: DNet.dll
+ Ordinal base: 1
+ Ordinal      RVA  Name
+       1   0x1330  ??0TChannel@@QAE@ABV0@@Z
+       2   0x1bf0  ??0TChannel@@QAE@XZ
+       3   0x2780  ??0TClient@@QAE@ABV0@@Z
+       4   0x2850  ??0TClient@@QAE@XZ
+       5   0x14d0  ??0TConnection@@QAE@ABV0@@Z
+       6   0x2ed0  ??0TConnection@@QAE@XZ
+       7   0x2990  ??0TNetDrv@@QAE@ABV0@@Z
+       8   0x4500  ??0TNetDrv@@QAE@XZ
+       9   0x2c90  ??0TServer@@QAE@ABV0@@Z
+      10   0x5780  ??0TServer@@QAE@XZ
+      11   0x1c60  ??1TChannel@@QAE@XZ
+      12   0x2870  ??1TClient@@UAE@XZ
+      13   0x2f80  ??1TConnection@@UAE@XZ
+      14   0x4580  ??1TNetDrv@@UAE@XZ
+      15   0x57f0  ??1TServer@@UAE@XZ
+      16   0x13f0  ??4TChannel@@QAEAAV0@ABV0@@Z
+      17   0x27a0  ??4TClient@@QAEAAV0@ABV0@@Z
+      18   0x16c0  ??4TConnection@@QAEAAV0@ABV0@@Z
+      19   0x2ab0  ??4TNetDrv@@QAEAAV0@ABV0@@Z
+      20   0x2d70  ??4TServer@@QAEAAV0@ABV0@@Z
+      21   0x2c70  ??7TServer@@QAE_NXZ
+      22   0x2980  ??BTNetDrv@@QAE_NXZ
+      23   0x2c60  ??BTServer@@QAE_NXZ
+      24   0x7130  ??_7TClient@@6B@
+      25   0x712c  ??_7TConnection@@6B@
+      26   0x7154  ??_7TNetDrv@@6B@
+      27   0x715c  ??_7TServer@@6B@
+      28   0x1d40  ?Attach@TChannel@@QAEXPAVTConnection@@@Z
+      29   0x2880  ?Attach@TClient@@QAEXPAVTConnection@@@Z
+      30   0x3be0  ?Attach@TConnection@@IAEXPAVTClient@@@Z
+      31   0x1980  ?BeginReceive@TChannel@@IAEPADI@Z
+      32   0x1ab0  ?Bind@TChannel@@IAE_NG@Z
+      33   0x1a00  ?CancelReceive@TChannel@@IAEXXZ
+      34   0x1150  ?CleanupWinsock@@YA_NXZ
+      35   0x4040  ?ClearQueue@TConnection@@IAEXXZ
+      36   0x1ba0  ?ClearReceiveQueue@TChannel@@IAEXXZ
+      37   0x4980  ?Close@TNetDrv@@IAEXPAVTConnection@@@Z
+      38   0x49a0  ?Close@TNetDrv@@IAEXPAVTServer@@@Z
+      39   0x4840  ?Connect@TNetDrv@@IAE_NPAVTConnection@@KG@Z
+      40   0x5a00  ?ConstructClient@TServer@@UAEPAVTClient@@XZ
+      41   0x5a60  ?DestructClient@TServer@@UAEXPAVTClient@@@Z
+      42   0x1080  ?DisableBlocking@@YA_NI@Z
+      43   0x4790  ?DisableListening@TNetDrv@@IAE_NPAVTServer@@@Z
+      44   0x14c0  ?DisableQuota@TConnection@@QAEXXZ
+      45   0x5cd0  ?DoRead@TServer@@IAEXAAUfd_set@@@Z
+      46   0x3ad0  ?DoSend@TConnection@@IAEXXZ
+      47   0x4630  ?EnableListening@TNetDrv@@IAE_NPAVTServer@@@Z
+      48   0x14a0  ?EnableQuota@TConnection@@QAEXXZ
+      49   0x2060  ?Free@TChannel@@QAEXPAX@Z
+      50   0x1fa0  ?Get@TChannel@@QAE_NPAPAXPAI@Z
+      51   0x2c80  ?GetConnectionCount@TServer@@QAEIXZ
+      52   0x1210  ?GetNetError@@YAHI@Z
+      53   0x1290  ?GetNetErrorString@@YAPBDH@Z
+      54   0x40a0  ?GetRemoteAddress@TConnection@@QAEHPAUsockaddr_in@@@Z
+      55   0x3fa0  ?InternalPushQueue@TConnection@@IAEXPAUTBuffer@@II@Z
+      56   0x3eb0  ?InternalSend@TConnection@@IAEXPAUTBuffer@@II@Z
+      57   0x2c50  ?IsActive@TServer@@QAE_NXZ
+      58   0x2970  ?IsNetActive@TNetDrv@@QAE_NXZ
+      59   0x1e50  ?Listen@TChannel@@QAE_NGH@Z
+      60   0x47c0  ?Listen@TNetDrv@@IAE_NPAVTServer@@KG@Z
+      61   0x5910  ?Listen@TServer@@QAE_NG@Z
+      62   0x5860  ?Listen@TServer@@QAE_NKG@Z
+      63   0x40f0  ?Log@TConnection@@IAAXPBDZZ
+      64   0x4b60  ?Main@TNetDrv@@MAEHXZ
+      65   0xab78  ?NetDrv@@3VTNetDrv@@A
+      66   0x5a90  ?OnAccepted@TServer@@IAE_NPAVTConnection@@@Z
+      67   0x1970  ?OnClosed@TChannel@@IAEXXZ
+      68   0x2930  ?OnClosed@TClient@@UAEXG@Z
+      69   0x2900  ?OnClosed@TClient@@UAEXXZ
+      70   0x3170  ?OnClosed@TConnection@@IAEXXZ
+      71   0x1950  ?OnConnected@TChannel@@IAEXXZ
+      72   0x2910  ?OnConnected@TClient@@UAEXG@Z
+      73   0x28e0  ?OnConnected@TClient@@UAEXXZ
+      74   0x3070  ?OnConnected@TConnection@@IAEXXZ
+      75   0x1960  ?OnConnectionFailed@TChannel@@IAEXXZ
+      76   0x2920  ?OnConnectionFailed@TClient@@UAEXG@Z
+      77   0x28f0  ?OnConnectionFailed@TClient@@UAEXXZ
+      78   0x3110  ?OnConnectionFailed@TConnection@@IAEXXZ
+      79   0x1a20  ?OnReceived@TChannel@@IAEXXZ
+      80   0x2940  ?OnReceived@TClient@@UAEXG@Z
+      81   0x3240  ?OnReceived@TConnection@@IAEXXZ
+      82   0x1d70  ?Open@TChannel@@QAE_NGH@Z
+      83   0x3bf0  ?Open@TConnection@@QAE_NKG@Z
+      84   0x3bc0  ?Panic@TConnection@@IAEXH@Z
+      85   0x3640  ?ProcessControlMessage@TConnection@@IAEXXZ
+      86   0x3520  ?ProcessPacket@TConnection@@IAEXXZ
+      87   0x5a80  ?QueryAccept@TServer@@UAE_NKG@Z
+      88   0x49c0  ?Remove@TNetDrv@@QAEXPAVTConnection@@@Z
+      89   0x4a60  ?Remove@TNetDrv@@QAEXPAVTServer@@@Z
+      90   0x5c10  ?Remove@TServer@@QAEXPAVTConnection@@@Z
+      91   0x2350  ?Send@TChannel@@QAE_NPBXI0I0I0I0I0I0I0I@Z
+      92   0x22d0  ?Send@TChannel@@QAE_NPBXI0I0I0I0I0I0I@Z
+      93   0x2250  ?Send@TChannel@@QAE_NPBXI0I0I0I0I0I@Z
+      94   0x21e0  ?Send@TChannel@@QAE_NPBXI0I0I0I0I@Z
+      95   0x2180  ?Send@TChannel@@QAE_NPBXI0I0I0I@Z
+      96   0x2130  ?Send@TChannel@@QAE_NPBXI0I0I@Z
+      97   0x20e0  ?Send@TChannel@@QAE_NPBXI0I@Z
+      98   0x2080  ?Send@TChannel@@QAE_NPBXI@Z
+      99   0x3da0  ?Send@TConnection@@IAEXPAVTChannel@@PBXI@Z
+     100   0x35d0  ?SendControlMessage@TConnection@@IAEXGG@Z
+     101   0x10e0  ?SendV@@YAHIPAUTBuffer@@I@Z
+     102   0x20b0  ?SendV@TChannel@@QAE_NPAUTBuffer@@I@Z
+     103   0x3e10  ?SendV@TConnection@@IAEXPAVTChannel@@PAUTBuffer@@I@Z
+     104   0x1ef0  ?Shutdown@TChannel@@QAE_NXZ
+     105   0x3cb0  ?Shutdown@TConnection@@QAE_NXZ
+     106   0x5960  ?Shutdown@TServer@@QAEXXZ
+     107   0x5710  ?Start@TNetDrv@@QAE_NXZ
+     108   0x1120  ?StartupWinsock@@YA_NXZ
+     109   0x2960  ?Stop@TNetDrv@@QAEXXZ
+     110   0x2950  ?Tick@TClient@@UAEXI@Z
+     111   0x3a20  ?Tick@TConnection@@IAEXI@Z
+     112   0x59f0  ?Tick@TServer@@UAEXI@Z
+     113   0x1160  ?TranslateSocketError@@YAHH@Z
+     114   0x1b60  ?Unbind@TChannel@@IAE_NXZ
+     115   0x3aa0  ?WantReceive@TConnection@@IAE_NXZ
+     116   0x3ac0  ?WantSend@TConnection@@IAE_NXZ

@@ -1,0 +1,660 @@
+./Resources/Core.dll:	file format coff-i386
+Characteristics 0x210e
+	executable
+	line numbers stripped
+	symbols stripped
+	32 bit words
+	DLL
+
+Time/Date               Tue Jan 21 09:51:35 2003
+Magic                   010b	(PE32)
+MajorLinkerVersion      6
+MinorLinkerVersion      0
+SizeOfCode              00015000
+SizeOfInitializedData   0000b000
+SizeOfUninitializedData 00000000
+AddressOfEntryPoint     00014e25
+BaseOfCode              00001000
+BaseOfData              00016000
+ImageBase               20000000
+SectionAlignment        00001000
+FileAlignment           00001000
+MajorOSystemVersion     4
+MinorOSystemVersion     0
+MajorImageVersion       0
+MinorImageVersion       2
+MajorSubsystemVersion   4
+MinorSubsystemVersion   0
+Win32Version            00000000
+SizeOfImage             00021000
+SizeOfHeaders           00001000
+CheckSum                00000000
+Subsystem               00000002	(Windows GUI)
+DllCharacteristics      00000000
+SizeOfStackReserve      00100000
+SizeOfStackCommit       00001000
+SizeOfHeapReserve       00100000
+SizeOfHeapCommit        00001000
+LoaderFlags             00000000
+NumberOfRvaAndSizes     00000010
+
+The Data Directory
+Entry 0 00018b10 00004742 Export Directory [.edata (or where ever we found it)]
+Entry 1 00016dd0 00000064 Import Directory [parts of .idata]
+Entry 2 00000000 00000000 Resource Directory [.rsrc]
+Entry 3 00000000 00000000 Exception Directory [.pdata]
+Entry 4 00000000 00000000 Security Directory
+Entry 5 0001f000 0000104c Base Relocation Directory [.reloc]
+Entry 6 00016260 0000001c Debug Directory
+Entry 7 00000000 00000000 Description Directory
+Entry 8 00000000 00000000 Special Directory
+Entry 9 00000000 00000000 Thread Storage Directory [.tls]
+Entry a 00000000 00000000 Load Configuration Directory
+Entry b 00000000 00000000 Bound Import Directory
+Entry c 00016000 0000025c Import Address Table Directory
+Entry d 00000000 00000000 Delay Import Directory
+Entry e 00000000 00000000 CLR Runtime Header
+Entry f 00000000 00000000 Reserved
+
+The Import Tables:
+  lookup 00016e34 time 00000000 fwd 00000000 name 00017224 addr 00016000
+
+    DLL Name: KERNEL32.dll
+    Hint/Ord  Name
+         674  TlsAlloc
+         675  TlsFree
+         676  TlsGetValue
+         677  TlsSetValue
+         662  Sleep
+         250  GetCurrentThreadId
+         718  WaitForSingleObject
+         671  TerminateThread
+          27  CloseHandle
+          99  DuplicateHandle
+         249  GetCurrentThread
+         247  GetCurrentProcess
+         175  FormatMessageA
+         282  GetLastError
+          49  CreateEventA
+         613  SetEvent
+         513  PulseEvent
+         555  ResetEvent
+         426  InitializeCriticalSection
+          85  DeleteCriticalSection
+         102  EnterCriticalSection
+         449  LeaveCriticalSection
+         501  OutputDebugStringA
+          93  DisableThreadLibraryCalls
+
+  lookup 00017088 time 00000000 fwd 00000000 name 00017240 addr 00016254
+
+    DLL Name: USER32.dll
+    Hint/Ord  Name
+         446  MessageBoxA
+
+  lookup 00016e98 time 00000000 fwd 00000000 name 000188f8 addr 00016064
+
+    DLL Name: MSVCP60.dll
+    Hint/Ord  Name
+         158  ??0Init@ios_base@std@@QAE@XZ
+         265  ??1Init@ios_base@std@@QAE@XZ
+         165  ??0_Winit@std@@QAE@XZ
+         269  ??1_Winit@std@@QAE@XZ
+        1016  ?_Tidy@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEX_N@Z
+         813  ?_C@?1??_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ@4DB
+         842  ?_Eos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXI@Z
+         914  ?_Grow@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAE_NI_N@Z
+        1010  ?_Split@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXXZ
+        1030  ?_Xran@std@@YAXXZ
+        1633  ?npos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@2IB
+         824  ?_Copy@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXI@Z
+        1029  ?_Xlen@std@@YAXXZ
+         856  ?_Freeze@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXXZ
+        1056  ?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z
+        1599  ?max_size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEIXZ
+        1963  ?swap@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXAAV12@@Z
+         233  ??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@XZ
+        1052  ?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z
+        1959  ?substr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV12@II@Z
+        1506  ?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEXABVlocale@2@@Z
+        1878  ?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEPAV12@PADH@Z
+        1870  ?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@V32@H@Z
+        1859  ?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z
+        2038  ?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPBDH@Z
+        2036  ?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPADH@Z
+        2004  ?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ
+        1901  ?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ
+         641  ??_7?$basic_streambuf@DU?$char_traits@D@std@@@std@@6B@
+         267  ??1_Lockit@std@@QAE@XZ
+         162  ??0_Lockit@std@@QAE@XZ
+         919  ?_Incref@facet@locale@std@@QAEXXZ
+         829  ?_Decref@facet@locale@std@@QAEPAV123@XZ
+         219  ??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UAE@XZ
+         221  ??1?$basic_istream@DU?$char_traits@D@std@@@std@@UAE@XZ
+         217  ??1?$basic_ios@DU?$char_traits@D@std@@@std@@UAE@XZ
+         629  ??_7?$basic_iostream@DU?$char_traits@D@std@@@std@@6B@
+         637  ??_7?$basic_ostream@DU?$char_traits@D@std@@@std@@6B@
+        1891  ?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z
+         956  ?_Init@ios_base@std@@IAEXXZ
+         631  ??_7?$basic_istream@DU?$char_traits@D@std@@@std@@6B@
+         627  ??_7?$basic_ios@DU?$char_traits@D@std@@@std@@6B@
+         682  ??_7ios_base@std@@6B@
+         279  ??1ios_base@std@@UAE@XZ
+          67  ??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z
+          53  ??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z
+         370  ??4ios_base@std@@QAEAAV01@ABV01@@Z
+        1088  ?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z
+         709  ??_8?$basic_ostream@DU?$char_traits@D@std@@@std@@7B@
+         308  ??4?$basic_ios@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z
+         703  ??_8?$basic_istream@DU?$char_traits@D@std@@@std@@7B@
+         699  ??_8?$basic_iostream@DU?$char_traits@D@std@@@std@@7B?$basic_istream@DU?$char_traits@D@std@@@1@@
+        1129  ?copyfmt@ios_base@std@@QAEAAV12@ABV12@@Z
+         231  ??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UAE@XZ
+         909  ?_Global@_Locimp@locale@std@@0PAV123@A
+         957  ?_Init@locale@std@@CAPAV_Locimp@12@XZ
+        1668  ?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHH@Z
+          32  ??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z
+        1389  ?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z
+         464  ??6std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@PBD@Z
+          54  ??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N1@Z
+        1139  ?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A
+        1093  ?clog@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A
+        1295  ?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z
+        2031  ?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z
+         461  ??6std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@D@Z
+        1104  ?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEHABV12@@Z
+          76  ??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@PBDABV?$allocator@D@1@@Z
+        1037  ?append@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z
+          73  ??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@ABV?$allocator@D@1@@Z
+        1447  ?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADHD@Z
+        2023  ?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEDD@Z
+        1822  ?resize@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXI@Z
+         741  ??_D?$basic_ifstream@DU?$char_traits@D@std@@@std@@QAEXXZ
+         211  ??1?$basic_filebuf@DU?$char_traits@D@std@@@std@@UAE@XZ
+        1636  ?open@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAEPAV12@PBDH@Z
+         625  ??_7?$basic_ifstream@DU?$char_traits@D@std@@@std@@6B@
+           8  ??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z
+          36  ??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z
+         181  ??0ios_base@std@@IAE@XZ
+         697  ??_8?$basic_ifstream@DU?$char_traits@D@std@@@std@@7B@
+        1801  ?replace@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@IIID@Z
+        1108  ?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEHIIPBDI@Z
+        1321  ?erase@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@II@Z
+        1806  ?replace@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PAD0PBD1@Z
+        1291  ?end@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEPADXZ
+         980  ?_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ
+        1079  ?c_str@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEPBDXZ
+        1925  ?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEIXZ
+
+  lookup 00017000 time 00000000 fwd 00000000 name 00018a5c addr 000161cc
+
+    DLL Name: MSVCRT.dll
+    Hint/Ord  Name
+         653  localtime
+         704  strncmp
+         697  strcoll
+         705  strncpy
+         633  isspace
+         627  isdigit
+         481  _vsnprintf
+          65  _CxxThrowException
+         211  _exit
+         166  _beginthreadex
+         197  _endthreadex
+         690  sprintf
+          39  ?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z
+          15  ??2@YAPAXI@Z
+         202  _except_handler3
+         664  memmove
+         661  memchr
+          73  __CxxFrameHandler
+         408  _read
+         666  mktime
+         573  atoi
+         606  free
+          85  __dllonexit
+         390  _onexit
+          46  ?terminate@@YAXXZ
+          14  ??1type_info@@UAE@XZ
+         271  _initterm
+         657  malloc
+         157  _adjust_fdiv
+         535  _write
+         179  _close
+         324  _lseek
+         391  _open
+
+Export Table:
+ DLL name: Core.dll
+ Ordinal base: 1
+ Ordinal      RVA  Name
+       1   0x1f30  ??0Exception@@QAE@PBD@Z
+       2   0x20f0  ??0MemoryException@@QAE@PBD@Z
+       3   0xdcb0  ??0RegularExp@@QAE@ABV0@@Z
+       4  0x10010  ??0RegularExp@@QAE@QADH@Z
+       5   0xd9e0  ??0RegularExpBase@@QAE@ABV0@@Z
+       6   0xe0c0  ??0RegularExpBase@@QAE@XZ
+       7   0x2090  ??0SystemError@@QAE@PBD@Z
+       8   0x2650  ??0TAutoAccessControl@@QAE@XZ
+       9   0x2920  ??0TAutoCondition@@QAE@W4TResetMode@TCondition@@@Z
+      10   0x2b20  ??0TAutoEvent@@QAE@ABV0@@Z
+      11   0x2ac0  ??0TAutoEvent@@QAE@W4TEventMode@TEvent@@@Z
+      12   0x2d70  ??0TAutoMutex@@QAE@ABV0@@Z
+      13   0x2d20  ??0TAutoMutex@@QAE@XZ
+      14   0x2f90  ??0TAutoOnceControl@@QAE@XZ
+      15   0x1a50  ??0TAutoThreadKey@@QAE@XZ
+      16   0x9440  ??0TConfigCache@@QAE@ABV0@@Z
+      17   0x9420  ??0TConfigCache@@QAE@XZ
+      18   0x8800  ??0TDebugOutputBuffer@@QAE@ABV0@@Z
+      19   0x8ab0  ??0TDebugOutputBuffer@@QAE@XZ
+      20   0x7ef0  ??0THandleStream@@QAE@ABV0@@Z
+      21   0x7da0  ??0THandleStream@@QAE@H@Z
+      22   0x7bc0  ??0THandleStreamBuf@@QAE@ABV0@@Z
+      23   0x83d0  ??0THandleStreamBuf@@QAE@H@Z
+      24   0xd2d0  ??0TIndexPool@@QAE@ABV0@@Z
+      25   0xd560  ??0TIndexPool@@QAE@H@Z
+      26   0x2470  ??0TLightAccessControl@@QAE@ABV0@@Z
+      27   0x2460  ??0TLightAccessControl@@QAE@XZ
+      28   0x1880  ??0TLightMutex@@QAE@ABV0@@Z
+      29   0x1870  ??0TLightMutex@@QAE@XZ
+      30   0x8c30  ??0TNullStreamBuffer@@QAE@ABV0@@Z
+      31   0x8ee0  ??0TNullStreamBuffer@@QAE@XZ
+      32   0x18d0  ??0TSpinMutex@@QAE@ABV0@@Z
+      33   0x18c0  ??0TSpinMutex@@QAE@XZ
+      34   0x7a60  ??0TStaticString@@QAE@PBD@Z
+      35   0x7a50  ??0TStaticString@@QAE@XZ
+      36   0x36b0  ??0TString@@QAE@ABV0@@Z
+      37   0x37e0  ??0TString@@QAE@ABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z
+      38   0x3b50  ??0TString@@QAE@HD@Z
+      39   0x39d0  ??0TString@@QAE@PBD0@Z
+      40   0x3910  ??0TString@@QAE@PBD@Z
+      41   0x3a90  ??0TString@@QAE@PBDH@Z
+      42   0x3690  ??0TString@@QAE@XZ
+      43   0x16d0  ??0TThread@@QAE@ABV0@@Z
+      44   0x1b20  ??0TThread@@QAE@XZ
+      45   0x19c0  ??0TThreadKey@@QAE@XZ
+      46  0x13470  ??0TVariable@@QAE@ABV0@@Z
+      47  0x13320  ??0TVariable@@QAE@XZ
+      48   0x2370  ??0UnexpectedException@@QAE@PAU_EXCEPTION_POINTERS@@@Z
+      49   0xe010  ??1RegularExp@@UAE@XZ
+      50   0xe100  ??1RegularExpBase@@UAE@XZ
+      51   0x26a0  ??1TAutoAccessControl@@QAE@XZ
+      52   0x2980  ??1TAutoCondition@@QAE@XZ
+      53   0x2b80  ??1TAutoEvent@@QAE@XZ
+      54   0x2dc0  ??1TAutoMutex@@QAE@XZ
+      55   0x2fe0  ??1TAutoOnceControl@@QAE@XZ
+      56   0x1ab0  ??1TAutoThreadKey@@QAE@XZ
+      57   0x9640  ??1TConfigCache@@QAE@XZ
+      58   0x8940  ??1TDebugOutputBuffer@@UAE@XZ
+      59   0x81e0  ??1THandleStream@@UAE@XZ
+      60   0x84e0  ??1THandleStreamBuf@@UAE@XZ
+      61   0xd500  ??1TIndexPool@@QAE@XZ
+      62   0x8d70  ??1TNullStreamBuffer@@UAE@XZ
+      63   0x7a10  ??1TString@@QAE@XZ
+      64   0x1640  ??1TThread@@UAE@XZ
+      65  0x13350  ??1TVariable@@QAE@XZ
+      66   0x17a0  ??4Exception@@QAEAAV0@ABV0@@Z
+      67   0x1800  ??4MemoryException@@QAEAAV0@ABV0@@Z
+      68   0xddb0  ??4RegularExp@@QAEAAV0@ABV0@@Z
+      69   0xdae0  ??4RegularExpBase@@QAEAAV0@ABV0@@Z
+      70   0xe0b0  ??4RegularExpError@@QAEAAV0@ABV0@@Z
+      71   0x17d0  ??4SystemError@@QAEAAV0@ABV0@@Z
+      72   0x2420  ??4TAccessControl@@QAEAAV0@ABV0@@Z
+      73   0x2440  ??4TAutoAccessControl@@QAEAAV0@ABV0@@Z
+      74   0x2800  ??4TAutoCondition@@QAEAAV0@ABV0@@Z
+      75   0x1930  ??4TAutoEvent@@QAEAAV0@ABV0@@Z
+      76   0x1860  ??4TAutoMutex@@QAEAAV0@ABV0@@Z
+      77   0x1990  ??4TAutoOnceControl@@QAEAAV0@ABV0@@Z
+      78   0x1630  ??4TAutoThreadKey@@QAEAAV0@ABV0@@Z
+      79   0x27f0  ??4TCondition@@QAEAAV0@ABV0@@Z
+      80   0x9520  ??4TConfigCache@@QAEAAV0@ABV0@@Z
+      81   0x88a0  ??4TDebugOutputBuffer@@QAEAAV0@ABV0@@Z
+      82   0x1910  ??4TEvent@@QAEAAV0@ABV0@@Z
+      83   0x8050  ??4THandleStream@@QAEAAV0@ABV0@@Z
+      84   0x7c70  ??4THandleStreamBuf@@QAEAAV0@ABV0@@Z
+      85   0xd3c0  ??4TIndexPool@@QAEAAV0@ABV0@@Z
+      86   0x2490  ??4TLightAccessControl@@QAEAAV0@ABV0@@Z
+      87   0x18b0  ??4TLightMutex@@QAEAAV0@ABV0@@Z
+      88   0x1850  ??4TMutex@@QAEAAV0@ABV0@@Z
+      89   0x8cd0  ??4TNullStreamBuffer@@QAEAAV0@ABV0@@Z
+      90   0x1960  ??4TOnceControl@@QAEAAV0@ABV0@@Z
+      91   0x1900  ??4TSpinMutex@@QAEAAV0@ABV0@@Z
+      92   0x7b90  ??4TStaticString@@QAEAAV0@ABV0@@Z
+      93   0x4880  ??4TString@@QAEAAV0@ABV0@@Z
+      94   0x4a70  ??4TString@@QAEAAV0@D@Z
+      95   0x49c0  ??4TString@@QAEAAV0@PBD@Z
+      96   0x16f0  ??4TThread@@QAEAAV0@ABV0@@Z
+      97   0x1620  ??4TThreadKey@@QAEAAV0@ABV0@@Z
+      98  0x12e40  ??4TVariable@@QAEAAV0@ABV0@@Z
+      99  0x12e60  ??4TVariable@@QAEAAV0@ABVTString@@@Z
+     100  0x12ea0  ??4TVariable@@QAEAAV0@H@Z
+     101  0x12e80  ??4TVariable@@QAEAAV0@PBD@Z
+     102   0x1830  ??4UnexpectedException@@QAEAAV0@ABV0@@Z
+     103   0x3070  ??4_TTreeNodeBase@@QAEAAU0@ABU0@@Z
+     104   0x92c0  ??6@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@AAV01@AAVException@@@Z
+     105  0x131f0  ??6TVariable@@QAEAAV0@ABV0@@Z
+     106   0x7b80  ??7TStaticString@@QBE_NXZ
+     107   0x7a00  ??7TString@@QBE_NXZ
+     108   0x1670  ??7TThread@@QBE_NXZ
+     109   0x1610  ??7TThreadKey@@QBE_NXZ
+     110   0x1680  ??8TThread@@QBE_NABV0@@Z
+     111  0x12f20  ??8TVariable@@QBE_NABV0@@Z
+     112  0x13020  ??8TVariable@@QBE_NABVTString@@@Z
+     113  0x13100  ??8TVariable@@QBE_NPBD@Z
+     114   0x1690  ??9TThread@@QBE_NABV0@@Z
+     115  0x12fa0  ??9TVariable@@QBE_NABV0@@Z
+     116  0x13090  ??9TVariable@@QBE_NABVTString@@@Z
+     117  0x13170  ??9TVariable@@QBE_NPBD@Z
+     118   0x7a70  ??ATStaticString@@QBEABDH@Z
+     119   0x3c40  ??ATString@@QAEAADH@Z
+     120   0x3c20  ??ATString@@QBEABDH@Z
+     121  0x131e0  ??ATVariable@@QAEAAV0@PBD@Z
+     122   0x7b60  ??BTStaticString@@QBEPBDXZ
+     123   0x7b70  ??BTStaticString@@QBE_NXZ
+     124   0x79a0  ??BTString@@QAEAAV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
+     125   0x79b0  ??BTString@@QBEABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
+     126   0x79e0  ??BTString@@QBEPBDXZ
+     127   0x79f0  ??BTString@@QBE_NXZ
+     128   0x1660  ??BTThread@@QBE_NXZ
+     129   0x1600  ??BTThreadKey@@QBE_NXZ
+     130  0x12f00  ??BTVariable@@QBE?BHXZ
+     131  0x12ed0  ??BTVariable@@QBEABVTString@@XZ
+     132  0x12ee0  ??BTVariable@@QBEPBDXZ
+     133   0x7b50  ??DTStaticString@@QBEPBDXZ
+     134   0x79d0  ??DTString@@QBEPBDXZ
+     135  0x12ec0  ??DTVariable@@QBEABVTString@@XZ
+     136   0x53a0  ??YTString@@QAEAAV0@ABV0@@Z
+     137   0x5550  ??YTString@@QAEAAV0@D@Z
+     138   0x5480  ??YTString@@QAEAAV0@PBD@Z
+     139  0x1635c  ??_7RegularExp@@6B@
+     140  0x16358  ??_7RegularExpBase@@6B@
+     141  0x162f0  ??_7TDebugOutputBuffer@@6B@
+     142  0x162dc  ??_7THandleStream@@6B@
+     143  0x162a8  ??_7THandleStreamBuf@@6B@
+     144  0x16324  ??_7TNullStreamBuffer@@6B@
+     145  0x1627c  ??_7TThread@@6B@
+     146  0x162e8  ??_8THandleStream@@7B?$basic_istream@DU?$char_traits@D@std@@@std@@@
+     147  0x162e0  ??_8THandleStream@@7B?$basic_ostream@DU?$char_traits@D@std@@@std@@@
+     148   0x8270  ??_DTHandleStream@@QAEXXZ
+     149   0x17c0  ??_FException@@QAEXXZ
+     150   0x1820  ??_FMemoryException@@QAEXXZ
+     151   0xe020  ??_FRegularExp@@QAEXXZ
+     152   0x17f0  ??_FSystemError@@QAEXXZ
+     153   0x2810  ??_FTAutoCondition@@QAEXXZ
+     154   0x1950  ??_FTAutoEvent@@QAEXXZ
+     155   0x8260  ??_FTHandleStream@@QAEXXZ
+     156   0x7d10  ??_FTHandleStreamBuf@@QAEXXZ
+     157   0xd550  ??_FTIndexPool@@QAEXXZ
+     158  0x142c0  ?Add@TVariable@@QAEXABV1@@Z
+     159   0xd9c0  ?AddCode@RegularExpBase@@IAEXD@Z
+     160   0x4c70  ?Append@TString@@QAEAAV1@ABV1@@Z
+     161   0x5230  ?Append@TString@@QAEAAV1@D@Z
+     162   0x52d0  ?Append@TString@@QAEAAV1@HD@Z
+     163   0x4e20  ?Append@TString@@QAEAAV1@PBD0@Z
+     164   0x4d50  ?Append@TString@@QAEAAV1@PBD@Z
+     165   0x5030  ?Append@TString@@QAEAAV1@PBDH@Z
+     166   0x7eb0  ?Assign@THandleStream@@QAE_NH@Z
+     167   0x85f0  ?Assign@THandleStreamBuf@@QAE_NH@Z
+     168   0x3ff0  ?Assign@TString@@QAEAAV1@ABV1@@Z
+     169   0x45d0  ?Assign@TString@@QAEAAV1@D@Z
+     170   0x47c0  ?Assign@TString@@QAEAAV1@HD@Z
+     171   0x41e0  ?Assign@TString@@QAEAAV1@PBD0@Z
+     172   0x4130  ?Assign@TString@@QAEAAV1@PBD@Z
+     173   0x43e0  ?Assign@TString@@QAEAAV1@PBDH@Z
+     174  0x14070  ?Assign@TVariable@@QAEXABV1@@Z
+     175  0x14010  ?Assign@TVariable@@QAEXABVTString@@@Z
+     176  0x14090  ?Assign@TVariable@@QAEXH@Z
+     177  0x14050  ?Assign@TVariable@@QAEXPBD0@Z
+     178  0x14030  ?Assign@TVariable@@QAEXPBD@Z
+     179  0x12e20  ?Assign@TVariable@@QAEXPBDH@Z
+     180   0xfa80  ?Atom@RegularExpBase@@IAE_NAAUParseBlock@@@Z
+     181   0x15f0  ?AtomicExchange@@YAHPAHH@Z
+     182   0x9770  ?Begin@TConfigCache@@QBE?AU?$_TTreeIterator@U?$_TMapItem@VTString@@V1@@@ABU1@PBU1@@@PBD0@Z
+     183   0x7b10  ?Begin@TStaticString@@QBEPBDXZ
+     184   0x7460  ?Begin@TString@@QAEPADXZ
+     185   0x7570  ?Begin@TString@@QBEPBDXZ
+     186  0x132a0  ?Begin@TVariable@@QBE?AU?$_TTreeIterator@U?$_TMapItem@VTString@@PAVTVariable@@@@ABU1@PBU1@@@XZ
+     187   0x9220  ?BeginLog@@YAXXZ
+     188   0x9240  ?BeginTrace@@YAXXZ
+     189   0x7ab0  ?Bind@TStaticString@@QAEAAV1@ABV1@@Z
+     190   0x7ac0  ?Bind@TStaticString@@QAEAAV1@PBD@Z
+     191   0x1cc0  ?Bind@TThread@@QAE_NXZ
+     192   0xf7a0  ?Branch@RegularExpBase@@IAE_NAAUParseBlock@@@Z
+     193   0x3d20  ?Clear@TString@@QAEXXZ
+     194  0x13f40  ?Clear@TVariable@@QAEXXZ
+     195  0x13700  ?ClearMembers@TVariable@@IAEXXZ
+     196   0x7ee0  ?Close@THandleStream@@QAE_NXZ
+     197   0x8650  ?Close@THandleStreamBuf@@QAE_NXZ
+     198   0x1c90  ?Close@TThread@@QAE_NXZ
+     199   0x11c0  ?CollateString@@YAHPBD0@Z
+     200   0x7ad0  ?Compare@TStaticString@@QBEHABV1@@Z
+     201   0x7af0  ?Compare@TStaticString@@QBEHPBD@Z
+     202   0x73b0  ?Compare@TString@@QBEHABV1@@Z
+     203   0x7400  ?Compare@TString@@QBEHPBD@Z
+     204   0x10d0  ?CompareStringA@@YAHPBD0@Z
+     205   0x1110  ?CompareStringA@@YAHPBD0I@Z
+     206   0x1130  ?CompareStringIgnoreCase@@YAHPBD0@Z
+     207   0x1170  ?CompareStringIgnoreCase@@YAHPBD0I@Z
+     208   0xe210  ?Compile@RegularExpBase@@QAE_NQADH@Z
+     209   0xff90  ?CopyLowerString@RegularExpBase@@IAE_NAAPADQAD@Z
+     210   0x11e0  ?CopyString@@YAXPADPBD@Z
+     211   0x1210  ?CopyString@@YAXPADPBDI@Z
+     212   0x19e0  ?Create@TThreadKey@@QAE_NXZ
+     213  0x1ea18  ?DebugOutput@@3V?$basic_iostream@DU?$char_traits@D@std@@@std@@A
+     214   0x1550  ?DecodeHexString@@YAHPAXPBDH@Z
+     215   0x1a00  ?Delete@TThreadKey@@QAE_NXZ
+     216   0x2520  ?Destroy@TAccessControl@@QAE_NXZ
+     217   0x2850  ?Destroy@TCondition@@QAE_NXZ
+     218   0x2a10  ?Destroy@TEvent@@QAE_NXZ
+     219   0x2c70  ?Destroy@TMutex@@QAE_NXZ
+     220   0x2e90  ?Destroy@TOnceControl@@QAE_NXZ
+     221   0x96a0  ?Dump@TConfigCache@@QBEXAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@@Z
+     222  0x13650  ?Dump@TVariable@@QAEXAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@@Z
+     223   0x1510  ?EncodeHexString@@YAHPADPBXH@Z
+     224   0x98e0  ?End@TConfigCache@@QBE?AU?$_TTreeIterator@U?$_TMapItem@VTString@@V1@@@ABU1@PBU1@@@PBD0@Z
+     225   0x7b20  ?End@TStaticString@@QBEPBDXZ
+     226   0x74e0  ?End@TString@@QAEPADXZ
+     227   0x7580  ?End@TString@@QBEPBDXZ
+     228  0x132e0  ?End@TVariable@@QBE?AU?$_TTreeIterator@U?$_TMapItem@VTString@@PAVTVariable@@@@ABU1@PBU1@@@XZ
+     229   0x9230  ?EndLog@@YAXXZ
+     230   0x9250  ?EndTrace@@YAXXZ
+     231   0x2290  ?Exceptionf@@YA?AVException@@PBDZZ
+     232   0x1d70  ?Exit@TThread@@SAXH@Z
+     233   0x7590  ?Find@TString@@QBEHABV1@H@Z
+     234   0x7710  ?Find@TString@@QBEHDH@Z
+     235   0x7650  ?Find@TString@@QBEHPBDH@Z
+     236   0x1ee0  ?FormatError@@YAXPADHH@Z
+     237  0x12b90  ?FormatTimeString@@YAPADPADABJ@Z
+     238  0x12be0  ?FormatTimeStringLong@@YAPADPADABJ@Z
+     239   0xd5c0  ?Get@TIndexPool@@QAEHXZ
+     240   0x1a20  ?Get@TThreadKey@@QBEPAXXZ
+     241   0x3d00  ?GetCapacity@TString@@QBEHXZ
+     242   0x16b0  ?GetCurrent@TThread@@SAPAV1@XZ
+     243   0x1e80  ?GetErrorString@@YAPBDH@Z
+     244   0x7ea0  ?GetHandle@THandleStream@@QAEHXZ
+     245   0x7bb0  ?GetHandle@THandleStreamBuf@@QAEHXZ
+     246   0x7a90  ?GetLength@TStaticString@@QBEHXZ
+     247   0x3cf0  ?GetLength@TString@@QBEHXZ
+     248  0x12ad0  ?GetLine@@YA?AVTString@@PAPBD@Z
+     249  0x140f0  ?GetMember@TVariable@@QAEAAV1@PBD@Z
+     250   0x2060  ?GetMessageA@Exception@@QAEPBDXZ
+     251   0x9a50  ?GetNumValues@TConfigCache@@QBEHPBD0@Z
+     252   0xfeb0  ?GetQuantityRange@RegularExpBase@@IAE_NAAUParseBlock@@@Z
+     253  0x13280  ?GetRecordCount@TVariable@@QBEHXZ
+     254   0xd2c0  ?GetSize@TIndexPool@@QBEHXZ
+     255   0x7a80  ?GetSize@TStaticString@@QBEHXZ
+     256   0x3ce0  ?GetSize@TString@@QBEHXZ
+     257   0x9300  ?GetString@TConfigCache@@QBE?AVTString@@PBD0@Z
+     258   0x9ff0  ?GetString@TConfigCache@@QBE_NPBD0AAVTString@@@Z
+     259   0x9e20  ?GetString@TConfigCache@@QBE_NPBD0PADH@Z
+     260   0x9c30  ?GetStrings@TConfigCache@@QBE_NPBD0AAV?$TArray@VTString@@@@@Z
+     261  0x12950  ?GetToken@@YA?AVTString@@PAPBD@Z
+     262  0x140d0  ?GetValue@TVariable@@QBEABVTString@@XZ
+     263  0x12a40  ?HasMoreToken@@YA_NPBD@Z
+     264  0x14370  ?HaveMember@TVariable@@QBE_NPBD@Z
+     265  0x12920  ?HexString@@YA?AVTString@@I@Z
+     266  0x127b0  ?HexString@@YA?AVTString@@PBXH@Z
+     267   0x24b0  ?Init@TAccessControl@@QAE_NXZ
+     268   0x2820  ?Init@TCondition@@QAE_NW4TResetMode@1@@Z
+     269   0x29d0  ?Init@TEvent@@QAE_NW4TEventMode@1@@Z
+     270   0x8590  ?Init@THandleStreamBuf@@IAEXH_N@Z
+     271   0x2bd0  ?Init@TMutex@@QAE_NXZ
+     272   0x2e50  ?Init@TOnceControl@@QAE_NXZ
+     273   0x55f0  ?Insert@TString@@QAEAAV1@HABV1@@Z
+     274   0x58f0  ?Insert@TString@@QAEAAV1@HD@Z
+     275   0x59c0  ?Insert@TString@@QAEAAV1@HHD@Z
+     276   0x5700  ?Insert@TString@@QAEAAV1@HPBD@Z
+     277   0x5800  ?Insert@TString@@QAEAAV1@HPBDH@Z
+     278   0x5ab0  ?Insert@TString@@QAEPADPADD@Z
+     279   0x5be0  ?Insert@TString@@QAEXPADHD@Z
+     280   0x5d00  ?Insert@TString@@QAEXPADPBD1@Z
+     281   0x22e0  ?InstallThreadSETranslator@@YAXXZ
+     282  0x125d0  ?IntToString@@YA?AVTString@@H@Z
+     283   0xd290  ?IsEmpty@TIndexPool@@QBE_NXZ
+     284   0x7aa0  ?IsEmpty@TStaticString@@QBE_NXZ
+     285   0x3d10  ?IsEmpty@TString@@QBE_NXZ
+     286  0x13240  ?IsEmpty@TVariable@@QBE_NXZ
+     287   0xd2b0  ?IsFull@TIndexPool@@QBE_NXZ
+     288   0x7e90  ?IsOpen@THandleStream@@QAE_NXZ
+     289   0x7ba0  ?IsOpen@THandleStreamBuf@@QBE_NXZ
+     290   0xd980  ?IsQuant@RegularExpBase@@IAE_ND@Z
+     291  0x13210  ?IsReference@TVariable@@QBE_NXZ
+     292   0x1bd0  ?IsSame@TThread@@QBE_NPBV1@@Z
+     293  0x13220  ?IsStruct@TVariable@@QBE_NXZ
+     294   0x1be0  ?IsThis@TThread@@QBE_NXZ
+     295   0x1650  ?IsValid@TThread@@QBE_NXZ
+     296   0x19d0  ?IsValid@TThreadKey@@QBE_NXZ
+     297   0xa8a0  ?LoadConfig@@YA_NAAV?$basic_istream@DU?$char_traits@D@std@@@std@@AAVTConfigCache@@PAUTConfigErrorInfo@@@Z
+     298   0xb6b0  ?LoadConfigFile@@YA_NPBDAAVTConfigCache@@PAUTConfigErrorInfo@@@Z
+     299   0x1890  ?Lock@TLightMutex@@QAEXXZ
+     300   0x2c90  ?Lock@TMutex@@QAE_NXZ
+     301   0x2eb0  ?Lock@TOnceControl@@QAE_NXZ
+     302   0x18e0  ?Lock@TSpinMutex@@QAEXXZ
+     303  0x1ed88  ?Log@@3V?$basic_ostream@DU?$char_traits@D@std@@@std@@A
+     304   0x9260  ?Logf@@YAHPBDZZ
+     305   0x1230  ?LowerString@@YAXPAD@Z
+     306   0x1260  ?LowerString@@YAXPADI@Z
+     307   0x16c0  ?Main@TThread@@UAEHXZ
+     308   0xf130  ?Match@RegularExpBase@@IAE_NQADAAV?$TList@UParseBlock@@@@U?$_TListIterator@UParseBlock@@AAU1@PAU1@@@@Z
+     309   0xe520  ?Match@RegularExpBase@@QAE_NQAD@Z
+     310   0xe560  ?Match@RegularExpBase@@QAE_NQADAAV?$TArray@URegularExpResult@@@@@Z
+     311   0x30a0  ?Next@_TTreeNodeBase@@QAEPAU1@XZ
+     312  0x1ec90  ?NullStream@@3V?$basic_iostream@DU?$char_traits@D@std@@@std@@A
+     313  0x162a4  ?NullString@@3QBDB
+     314   0x7ec0  ?Open@THandleStream@@QAE_NPBDF@Z
+     315   0x8610  ?Open@THandleStreamBuf@@QAE_NPBDF@Z
+     316   0x1430  ?ParseIntString@@YA_NPBD0PAH@Z
+     317  0x12c70  ?ParseTimeString@@YAJPBD@Z
+     318   0x14b0  ?ParseUIntString@@YA_NPBD0PAI@Z
+     319   0xf660  ?Piece@RegularExpBase@@IAE_NAAUParseBlock@@@Z
+     320   0x30f0  ?Prev@_TTreeNodeBase@@QAEPAU1@XZ
+     321   0x90a0  ?Printf@@YAHAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@PBDZZ
+     322  0x12010  ?Printf@@YAHAAVTString@@PBDZZ
+     323   0x15d0  ?Printf@@YAHPADHPBDZZ
+     324   0x9050  ?Printfv@@YAHAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@PBDPAD@Z
+     325   0x15a0  ?Printfv@@YAHPADHPBD0@Z
+     326   0x2900  ?Pulse@TCondition@@QAE_NXZ
+     327   0x2000  ?PushMessage@Exception@@QAEXPBD@Z
+     328   0x2020  ?PushMessagef@Exception@@QAAXPBDZZ
+     329   0x1f70  ?PushString@Exception@@IAEXPBD@Z
+     330   0x2120  ?RaiseAssertionFailedException@@YAXPBD0H@Z
+     331   0x2540  ?ReadLock@TAccessControl@@QAE_NXZ
+     332   0x26f0  ?ReadLock@TLightAccessControl@@QAEXXZ
+     333  0x13e50  ?Ref@TVariable@@QAEXAAV1@@Z
+     334   0xfde0  ?RegLength@RegularExpBase@@IAEHXZ
+     335   0x2ab0  ?Release@TEvent@@QAE_NXZ
+     336   0xd600  ?Release@TIndexPool@@QAE_NH@Z
+     337   0x5ea0  ?Remove@TString@@QAEAAV1@HH@Z
+     338   0x6090  ?Remove@TString@@QAEPADPAD0@Z
+     339   0x5fa0  ?Remove@TString@@QAEPADPAD@Z
+     340   0xa1e0  ?RemoveKey@TConfigCache@@QAE_NPBD0@Z
+     341  0x144c0  ?RemoveMember@TVariable@@QAE_NPBD@Z
+     342   0xeb90  ?Replace@RegularExpBase@@QAEHQAD0AAVTString@@@Z
+     343   0xee70  ?Replace@RegularExpBase@@QAEHQAD0PADAAH@Z
+     344   0x6180  ?Replace@TString@@QAEAAV1@HHABV1@@Z
+     345   0x66e0  ?Replace@TString@@QAEAAV1@HHD@Z
+     346   0x6860  ?Replace@TString@@QAEAAV1@HHHD@Z
+     347   0x6360  ?Replace@TString@@QAEAAV1@HHPBD@Z
+     348   0x6530  ?Replace@TString@@QAEAAV1@HHPBDH@Z
+     349   0x6a10  ?Replace@TString@@QAEAAV1@PAD0ABV1@@Z
+     350   0x6ff0  ?Replace@TString@@QAEAAV1@PAD0D@Z
+     351   0x71b0  ?Replace@TString@@QAEAAV1@PAD0HD@Z
+     352   0x6c10  ?Replace@TString@@QAEAAV1@PAD0PBD@Z
+     353   0x6df0  ?Replace@TString@@QAEAAV1@PAD0PBDH@Z
+     354   0x3dd0  ?Reserve@TString@@QAEXH@Z
+     355   0x2910  ?Reset@TCondition@@QAE_NXZ
+     356   0xd740  ?Reset@TIndexPool@@QAEXXZ
+     357  0x13780  ?Reset@TVariable@@QAEXXZ
+     358   0xd9b0  ?ResetCode@RegularExpBase@@IAEXXZ
+     359   0xd5a0  ?Resize@TIndexPool@@QAEHH@Z
+     360   0x3e40  ?Resize@TString@@QAEXHD@Z
+     361   0x7790  ?ReverseFind@TString@@QBEHABV1@H@Z
+     362   0x78b0  ?ReverseFind@TString@@QBEHDH@Z
+     363   0x7820  ?ReverseFind@TString@@QBEHPBDH@Z
+     364   0x1c00  ?Run@TThread@@QAE_NXZ
+     365   0x12c0  ?ScanInt@@YA_NPAPBDPAH@Z
+     366   0x1390  ?ScanUInt@@YA_NPAPBDPAI@Z
+     367   0x28f0  ?Set@TCondition@@QAE_NXZ
+     368   0x1a30  ?Set@TThreadKey@@QBE_NPAX@Z
+     369  0x13c70  ?Set@TVariable@@QAEXABV1@@Z
+     370  0x13850  ?Set@TVariable@@QAEXABVTString@@@Z
+     371  0x13a60  ?Set@TVariable@@QAEXPBD0@Z
+     372  0x139a0  ?Set@TVariable@@QAEXPBD@Z
+     373  0x12e00  ?Set@TVariable@@QAEXPBDH@Z
+     374   0xa6a0  ?SetString@TConfigCache@@QAE_NPBD0ABVTString@@@Z
+     375   0xa410  ?SetStrings@TConfigCache@@QAE_NPBD0ABV?$TArray@VTString@@@@@Z
+
+     376  0x12ab0  ?SkipLine@@YAXPAPBD@Z
+     377   0x1290  ?SkipSpace@@YAXPAPBD@Z
+     378   0xe860  ?Split@RegularExpBase@@QAE_NQADAAV?$TArray@URegularExpResult@@@@@Z
+     379   0x1080  ?StringLength@@YAHPBD@Z
+     380   0x10a0  ?StringLength@@YAHPBDI@Z
+     381  0x12110  ?Stringf@@YA?AVTString@@PBDZZ
+     382   0x7900  ?Substring@TString@@QBE?AV1@HH@Z
+     383   0x73a0  ?Swap@TString@@QAEXAAV1@@Z
+     384   0x1c70  ?Terminate@TThread@@QBE_NXZ
+     385   0x1d80  ?ThreadMainDispatcher@TThread@@KGIPAX@Z
+     386  0x1e80c  ?ThreadPointerKey@TThread@@1VTThreadKey@@A
+     387   0xd790  ?Tidy@TIndexPool@@IAEXXZ
+     388  0x12210  ?ToLower@@YA?AVTString@@PBD@Z
+     389  0x123f0  ?ToUpper@@YA?AVTString@@PBD@Z
+     390  0x1ed50  ?Trace@@3V?$basic_ostream@DU?$char_traits@D@std@@@std@@A
+     391   0x9290  ?Tracef@@YAHPBDZZ
+     392  0x126c0  ?UIntToString@@YA?AVTString@@I@Z
+     393   0x25e0  ?Unlock@TAccessControl@@QAE_NXZ
+     394   0x27b0  ?Unlock@TLightAccessControl@@QAEXXZ
+     395   0x18a0  ?Unlock@TLightMutex@@QAEXXZ
+     396   0x2d10  ?Unlock@TMutex@@QAE_NXZ
+     397   0x2f50  ?Unlock@TOnceControl@@QAE_NXZ
+     398   0x18f0  ?Unlock@TSpinMutex@@QAEXXZ
+     399   0xd6f0  ?Verify@TIndexPool@@QBE_NH@Z
+     400   0x28c0  ?Wait@TCondition@@QAE_NI@Z
+     401   0x2880  ?Wait@TCondition@@QAE_NIAA_N@Z
+     402   0x2860  ?Wait@TCondition@@QAE_NXZ
+     403   0x2a80  ?Wait@TEvent@@QAE_NI@Z
+     404   0x2a40  ?Wait@TEvent@@QAE_NIAA_N@Z
+     405   0x2a20  ?Wait@TEvent@@QAE_NXZ
+     406   0x1c40  ?Wait@TThread@@QBE_NXZ
+     407   0x2590  ?WriteLock@TAccessControl@@QAE_NXZ
+     408   0x2740  ?WriteLock@TLightAccessControl@@QAEXXZ
+     409   0x1d30  ?_Bind@TThread@@QAE_NPAX@Z
+     410   0x83c0  ?_Close@THandleStreamBuf@@KAHH@Z
+     411   0x3050  ?_FindMax@_TTreeNodeBase@@SAPAU1@PAU1@@Z
+     412   0x3030  ?_FindMin@_TTreeNodeBase@@SAPAU1@PAU1@@Z
+     413   0x2e10  ?_LightLock@@YAXPAH@Z
+     414   0x8330  ?_Open@THandleStreamBuf@@KAHPBDH@Z
+     415   0x3140  ?_Rebalance@_TTreeNodeBase@@SAXPAU1@AAPAU1@@Z
+     416   0x32f0  ?_RemoveRebalance@_TTreeNodeBase@@SAPAU1@PAU1@AAPAU1@11@Z
+     417   0x2e40  ?_SpinLock@@YAXPAH@Z
+     418   0x7b40  ?c_str@TStaticString@@QBEPBDXZ
+     419   0x79c0  ?c_str@TString@@QBEPBDXZ
+     420   0x8bd0  ?overflow@TDebugOutputBuffer@@UAEHH@Z
+     421   0x87a0  ?overflow@THandleStreamBuf@@MAEHH@Z
+     422   0x8ff0  ?overflow@TNullStreamBuffer@@UAEHH@Z
+     423   0x8760  ?pbackfail@THandleStreamBuf@@MAEHH@Z
+     424   0x8b80  ?sync@TDebugOutputBuffer@@UAEHXZ
+     425   0x8690  ?sync@THandleStreamBuf@@MAEHXZ
+     426   0x8fb0  ?sync@TNullStreamBuffer@@UAEHXZ
+     427   0x8bc0  ?underflow@TDebugOutputBuffer@@UAEHXZ
+     428   0x86f0  ?underflow@THandleStreamBuf@@MAEHXZ
+     429   0x8fe0  ?underflow@TNullStreamBuffer@@UAEHXZ

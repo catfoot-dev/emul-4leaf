@@ -1,0 +1,615 @@
+./Resources/WinCore.dll:	file format coff-i386
+Characteristics 0x210e
+	executable
+	line numbers stripped
+	symbols stripped
+	32 bit words
+	DLL
+
+Time/Date               Tue Jan 21 09:51:52 2003
+Magic                   010b	(PE32)
+MajorLinkerVersion      6
+MinorLinkerVersion      0
+SizeOfCode              00008000
+SizeOfInitializedData   0000a000
+SizeOfUninitializedData 00000000
+AddressOfEntryPoint     00007c81
+BaseOfCode              00001000
+BaseOfData              00009000
+ImageBase               21000000
+SectionAlignment        00001000
+FileAlignment           00001000
+MajorOSystemVersion     4
+MinorOSystemVersion     0
+MajorImageVersion       0
+MinorImageVersion       1
+MajorSubsystemVersion   4
+MinorSubsystemVersion   0
+Win32Version            00000000
+SizeOfImage             00013000
+SizeOfHeaders           00001000
+CheckSum                00000000
+Subsystem               00000002	(Windows GUI)
+DllCharacteristics      00000000
+SizeOfStackReserve      00100000
+SizeOfStackCommit       00001000
+SizeOfHeapReserve       00100000
+SizeOfHeapCommit        00001000
+LoaderFlags             00000000
+NumberOfRvaAndSizes     00000010
+
+The Data Directory
+Entry 0 0000b1c0 00003eb4 Export Directory [.edata (or where ever we found it)]
+Entry 1 00009f08 0000008c Import Directory [parts of .idata]
+Entry 2 00000000 00000000 Resource Directory [.rsrc]
+Entry 3 00000000 00000000 Exception Directory [.pdata]
+Entry 4 00000000 00000000 Security Directory
+Entry 5 00012000 00000a18 Base Relocation Directory [.reloc]
+Entry 6 00009260 0000001c Debug Directory
+Entry 7 00000000 00000000 Description Directory
+Entry 8 00000000 00000000 Special Directory
+Entry 9 00000000 00000000 Thread Storage Directory [.tls]
+Entry a 00000000 00000000 Load Configuration Directory
+Entry b 00000000 00000000 Bound Import Directory
+Entry c 00009000 00000260 Import Address Table Directory
+Entry d 00000000 00000000 Delay Import Directory
+Entry e 00000000 00000000 CLR Runtime Header
+Entry f 00000000 00000000 Reserved
+
+The Import Tables:
+  lookup 0000a000 time 00000000 fwd 00000000 name 0000a292 addr 0000906c
+
+    DLL Name: KERNEL32.dll
+    Hint/Ord  Name
+         776  lstrlenA
+         662  Sleep
+         483  MulDiv
+          27  CloseHandle
+         773  lstrcpynA
+         625  SetLastError
+         282  GetLastError
+         294  GetModuleHandleA
+         613  SetEvent
+         430  InterlockedExchange
+          49  CreateEventA
+          93  DisableThreadLibraryCalls
+
+  lookup 0000a114 time 00000000 fwd 00000000 name 0000a628 addr 00009180
+
+    DLL Name: USER32.dll
+    Hint/Ord  Name
+          62  CloseWindow
+         183  EnableWindow
+         400  IsWindowEnabled
+         457  MoveWindow
+         532  SendMessageA
+         410  LoadCursorA
+         392  IsDialogMessageA
+         480  PostQuitMessage
+         559  SetFocus
+         149  DispatchMessageA
+         642  TranslateMessage
+         476  PeekMessageA
+         458  MsgWaitForMultipleObjects
+         657  UpdateWindow
+         338  GetWindow
+         292  GetMenuItemInfoA
+         135  DeleteMenu
+         325  GetSystemMenu
+         132  DefWindowProcA
+          89  CreateWindowExA
+         499  RegisterClassExA
+         232  GetClassInfoExA
+         414  LoadIconA
+         130  DefMDIChildProcA
+         600  SetWindowLongA
+          22  CallWindowProcA
+         128  DefFrameProcA
+         298  GetMessageA
+         481  PostThreadMessageA
+          12  BeginPaint
+         187  EndPaint
+         526  ScrollWindowEx
+         378  InvalidateRect
+         582  SetScrollInfo
+         350  GetWindowTextA
+         253  GetDC
+         515  ReleaseDC
+         405  KillTimer
+         594  SetTimer
+         516  RemoveMenu
+           7  AppendMenuA
+          87  CreateMenu
+         141  DestroyMenu
+         255  GetDesktopWindow
+         441  MapWindowPoints
+         625  SystemParametersInfoA
+         284  GetMenu
+           2  AdjustWindowRectEx
+         348  GetWindowRect
+         240  GetClientRect
+         142  DestroyWindow
+         309  GetParent
+         618  ShowWindow
+
+         342  GetWindowLongA
+         641  TranslateMDISysAccel
+
+  lookup 00009fd8 time 00000000 fwd 00000000 name 0000a6ce addr 00009044
+
+    DLL Name: GDI32.dll
+    Hint/Ord  Name
+         517  TextOutA
+         373  GetTextMetricsA
+         455  SelectObject
+         462  SetBkMode
+         366  GetTextExtentPoint32A
+         351  GetStockObject
+          83  DeleteObject
+         293  GetDeviceCaps
+          55  CreateFontIndirectA
+
+  lookup 00009f94 time 00000000 fwd 00000000 name 0000a894 addr 00009000
+
+    DLL Name: Core.dll
+    Hint/Ord  Name
+         197  ?Close@TThread@@QAE_NXZ
+         379  ?StringLength@@YAHPBDI@Z
+          63  ??1TThread@@UAE@XZ
+          43  ??0TThread@@QAE@XZ
+         144  ??_7TThread@@6B@
+         217  ?Destroy@TEvent@@QAE_NXZ
+         404  ?Wait@TEvent@@QAE_NXZ
+         363  ?Run@TThread@@QAE_NXZ
+         268  ?Init@TEvent@@QAE_NW4TEventMode@1@@Z
+         326  ?PushMessage@Exception@@QAEXPBD@Z
+
+           6  ??0SystemError@@QAE@PBD@Z
+           0  ??0Exception@@QAE@PBD@Z
+         180  ?AtomicExchange@@YAHPAHH@Z
+         334  ?Release@TEvent@@QAE_NXZ
+         405  ?Wait@TThread@@QBE_NXZ
+         249  ?GetMessageA@Exception@@QAEPBDXZ
+
+  lookup 0000a034 time 00000000 fwd 00000000 name 0000b0a6 addr 000090a0
+
+    DLL Name: MSVCP60.dll
+    Hint/Ord  Name
+         265  ??1Init@ios_base@std@@QAE@XZ
+         165  ??0_Winit@std@@QAE@XZ
+         269  ??1_Winit@std@@QAE@XZ
+        1506  ?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEXABVlocale@2@@Z
+        1878  ?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEPAV12@PADH@Z
+        1870  ?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@V32@H@Z
+        1859  ?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z
+        2038  ?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPBDH@Z
+        2036  ?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPADH@Z
+        2004  ?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ
+        2009  ?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ
+        1901  ?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ
+        1668  ?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHH@Z
+         641  ??_7?$basic_streambuf@DU?$char_traits@D@std@@@std@@6B@
+         267  ??1_Lockit@std@@QAE@XZ
+         162  ??0_Lockit@std@@QAE@XZ
+         322  ??4?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z
+         372  ??4locale@std@@QAEAAV01@ABV01@@Z
+        1526  ?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IAEXPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z
+         308  ??4?$basic_ios@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z
+         957  ?_Init@locale@std@@CAPAV_Locimp@12@XZ
+         909  ?_Global@_Locimp@locale@std@@0PAV123@A
+         231  ??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UAE@XZ
+        1129  ?copyfmt@ios_base@std@@QAEAAV12@ABV12@@Z
+         709  ??_8?$basic_ostream@DU?$char_traits@D@std@@@std@@7B@
+        1088  ?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z
+         370  ??4ios_base@std@@QAEAAV01@ABV01@@Z
+          67  ??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z
+         279  ??1ios_base@std@@UAE@XZ
+         682  ??_7ios_base@std@@6B@
+         627  ??_7?$basic_ios@DU?$char_traits@D@std@@@std@@6B@
+         637  ??_7?$basic_ostream@DU?$char_traits@D@std@@@std@@6B@
+         956  ?_Init@ios_base@std@@IAEXXZ
+        1092  ?clear@ios_base@std@@QAEXH_N@Z
+         217  ??1?$basic_ios@DU?$char_traits@D@std@@@std@@UAE@XZ
+         227  ??1?$basic_ostream@DU?$char_traits@D@std@@@std@@UAE@XZ
+         829  ?_Decref@facet@locale@std@@QAEPAV123@XZ
+         919  ?_Incref@facet@locale@std@@QAEXXZ
+         158  ??0Init@ios_base@std@@QAE@XZ
+
+  lookup 0000a0d4 time 00000000 fwd 00000000 name 0000b12c addr 00009140
+
+    DLL Name: MSVCRT.dll
+    Hint/Ord  Name
+          65  _CxxThrowException
+          15  ??2@YAPAXI@Z
+         400  _pipe
+         606  free
+          85  __dllonexit
+         390  _onexit
+          14  ??1type_info@@UAE@XZ
+         202  _except_handler3
+          46  ?terminate@@YAXXZ
+         271  _initterm
+         657  malloc
+         157  _adjust_fdiv
+         179  _close
+         408  _read
+          73  __CxxFrameHandler
+
+Export Table:
+ DLL name: WinCore.dll
+ Ordinal base: 1
+ Ordinal      RVA  Name
+       1   0x32d0  ??0TButton@@QAE@ABV0@@Z
+       2   0x32b0  ??0TButton@@QAE@XZ
+       3   0x3430  ??0TCheckBox@@QAE@ABV0@@Z
+       4   0x3410  ??0TCheckBox@@QAE@XZ
+       5   0x3aa0  ??0TComboBox@@QAE@ABV0@@Z
+       6   0x3a80  ??0TComboBox@@QAE@XZ
+       7   0x5460  ??0TConsoleBox@@QAE@ABV0@@Z
+       8   0x5590  ??0TConsoleBox@@QAE@XZ
+       9   0x6150  ??0TConsoleBoxOutputStream@@QAE@AAVTConsoleBox@@@Z
+      10   0x6230  ??0TConsoleBoxOutputStream@@QAE@ABV0@@Z
+      11   0x6080  ??0TConsoleBoxOutputStream@@QAE@XZ
+      12   0x5ec0  ??0TConsoleBoxOutputStreamBuf@@QAE@ABV0@@Z
+      13   0x6570  ??0TConsoleBoxOutputStreamBuf@@QAE@PAVTConsoleBox@@@Z
+      14   0x1420  ??0TDialog@@QAE@ABV0@@Z
+      15   0x14d0  ??0TDialog@@QAE@XZ
+      16   0x3ec0  ??0TEdit@@QAE@ABV0@@Z
+      17   0x3ea0  ??0TEdit@@QAE@XZ
+      18   0x4cb0  ??0TExceptionForm@@QAE@ABV0@@Z
+      19   0x4c40  ??0TExceptionForm@@QAE@XZ
+      20   0x2ab0  ??0TFont@@QAE@PAUHFONT__@@@Z
+      21   0x2c60  ??0TIcon@@QAE@ABV0@@Z
+      22   0x2d10  ??0TIcon@@QAE@XZ
+      23   0x48c0  ??0TLabel@@QAE@ABV0@@Z
+      24   0x48a0  ??0TLabel@@QAE@XZ
+      25   0x4490  ??0TListBox@@QAE@ABV0@@Z
+      26   0x4470  ??0TListBox@@QAE@XZ
+      27   0x1880  ??0TMdiChild@@QAE@ABV0@@Z
+      28   0x19c0  ??0TMdiChild@@QAE@XZ
+      29   0x18c0  ??0TMdiClient@@QAE@ABV0@@Z
+      30   0x1de0  ??0TMdiClient@@QAE@XZ
+      31   0x1920  ??0TMdiFrame@@QAE@ABV0@@Z
+      32   0x1fc0  ??0TMdiFrame@@QAE@XZ
+      33   0x3f20  ??0TMemo@@QAE@ABV0@@Z
+      34   0x3f00  ??0TMemo@@QAE@XZ
+      35   0x2d30  ??0TMenu@@QAE@XZ
+      36   0x2df0  ??0TMenuItem@@QAE@XZ
+      37   0x2e60  ??0TMenuSeparator@@QAE@XZ
+      38   0x68d0  ??0TMonitor@@QAE@ABV0@@Z
+      39   0x71d0  ??0TMonitor@@QAE@XZ
+      40   0x6cf0  ??0TMonitorThread@@QAE@ABV0@@Z
+      41   0x6ca0  ??0TMonitorThread@@QAE@XZ
+      42   0x3590  ??0TRadioButton@@QAE@ABV0@@Z
+      43   0x3570  ??0TRadioButton@@QAE@XZ
+      44   0x4830  ??0TStatic@@QAE@ABV0@@Z
+      45   0x4810  ??0TStatic@@QAE@XZ
+      46   0x3f80  ??0TText@@QAE@ABV0@@Z
+      47   0x3f60  ??0TText@@QAE@XZ
+      48   0x3050  ??0TTimer@@QAE@ABV0@@Z
+      49   0x3120  ??0TTimer@@QAE@XZ
+      50   0x1320  ??0TWindow@@QAE@ABV0@@Z
+      51   0x2210  ??0TWindow@@QAE@PAUHWND__@@@Z
+      52   0x1080  ??0TWindowClass@@QAE@PBDPBV0@@Z
+      53   0x3300  ??1TButton@@QAE@XZ
+      54   0x3460  ??1TCheckBox@@QAE@XZ
+      55   0x3ad0  ??1TComboBox@@QAE@XZ
+      56   0x55c0  ??1TConsoleBox@@QAE@XZ
+      57   0x6460  ??1TConsoleBoxOutputStream@@UAE@XZ
+      58   0x6680  ??1TConsoleBoxOutputStreamBuf@@UAE@XZ
+      59   0x1480  ??1TDialog@@QAE@XZ
+      60   0x3ef0  ??1TEdit@@QAE@XZ
+      61   0x4d50  ??1TExceptionForm@@QAE@XZ
+      62   0x2ac0  ??1TFont@@QAE@XZ
+      63   0x2d20  ??1TIcon@@UAE@XZ
+      64   0x48f0  ??1TLabel@@QAE@XZ
+      65   0x44c0  ??1TListBox@@QAE@XZ
+      66   0x18b0  ??1TMdiChild@@QAE@XZ
+      67   0x1910  ??1TMdiClient@@QAE@XZ
+      68   0x1970  ??1TMdiFrame@@QAE@XZ
+      69   0x3f50  ??1TMemo@@QAE@XZ
+      70   0x2d40  ??1TMenu@@QAE@XZ
+      71   0x2e00  ??1TMenuItem@@QAE@XZ
+      72   0x2e80  ??1TMenuSeparator@@QAE@XZ
+      73   0x6be0  ??1TMonitor@@QAE@XZ
+      74   0x7050  ??1TMonitorThread@@UAE@XZ
+      75   0x35c0  ??1TRadioButton@@QAE@XZ
+      76   0x4860  ??1TStatic@@QAE@XZ
+      77   0x3fb0  ??1TText@@QAE@XZ
+      78   0x3140  ??1TTimer@@UAE@XZ
+      79   0x2230  ??1TWindow@@QAE@XZ
+      80   0x32f0  ??4TButton@@QAEAAV0@ABV0@@Z
+      81   0x3450  ??4TCheckBox@@QAEAAV0@ABV0@@Z
+      82   0x3ac0  ??4TComboBox@@QAEAAV0@ABV0@@Z
+      83   0x54e0  ??4TConsoleBox@@QAEAAV0@ABV0@@Z
+      84   0x6340  ??4TConsoleBoxOutputStream@@QAEAAV0@ABV0@@Z
+      85   0x5f60  ??4TConsoleBoxOutputStreamBuf@@QAEAAV0@ABV0@@Z
+      86   0x1450  ??4TDialog@@QAEAAV0@ABV0@@Z
+      87   0x3ee0  ??4TEdit@@QAEAAV0@ABV0@@Z
+      88   0x4d10  ??4TExceptionForm@@QAEAAV0@ABV0@@Z
+      89   0x2ae0  ??4TFont@@QAEAAV0@ABV0@@Z
+      90   0x2c80  ??4TIcon@@QAEAAV0@ABV0@@Z
+      91   0x48e0  ??4TLabel@@QAEAAV0@ABV0@@Z
+      92   0x44b0  ??4TListBox@@QAEAAV0@ABV0@@Z
+      93   0x18a0  ??4TMdiChild@@QAEAAV0@ABV0@@Z
+      94   0x18f0  ??4TMdiClient@@QAEAAV0@ABV0@@Z
+      95   0x1950  ??4TMdiFrame@@QAEAAV0@ABV0@@Z
+      96   0x3f40  ??4TMemo@@QAEAAV0@ABV0@@Z
+      97   0x2de0  ??4TMenu@@QAEAAV0@ABV0@@Z
+      98   0x2e30  ??4TMenuItem@@QAEAAV0@ABV0@@Z
+      99   0x2e70  ??4TMenuSeparator@@QAEAAV0@ABV0@@Z
+     100   0x6a50  ??4TMonitor@@QAEAAV0@ABV0@@Z
+     101   0x6ec0  ??4TMonitorThread@@QAEAAV0@ABV0@@Z
+     102   0x35b0  ??4TRadioButton@@QAEAAV0@ABV0@@Z
+     103   0x4850  ??4TStatic@@QAEAAV0@ABV0@@Z
+     104   0x3fa0  ??4TText@@QAEAAV0@ABV0@@Z
+     105   0x3080  ??4TTimer@@QAEAAV0@ABV0@@Z
+     106   0x1340  ??4TWindow@@QAEAAV0@ABV0@@Z
+     107   0x10a0  ??4TWindowClass@@QAEAAV0@ABV0@@Z
+     108   0x2d70  ??7TMenu@@QAE_NXZ
+     109   0x2e20  ??7TMenuItem@@QAE_NXZ
+     110   0x2ad0  ??BTFont@@QBEPAUHFONT__@@XZ
+     111   0x2d50  ??BTMenu@@QAEPAUHMENU__@@XZ
+     112   0x2d60  ??BTMenu@@QAE_NXZ
+     113   0x2e10  ??BTMenuItem@@QAE_NXZ
+     114   0x67b0  ??BTMonitor@@QAEAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@XZ
+     115   0x10d0  ??BTWindow@@QBEPAUHWND__@@XZ
+     116   0x92d4  ??_7TButton@@6B@
+     117   0x92e4  ??_7TCheckBox@@6B@
+     118   0x9304  ??_7TComboBox@@6B@
+     119   0x9384  ??_7TConsoleBox@@6B@
+     120   0x93c8  ??_7TConsoleBoxOutputStream@@6B@
+     121   0x9394  ??_7TConsoleBoxOutputStreamBuf@@6B@
+     122   0x928c  ??_7TDialog@@6B@
+     123   0x9314  ??_7TEdit@@6B@
+     124   0x9374  ??_7TExceptionForm@@6B@
+     125   0x92cc  ??_7TIcon@@6B@
+     126   0x9364  ??_7TLabel@@6B@
+     127   0x9344  ??_7TListBox@@6B@
+     128   0x929c  ??_7TMdiChild@@6B@
+     129   0x92ac  ??_7TMdiClient@@6B@
+     130   0x92bc  ??_7TMdiFrame@@6B@
+     131   0x9324  ??_7TMemo@@6B@
+     132   0x93d4  ??_7TMonitor@@6B@
+     133   0x93e4  ??_7TMonitorThread@@6B@
+     134   0x92f4  ??_7TRadioButton@@6B@
+     135   0x9354  ??_7TStatic@@6B@
+     136   0x9334  ??_7TText@@6B@
+     137   0x92d0  ??_7TTimer@@6B@
+     138   0x927c  ??_7TWindow@@6B@
+     139   0x93cc  ??_8TConsoleBoxOutputStream@@7B@
+     140  0x10078  ??_C@_0CK@NPEC@?$MA?$KJ?$LF?$LF?$LP?l?5?$LI?$NO?$LN?C?A?v?5?C?$LD?$LI?$KO?A?$NP?5?$LP?$MA?$LH?y?$LA?$KB?5?$LJ?$NP?$LL?$PN@
+     141   0x64b0  ??_DTConsoleBoxOutputStream@@QAEXXZ
+     142   0x5ff0  ??_FTConsoleBoxOutputStreamBuf@@QAEXXZ
+     143   0x2af0  ??_FTFont@@QAEXXZ
+     144   0x1350  ??_FTWindow@@QAEXXZ
+     145   0x27c0  ?AdjustWindowRect@TWindow@@QAEXPAUTRect@@@Z
+     146   0x3970  ?Append@TComboBox@@QAEHPBD@Z
+     147   0x3c30  ?Append@TComboBox@@QAEHPBDH@Z
+     148   0x4320  ?Append@TListBox@@QAEHPBD@Z
+     149   0x45f0  ?Append@TListBox@@QAEHPBDH@Z
+     150   0x2db0  ?Append@TMenu@@QAE_NPAV1@IPBD@Z
+     151   0x6220  ?Bind@TConsoleBoxOutputStream@@QAEAAV1@PAVTConsoleBox@@@Z
+     152   0x5eb0  ?Bind@TConsoleBoxOutputStreamBuf@@QAEXPAVTConsoleBox@@@Z
+     153   0x3350  ?Check@TCheckBox@@QBEHXZ
+     154   0x34b0  ?Check@TRadioButton@@QBEHXZ
+     155   0x3a00  ?Clear@TComboBox@@QAEXXZ
+     156   0x5910  ?Clear@TConsoleBox@@QAEXXZ
+     157   0x43b0  ?Clear@TListBox@@QAEXXZ
+     158   0x2a90  ?ClearText@TWindow@@QAEHXZ
+     159   0x11e0  ?Close@TWindow@@QAE_NXZ
+     160   0x35d0  ?Create@TButton@@IAEXPAVTWindow@@PADHHHHIIH@Z
+     161   0x36f0  ?Create@TButton@@QAEXPAVTWindow@@PADHHHHHH@Z
+     162   0x3790  ?Create@TCheckBox@@QAEXPAVTWindow@@PADHHHHH@Z
+     163   0x3b20  ?Create@TComboBox@@IAEXPAVTWindow@@PADHHHHIIH@Z
+     164   0x3c00  ?Create@TComboBox@@QAEXPAVTWindow@@HHHHH@Z
+     165   0x55f0  ?Create@TConsoleBox@@QAEXPAVTWindow@@HHHH@Z
+     166   0x4000  ?Create@TEdit@@IAEXPAVTWindow@@PADHHHHIIH@Z
+     167   0x40e0  ?Create@TEdit@@QAEXPAVTWindow@@HHHHH@Z
+     168   0x4df0  ?Create@TExceptionForm@@QAEXPAVTWindow@@PBDAAVException@@@Z
+     169   0x2b00  ?Create@TFont@@QAEXPAUHDC__@@PADHHH@Z
+     170   0x4aa0  ?Create@TLabel@@QAEXPAVTWindow@@PBDHHH@Z
+     171   0x4870  ?Create@TLabel@@QAEXPAVTWindow@@PBDHHHHH@Z
+     172   0x4510  ?Create@TListBox@@QAEXPAVTWindow@@PBDHHHHIIH@Z
+     173   0x19e0  ?Create@TMdiChild@@QAEXPAVTMdiClient@@PBDHHHHII@Z
+     174   0x1ae0  ?Create@TMdiChild@@QAEXPAVTMdiFrame@@PBDHHHHII@Z
+     175   0x1e20  ?Create@TMdiClient@@QAEXPAVTMdiFrame@@PAUHMENU__@@H@Z
+     176   0x4160  ?Create@TMemo@@QAEXPAVTWindow@@HHHHH@Z
+     177   0x2d80  ?Create@TMenu@@QAE_NXZ
+     178   0x2f80  ?Create@TMenuItem@@QAE_NPAVTMenu@@IPBD@Z
+     179   0x2e40  ?Create@TMenuSeparator@@QAE_NPAVTMenu@@I@Z
+     180   0x72c0  ?Create@TMonitor@@QAEXHHHHH@Z
+     181   0x3810  ?Create@TRadioButton@@QAEXPAVTWindow@@PADHHHHHH@Z
+     182   0x4900  ?Create@TStatic@@IAEXPAVTWindow@@PBDHHHHIIH@Z
+     183   0x4a20  ?Create@TStatic@@QAEXPAVTWindow@@PBDHHHHH@Z
+     184   0x41e0  ?Create@TText@@QAEXPAVTWindow@@HHHHH@Z
+     185   0x3020  ?Create@TTimer@@QAEHPAVTWindow@@@Z
+     186   0x1120  ?Create@TWindow@@QAEXPAV1@PBDABUTPoint@@ABUTSize@@IIPAUHMENU__@@@Z
+     187   0x1160  ?Create@TWindow@@QAEXPAV1@PBDABUTRect@@IIPAUHMENU__@@@Z
+     188   0x2380  ?Create@TWindow@@QAEXPAV1@PBDHHHHIIPAUHMENU__@@@Z
+     189   0x10e0  ?Create@TWindow@@QAEXPAV1@PBDIIPAUHMENU__@@@Z
+     190   0x2c00  ?Delete@TFont@@QAEXXZ
+     191   0x2da0  ?Destroy@TMenu@@QAE_NXZ
+     192   0x2fe0  ?Destroy@TMenuItem@@QAE_NXZ
+     193   0x26c0  ?Destroy@TWindow@@QAEXXZ
+     194   0x1220  ?Disable@TWindow@@QAE_NXZ
+     195   0x1200  ?Enable@TWindow@@QAE_N_N@Z
+     196   0x1710  ?EndDialog@TDialog@@QAEXH@Z
+     197   0x38a0  ?Find@TComboBox@@QAEHHPBD@Z
+     198   0x38c0  ?Find@TComboBox@@QAEHPBD@Z
+     199   0x4250  ?Find@TListBox@@QAEHHPBD@Z
+     200   0x4270  ?Find@TListBox@@QAEHPBD@Z
+     201   0x4450  ?FindByData@TListBox@@QAEHH@Z
+     202   0x4730  ?FindByData@TListBox@@QAEHHH@Z
+     203   0x3860  ?FindPrefix@TComboBox@@QAEHHPBD@Z
+     204   0x3880  ?FindPrefix@TComboBox@@QAEHPBD@Z
+     205   0x4210  ?FindPrefix@TListBox@@QAEHHPBD@Z
+     206   0x4230  ?FindPrefix@TListBox@@QAEHPBD@Z
+     207   0x2530  ?FindWindowA@TWindow@@SAPAV1@PAUHWND__@@@Z
+     208   0x43d0  ?GetCaretIndex@TListBox@@QAEHXZ
+     209   0x3310  ?GetCheck@TCheckBox@@QBEHXZ
+     210   0x3470  ?GetCheck@TRadioButton@@QBEHXZ
+     211   0x36e0  ?GetClass@TButton@@UBEPBVTWindowClass@@XZ
+     212   0x3780  ?GetClass@TCheckBox@@UBEPBVTWindowClass@@XZ
+     213   0x3b10  ?GetClass@TComboBox@@UBEPBVTWindowClass@@XZ
+     214   0x5580  ?GetClass@TConsoleBox@@UBEPBVTWindowClass@@XZ
+     215   0x14c0  ?GetClass@TDialog@@UBEPBVTWindowClass@@XZ
+     216   0x3ff0  ?GetClass@TEdit@@UBEPBVTWindowClass@@XZ
+     217   0x4de0  ?GetClass@TExceptionForm@@UBEPBVTWindowClass@@XZ
+     218   0x4a90  ?GetClass@TLabel@@UBEPBVTWindowClass@@XZ
+     219   0x4500  ?GetClass@TListBox@@UBEPBVTWindowClass@@XZ
+     220   0x19b0  ?GetClass@TMdiChild@@UBEPBVTWindowClass@@XZ
+     221   0x1dd0  ?GetClass@TMdiClient@@UBEPBVTWindowClass@@XZ
+     222   0x1fb0  ?GetClass@TMdiFrame@@UBEPBVTWindowClass@@XZ
+     223   0x4150  ?GetClass@TMemo@@UBEPBVTWindowClass@@XZ
+     224   0x71c0  ?GetClass@TMonitor@@UBEPBVTWindowClass@@XZ
+     225   0x3800  ?GetClass@TRadioButton@@UBEPBVTWindowClass@@XZ
+     226   0x4a10  ?GetClass@TStatic@@UBEPBVTWindowClass@@XZ
+     227   0x41d0  ?GetClass@TText@@UBEPBVTWindowClass@@XZ
+     228   0x2200  ?GetClass@TWindow@@UBEPBVTWindowClass@@XZ
+     229   0x2240  ?GetClassNameA@TWindow@@QBEPBDXZ
+     230   0x2720  ?GetClientRect@TWindow@@QAEXPAUTRect@@@Z
+     231   0x6790  ?GetConsoleBox@TMonitor@@QAEAAVTConsoleBox@@XZ
+     232   0x39e0  ?GetCount@TComboBox@@QAEHXZ
+     233   0x4390  ?GetCount@TListBox@@QAEHXZ
+     234   0x10c0  ?GetHandle@TWindow@@QBEPAUHWND__@@XZ
+     235   0x3950  ?GetItemData@TComboBox@@QAEHH@Z
+     236   0x4300  ?GetItemData@TListBox@@QAEHH@Z
+     237   0x6c90  ?GetOutputHandle@TMonitorThread@@QAEHXZ
+     238   0x2660  ?GetPreTranslateWindow@TWindow@@SAPAV1@PAUHWND__@@@Z
+     239   0x3a20  ?GetSelection@TComboBox@@QAEHXZ
+     240   0x43f0  ?GetSelection@TListBox@@QAEHXZ
+     241   0x67a0  ?GetStream@TMonitor@@QAEAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@XZ
+     242   0x2250  ?GetSuperClass@TWindow@@QBEPBVTWindowClass@@XZ
+     243   0x3900  ?GetText@TComboBox@@QAEHHPAD@Z
+     244   0x42b0  ?GetText@TListBox@@QAEHHPAD@Z
+     245   0x12c0  ?GetText@TWindow@@QAEHPADI@Z
+     246   0x38e0  ?GetTextLength@TComboBox@@QAEHH@Z
+     247   0x4290  ?GetTextLength@TListBox@@QAEHH@Z
+     248   0x12e0  ?GetTextLength@TWindow@@QAEHXZ
+     249   0x3d90  ?GetTextLimit@TEdit@@QAEHXZ
+     250   0x2610  ?GetTopLevelWindow@TWindow@@SAPAV1@PAUHWND__@@@Z
+     251   0x6c80  ?GetWindow@TMonitorThread@@QAEPAUHWND__@@XZ
+     252   0x2770  ?GetWindowRect@TWindow@@QAEXPAUTRect@@@Z
+     253   0x11c0  ?Hide@TWindow@@QAE_NXZ
+     254   0x3390  ?Indeterminate@TCheckBox@@QBEHXZ
+     255   0x34f0  ?Indeterminate@TRadioButton@@QBEHXZ
+     256   0x5670  ?Init@TConsoleBox@@IAEXHH@Z
+     257   0x3990  ?Insert@TComboBox@@QAEHHPBD@Z
+     258   0x3cb0  ?Insert@TComboBox@@QAEHHPBDH@Z
+     259   0x4340  ?Insert@TListBox@@QAEHHPBD@Z
+     260   0x4670  ?Insert@TListBox@@QAEHHPBDH@Z
+     261   0x33b0  ?IsChecked@TCheckBox@@QBE_NXZ
+     262   0x3510  ?IsChecked@TRadioButton@@QBE_NXZ
+     263   0x3040  ?IsEnabled@TTimer@@QAE_NXZ
+     264   0x1240  ?IsEnabled@TWindow@@QAE_NXZ
+     265   0x33f0  ?IsIndeterminate@TCheckBox@@QBE_NXZ
+     266   0x3550  ?IsIndeterminate@TRadioButton@@QBE_NXZ
+     267   0x2260  ?IsKindOf@TWindow@@QBE_NPBVTWindowClass@@@Z
+     268   0x3e60  ?IsModified@TEdit@@QAE_NXZ
+     269   0x33d0  ?IsUnchecked@TCheckBox@@QBE_NXZ
+     270   0x3530  ?IsUnchecked@TRadioButton@@QBE_NXZ
+     271   0x3210  ?Kill@TTimer@@QAEXXZ
+     272   0x74c0  ?Main@TMonitorThread@@MAEHXZ
+     273   0x24c0  ?MapWindow@TWindow@@KAXPAUHWND__@@PAV1@@Z
+     274   0x1260  ?Move@TWindow@@QAE_NHHHH_N@Z
+     275   0x2840  ?MoveToCenter@TWindow@@QAEXPAUHWND__@@_N@Z
+     276   0x29d0  ?MoveToCorner@TWindow@@QAEXHPAUHWND__@@_N@Z
+     277   0x5080  ?OnActivate@TExceptionForm@@IAEHG_NPAUHWND__@@@Z
+     278   0x1800  ?OnClose@TDialog@@QAEHXZ
+     279   0x73b0  ?OnClose@TMonitor@@IAEHXZ
+     280   0x5620  ?OnCreate@TConsoleBox@@QAEHPAUtagCREATESTRUCTA@@@Z
+     281   0x4e20  ?OnCreate@TExceptionForm@@IAEHPAUtagCREATESTRUCTA@@@Z
+     282   0x7300  ?OnCreate@TMonitor@@IAEHPAUtagCREATESTRUCTA@@@Z
+     283   0x56b0  ?OnDestroy@TConsoleBox@@QAEHXZ
+     284   0x1840  ?OnDestroy@TDialog@@QAEHXZ
+     285   0x7390  ?OnDestroy@TMonitor@@IAEHXZ
+     286   0x5ae0  ?OnHScroll@TConsoleBox@@QAEHFFPAUHWND__@@@Z
+     287   0x5ea0  ?OnMouseActivate@TConsoleBox@@QAEHPAUHWND__@@GG@Z
+     288   0x5cf0  ?OnMouseWheel@TConsoleBox@@QAEHGFFF@Z
+     289   0x1750  ?OnNcCreate@TDialog@@QAEHPAUtagCREATESTRUCTA@@@Z
+     290   0x5070  ?OnOkButtonClicked@TExceptionForm@@IAEHXZ
+     291   0x5db0  ?OnPaint@TConsoleBox@@QAEHPAUHDC__@@@Z
+     292   0x5960  ?OnSetFont@TConsoleBox@@QAEHPAUHFONT__@@_N@Z
+     293   0x59c0  ?OnSize@TConsoleBox@@QAEHIHH@Z
+     294   0x73c0  ?OnSize@TMonitor@@IAEHHGG@Z
+     295   0x5be0  ?OnVScroll@TConsoleBox@@QAEHFFPAUHWND__@@@Z
+     296   0x1510  ?PreTranslateMessage@TDialog@@MAE_NPAUtagMSG@@@Z
+     297   0x2170  ?PreTranslateMessage@TMdiFrame@@MAE_NPAUtagMSG@@@Z
+     298   0x2470  ?PreTranslateMessage@TWindow@@UAE_NPAUtagMSG@@@Z
+     299   0x5880  ?Put@TConsoleBox@@QAEXPBDI@Z
+     300   0x5850  ?PutChar@TConsoleBox@@QAEXH@Z
+     301   0x58d0  ?PutString@TConsoleBox@@QAEXPBD@Z
+     302   0x14f0  ?RegisterClassA@TDialog@@MAEXXZ
+     303   0x1c50  ?RegisterClassA@TMdiChild@@MAEXXZ
+     304   0x1b50  ?RegisterClassA@TMdiChild@@QBEXIPAUHICON__@@0PAUHBRUSH__@@@Z
+     305   0x1e00  ?RegisterClassA@TMdiClient@@MAEXXZ
+     306   0x1fe0  ?RegisterClassA@TMdiFrame@@IBEXIPAUHICON__@@0PAUHBRUSH__@@@Z
+     307   0x20e0  ?RegisterClassA@TMdiFrame@@MAEXXZ
+     308   0x2280  ?RegisterClassA@TWindow@@QAEXIPAUHICON__@@0PAUHBRUSH__@@@Z
+     309   0x2360  ?RegisterClassA@TWindow@@UAEXXZ
+     310   0x39b0  ?Remove@TComboBox@@QAE_NH@Z
+     311   0x3d30  ?Remove@TComboBox@@QAE_NPBD@Z
+     312   0x4360  ?Remove@TListBox@@QAE_NH@Z
+     313   0x46f0  ?Remove@TListBox@@QAE_NPBD@Z
+     314   0x4460  ?RemoveByData@TListBox@@QAE_NH@Z
+     315   0x47d0  ?RemoveByData@TListBox@@QAE_NHH@Z
+     316   0x7400  ?Run@TMonitorThread@@QAE_NABUTRect@@@Z
+     317   0x3a40  ?Select@TComboBox@@QAEHH@Z
+     318   0x3e00  ?Select@TEdit@@QAEXHH@Z
+     319   0x4410  ?Select@TListBox@@QAEHH@Z
+     320   0x3e20  ?SelectAll@TEdit@@QAEXXZ
+     321   0x3030  ?Set@TTimer@@QAEXI@Z
+     322   0x3160  ?Set@TTimer@@QAEXXZ
+     323   0x3330  ?SetCheck@TCheckBox@@QBEHH@Z
+     324   0x3490  ?SetCheck@TRadioButton@@QBEHH@Z
+     325   0x12a0  ?SetFont@TWindow@@QAEXPAUHFONT__@@_N@Z
+     326   0x3920  ?SetItemData@TComboBox@@QAE_NHH@Z
+     327   0x42d0  ?SetItemData@TListBox@@QAE_NHH@Z
+     328   0x21a0  ?SetMdiClient@TMdiFrame@@QAEXPAVTMdiClient@@@Z
+     329   0x3e80  ?SetModify@TEdit@@QAEX_N@Z
+     330   0x3de0  ?SetPasswordChar@TEdit@@QAEXH@Z
+     331   0x3db0  ?SetReadOnly@TEdit@@QAE_N_N@Z
+     332   0x1300  ?SetText@TWindow@@QAEHPBD@Z
+     333   0x3d70  ?SetTextLimit@TEdit@@QAEXH@Z
+     334   0x11a0  ?Show@TWindow@@QAE_NH@Z
+     335   0x50b0  ?ShowException@@YAXAAVException@@PAUHWND__@@@Z
+     336   0x1530  ?ShowModal@TDialog@@QAEHXZ
+     337   0x7480  ?Shutdown@TMonitorThread@@QAEXXZ
+     338  0x114d8  ?StaticClass@TButton@@2VTWindowClass@@B
+     339  0x114d0  ?StaticClass@TCheckBox@@2VTWindowClass@@B
+     340  0x114e0  ?StaticClass@TComboBox@@2VTWindowClass@@B
+     341  0x11520  ?StaticClass@TConsoleBox@@2VTWindowClass@@B
+     342  0x10498  ?StaticClass@TDialog@@2VTWindowClass@@B
+     343  0x114f8  ?StaticClass@TEdit@@2VTWindowClass@@B
+     344  0x11518  ?StaticClass@TExceptionForm@@2VTWindowClass@@B
+     345  0x11508  ?StaticClass@TLabel@@2VTWindowClass@@B
+     346  0x11500  ?StaticClass@TListBox@@2VTWindowClass@@B
+     347  0x104a0  ?StaticClass@TMdiChild@@2VTWindowClass@@B
+     348  0x104a8  ?StaticClass@TMdiClient@@2VTWindowClass@@B
+     349  0x104b0  ?StaticClass@TMdiFrame@@2VTWindowClass@@B
+     350  0x114f0  ?StaticClass@TMemo@@2VTWindowClass@@B
+     351  0x11528  ?StaticClass@TMonitor@@2VTWindowClass@@B
+     352  0x114c8  ?StaticClass@TRadioButton@@2VTWindowClass@@B
+     353  0x11510  ?StaticClass@TStatic@@2VTWindowClass@@B
+     354  0x114e8  ?StaticClass@TText@@2VTWindowClass@@B
+     355  0x104b8  ?StaticClass@TWindow@@2VTWindowClass@@B
+     356   0x3370  ?Uncheck@TCheckBox@@QBEHXZ
+     357   0x34d0  ?Uncheck@TRadioButton@@QBEHXZ
+     358   0x3a60  ?Unselect@TComboBox@@QAEXXZ
+     359   0x3e40  ?Unselect@TEdit@@QAEXXZ
+     360   0x4430  ?Unselect@TListBox@@QAEXXZ
+     361   0x21b0  ?VerifySuper@TWindowClass@@QBE_NPBV1@@Z
+     362   0x5260  ?WndProc@TConsoleBox@@UAEHAAUTMessage@@@Z
+     363   0x1360  ?WndProc@TDialog@@UAEHAAUTMessage@@@Z
+     364   0x4b60  ?WndProc@TExceptionForm@@MAEHAAUTMessage@@@Z
+     365   0x1c80  ?WndProc@TMdiChild@@MAEHAAUTMessage@@@Z
+     366   0x1f40  ?WndProc@TMdiClient@@MAEHAAUTMessage@@@Z
+     367   0x2110  ?WndProc@TMdiFrame@@MAEHAAUTMessage@@@Z
+     368   0x67c0  ?WndProc@TMonitor@@MAEHAAUTMessage@@@Z
+     369   0x2480  ?WndProc@TWindow@@UAEHAAUTMessage@@@Z
+     370   0x1cc0  ?WndProcDispatcher@TMdiChild@@KGJPAUHWND__@@IIJ@Z
+     371   0x2540  ?WndProcDispatcher@TWindow@@KGJPAUHWND__@@IIJ@Z
+     372   0x56d0  ?_PutChar@TConsoleBox@@IAEXH@Z
+     373   0x6730  ?overflow@TConsoleBoxOutputStreamBuf@@UAEHH@Z
+     374   0x66f0  ?sync@TConsoleBoxOutputStreamBuf@@UAEHXZ

@@ -1,0 +1,5 @@
+t=43217ms dir=RECV sock=9021 mirror_prev_send=false hex=0000040002000100 summary=ctrl msg=2 ch=1
+t=43737ms dir=RECV sock=9021 mirror_prev_send=false hex=010008000000000004000000 summary=raw ch=1 handler=0 msg=4 payload=0B 
+t=43738ms dir=RECV sock=9021 mirror_prev_send=false hex=01000a0000000000000000003600 summary=raw ch=1 handler=0 msg=0 payload=2B 3600
+t=43740ms dir=RECV sock=9021 mirror_prev_send=false hex=010008000000000006000000 summary=raw ch=1 handler=0 msg=6 payload=0B 
+t=44389ms dir=RECV sock=9021 mirror_prev_send=false hex=0000040004000100 summary=ctrl msg=4 ch=1
