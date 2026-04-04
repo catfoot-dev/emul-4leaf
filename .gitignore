@@ -26,3 +26,5 @@ Resources/*
 
 .vscode/*
 .DS_Store
+
+*.log
