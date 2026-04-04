@@ -352,6 +352,8 @@ pub struct WindowState {
     pub zoomed: bool,
     pub iconic: bool,
     pub wnd_proc: u32,
+    /// `WM_SETCURSOR` 기본 처리에서 사용할 클래스 기본 커서 핸들
+    pub class_cursor: u32,
     pub user_data: u32,
     /// 호스트가 네이티브 캡션/프레임을 유지할지 여부
     pub use_native_frame: bool,

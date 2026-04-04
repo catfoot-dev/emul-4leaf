@@ -410,14 +410,18 @@ impl USER32 {
             String::new()
         };
 
-        let (class_wnd_proc, hinstance) = {
+        let (class_wnd_proc, class_cursor, hinstance) = {
             let ctx = uc.get_data();
             if let Some(class_meta) = class_meta {
-                (class_meta.wnd_proc, class_meta.hinstance)
+                (
+                    class_meta.wnd_proc,
+                    class_meta.h_cursor,
+                    class_meta.hinstance,
+                )
             } else if Self::is_builtin_window_class(&class_name) {
-                (Self::def_window_proc_addr(ctx), instance)
+                (Self::def_window_proc_addr(ctx), 0, instance)
             } else {
-                (0, instance)
+                (0, 0, instance)
             }
         };
         let use_native_frame = Self::is_builtin_window_class(&class_name);
@@ -440,6 +444,7 @@ impl USER32 {
             zoomed: false,
             iconic: false,
             wnd_proc: class_wnd_proc,
+            class_cursor,
             user_data: 0,
             use_native_frame,
             surface_bitmap,
@@ -687,6 +692,13 @@ impl USER32 {
         let tid = ctx
             .current_thread_idx
             .load(std::sync::atomic::Ordering::SeqCst);
+        let handles: Vec<u32> = if n_count != 0 && p_handles != 0 {
+            (0..n_count.min(64))
+                .map(|index| uc.read_u32(p_handles as u64 + index as u64 * 4))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         if Self::has_pending_ui_message(ctx) {
             KERNEL32::clear_retry_wait(ctx, tid);
@@ -699,6 +711,20 @@ impl USER32 {
                 dw_wake_mask
             );
             return Some(ApiHookResult::callee(5, Some(n_count as i32)));
+        }
+
+        if let Some(index) = KERNEL32::first_ready_wait_handle(ctx, &handles) {
+            KERNEL32::clear_retry_wait(ctx, tid);
+            crate::emu_log!(
+                "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> WAIT_OBJECT_0+{}",
+                n_count,
+                p_handles,
+                f_wait_all,
+                dw_milliseconds,
+                dw_wake_mask,
+                index
+            );
+            return Some(ApiHookResult::callee(5, Some(index as i32)));
         }
 
         if dw_milliseconds == 0 {
@@ -1774,6 +1800,12 @@ impl USER32 {
         Some(ApiHookResult::callee(2, Some(handle as i32)))
     }
 
+    fn dib_row_stride(width: u32, bits_per_pixel: u16) -> Option<usize> {
+        let row_bits = (width as usize).checked_mul(bits_per_pixel as usize)?;
+        let aligned_dwords = row_bits.checked_add(31)? / 32;
+        aligned_dwords.checked_mul(4)
+    }
+
     fn parse_cur_data(data: &[u8]) -> Option<CursorFrame> {
         if data.len() < 22 {
             return None;
@@ -1809,6 +1841,11 @@ impl USER32 {
         let bi_width = i32::from_le_bytes(bmp_data[4..8].try_into().ok()?);
         let bi_height = i32::from_le_bytes(bmp_data[8..12].try_into().ok()?);
         let bi_bit_count = u16::from_le_bytes(bmp_data[14..16].try_into().ok()?);
+        let bi_clr_used = u32::from_le_bytes(bmp_data[32..36].try_into().ok()?);
+
+        if bi_size < 40 || bi_width == 0 || bi_height == 0 {
+            return None;
+        }
 
         if width == 0 {
             width = bi_width.abs() as u32;
@@ -1817,28 +1854,138 @@ impl USER32 {
             height = (bi_height.abs() / 2) as u32;
         } // CUR height in BMP is double (XOR + AND)
 
-        let mut pixels = vec![0u32; (width * height) as usize];
+        let pixel_count = (width as usize).checked_mul(height as usize)?;
+        let mut pixels = vec![0u32; pixel_count];
+        let palette_entry_count = match bi_bit_count {
+            1 | 4 | 8 => {
+                if bi_clr_used != 0 {
+                    bi_clr_used as usize
+                } else {
+                    1usize << bi_bit_count
+                }
+            }
+            _ => 0,
+        };
+        let palette_offset = bi_size as usize;
+        let palette_len = palette_entry_count.checked_mul(4)?;
+        let pixel_data_offset = palette_offset.checked_add(palette_len)?;
+        let xor_stride = Self::dib_row_stride(width, bi_bit_count)?;
 
-        if bi_bit_count == 32 {
-            let pixel_data_offset = bi_size as usize;
-            for y in 0..height {
-                let src_y = height - 1 - y;
-                let src_row_offset = pixel_data_offset + (src_y * width * 4) as usize;
-                for x in 0..width {
-                    let p = src_row_offset + (x * 4) as usize;
-                    if p + 3 < bmp_data.len() {
-                        let b = bmp_data[p] as u32;
-                        let g = bmp_data[p + 1] as u32;
-                        let r = bmp_data[p + 2] as u32;
-                        let a = bmp_data[p + 3] as u32;
-                        pixels[(y * width + x) as usize] = (a << 24) | (r << 16) | (g << 8) | b;
+        if pixel_data_offset > bmp_data.len() {
+            return None;
+        }
+        if palette_offset
+            .checked_add(palette_len)
+            .is_none_or(|end| end > bmp_data.len())
+        {
+            return None;
+        }
+
+        let mut palette = Vec::with_capacity(palette_entry_count);
+        for index in 0..palette_entry_count {
+            let offset = palette_offset + index * 4;
+            let b = bmp_data[offset] as u32;
+            let g = bmp_data[offset + 1] as u32;
+            let r = bmp_data[offset + 2] as u32;
+            palette.push(0xFF00_0000 | (r << 16) | (g << 8) | b);
+        }
+
+        let xor_len = xor_stride.checked_mul(height as usize)?;
+        if pixel_data_offset
+            .checked_add(xor_len)
+            .is_none_or(|end| end > bmp_data.len())
+        {
+            return None;
+        }
+
+        let bottom_up = bi_height > 0;
+        let mut has_explicit_alpha = false;
+
+        for y in 0..height as usize {
+            let src_y = if bottom_up {
+                height as usize - 1 - y
+            } else {
+                y
+            };
+            let row_offset = pixel_data_offset + src_y * xor_stride;
+            for x in 0..width as usize {
+                let color = match bi_bit_count {
+                    1 => {
+                        let byte = *bmp_data.get(row_offset + x / 8)?;
+                        let bit = 7 - (x % 8);
+                        let palette_idx = ((byte >> bit) & 0x01) as usize;
+                        *palette.get(palette_idx)?
+                    }
+                    4 => {
+                        let byte = *bmp_data.get(row_offset + x / 2)?;
+                        let palette_idx = if x % 2 == 0 { byte >> 4 } else { byte & 0x0F };
+                        *palette.get(palette_idx as usize)?
+                    }
+                    8 => {
+                        let palette_idx = *bmp_data.get(row_offset + x)? as usize;
+                        *palette.get(palette_idx)?
+                    }
+                    24 => {
+                        let offset = row_offset + x * 3;
+                        let b = *bmp_data.get(offset)? as u32;
+                        let g = *bmp_data.get(offset + 1)? as u32;
+                        let r = *bmp_data.get(offset + 2)? as u32;
+                        0xFF00_0000 | (r << 16) | (g << 8) | b
+                    }
+                    32 => {
+                        let offset = row_offset + x * 4;
+                        let b = *bmp_data.get(offset)? as u32;
+                        let g = *bmp_data.get(offset + 1)? as u32;
+                        let r = *bmp_data.get(offset + 2)? as u32;
+                        let a = *bmp_data.get(offset + 3)? as u32;
+                        if a != 0 {
+                            has_explicit_alpha = true;
+                        }
+                        (a << 24) | (r << 16) | (g << 8) | b
+                    }
+                    _ => {
+                        crate::emu_log!(
+                            "[USER32] parse_cur_data: unsupported cursor bit depth {}",
+                            bi_bit_count
+                        );
+                        return None;
+                    }
+                };
+                pixels[y * width as usize + x] = color;
+            }
+        }
+
+        // 고전 CUR 포맷은 XOR 비트맵 뒤에 1bpp AND 마스크를 두므로,
+        // 팔레트/24bpp 커서는 이 마스크로 투명도를 만들고 32bpp도 필요 시 보정합니다.
+        let mask_stride = Self::dib_row_stride(width, 1)?;
+        let mask_offset = pixel_data_offset.checked_add(xor_len)?;
+        let mask_len = mask_stride.checked_mul(height as usize)?;
+        if mask_offset
+            .checked_add(mask_len)
+            .is_some_and(|end| end <= bmp_data.len())
+        {
+            for y in 0..height as usize {
+                let src_y = if bottom_up {
+                    height as usize - 1 - y
+                } else {
+                    y
+                };
+                let row_offset = mask_offset + src_y * mask_stride;
+                for x in 0..width as usize {
+                    let byte = *bmp_data.get(row_offset + x / 8)?;
+                    let bit = 7 - (x % 8);
+                    let transparent = ((byte >> bit) & 0x01) != 0;
+                    let pixel = &mut pixels[y * width as usize + x];
+                    if transparent {
+                        *pixel &= 0x00FF_FFFF;
+                    } else if bi_bit_count < 32 || !has_explicit_alpha {
+                        *pixel |= 0xFF00_0000;
                     }
                 }
             }
-        } else {
-            // Placeholder: Magenta
-            for p in pixels.iter_mut() {
-                *p = 0xFFFF00FF;
+        } else if bi_bit_count < 32 {
+            for pixel in &mut pixels {
+                *pixel |= 0xFF00_0000;
             }
         }
 
@@ -2081,11 +2228,7 @@ impl USER32 {
         let line_height = line_height.max(1);
         let normalized_text = raw_text.replace("\r\n", "\n").replace('\r', "\n");
         let single_line = (u_format & DT_SINGLELINE) != 0;
-        let max_line_width = if rect_width > 0 {
-            rect_width
-        } else {
-            i32::MAX
-        };
+        let max_line_width = if rect_width > 0 { rect_width } else { i32::MAX };
 
         // `DT_WORDBREAK`가 들어온 경우만 간단한 폭 기준 줄바꿈을 적용하고,
         // 그 외에는 게스트가 만든 개행을 그대로 존중합니다.
@@ -2143,8 +2286,14 @@ impl USER32 {
         let measured_height = line_height * lines.len().max(1) as i32;
 
         if (u_format & DT_CALCRECT) != 0 {
-            uc.write_u32(lp_rect as u64 + 8, left.saturating_add(measured_width) as u32);
-            uc.write_u32(lp_rect as u64 + 12, top.saturating_add(measured_height) as u32);
+            uc.write_u32(
+                lp_rect as u64 + 8,
+                left.saturating_add(measured_width) as u32,
+            );
+            uc.write_u32(
+                lp_rect as u64 + 12,
+                top.saturating_add(measured_height) as u32,
+            );
         } else if hbmp != 0 {
             GDI32::sync_dib_pixels(uc, hbmp);
             let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
@@ -2932,9 +3081,38 @@ impl USER32 {
     pub fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
         let msg = uc.read_arg(1);
-        let w_param = uc.read_arg(2);
-        let l_param = uc.read_arg(3);
-        let default_ret = if msg == 0x0081 { 1 } else { 0 };
+        let _w_param = uc.read_arg(2);
+        let _l_param = uc.read_arg(3);
+        let default_ret = match msg {
+            0x0081 => 1, // WM_NCCREATE
+            0x0020 => {
+                let ctx = uc.get_data();
+                let class_cursor = {
+                    let win_event = ctx.win_event.lock().unwrap();
+                    win_event
+                        .windows
+                        .get(&hwnd)
+                        .map(|win| win.class_cursor)
+                        .unwrap_or(0)
+                };
+
+                if class_cursor != 0 {
+                    ctx.current_cursor
+                        .store(class_cursor, std::sync::atomic::Ordering::SeqCst);
+                    ctx.win_event
+                        .lock()
+                        .unwrap()
+                        .send_ui_command(crate::ui::UiCommand::SetCursor {
+                            hwnd,
+                            hcursor: class_cursor,
+                        });
+                    1
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        };
         // crate::emu_log!(
         //     "[USER32] DefWindowProcA({:#x}, {:#x}, {:#x}, {:#x}) -> LRESULT {}",
         //     hwnd,
@@ -3820,6 +3998,29 @@ mod tests {
         assert_eq!(
             words[(USER32::CREATE_STRUCT_A_EX_STYLE_OFFSET / 4) as usize],
             expected[11]
+        );
+    }
+
+    #[test]
+    fn parse_cur_data_supports_paletted_cursor() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("Resources/Cursor/Hand.ani");
+        let data = std::fs::read(path).expect("커서 리소스를 읽을 수 있어야 합니다");
+        let frame = USER32::parse_cur_data(&data).expect("8bpp CUR 파싱이 성공해야 합니다");
+
+        assert_eq!(frame.width, 32);
+        assert_eq!(frame.height, 32);
+        assert!(
+            frame.pixels.iter().any(|pixel| (pixel >> 24) != 0),
+            "불투명 픽셀이 있어야 합니다"
+        );
+        assert!(
+            frame.pixels.iter().any(|pixel| (pixel >> 24) == 0),
+            "투명 픽셀이 있어야 합니다"
+        );
+        assert!(
+            frame.pixels.iter().any(|pixel| *pixel != 0xFFFF00FF),
+            "마젠타 대체색만 남아 있으면 안 됩니다"
         );
     }
 }

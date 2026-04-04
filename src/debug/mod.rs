@@ -11,6 +11,7 @@ static FONT_DATA: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new(
 static TTF_FONT: std::sync::OnceLock<TtfFont<'static>> = std::sync::OnceLock::new();
 
 pub const LOG_SCROLL_MAX: usize = 5000;
+const DEBUG_UI_POLL_INTERVAL_MS: u64 = 50;
 
 use crate::debug::common::{CpuContext, DebugCommand};
 use crate::ui::Painter;
@@ -156,7 +157,8 @@ impl Painter for Debug {
     }
 
     fn poll_interval(&self) -> Option<std::time::Duration> {
-        Some(std::time::Duration::from_millis(10))
+        // 디버그 상태는 최대 250ms 주기로만 전송되므로 100Hz 폴링은 과합니다.
+        Some(std::time::Duration::from_millis(DEBUG_UI_POLL_INTERVAL_MS))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

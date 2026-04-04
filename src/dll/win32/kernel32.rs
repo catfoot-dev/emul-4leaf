@@ -23,8 +23,13 @@ const GMEM_ZEROINIT: u32 = 0x0040;
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
 /// `STACK_SIZE_PARAM_IS_A_RESERVATION` 스택 예약 크기 플래그입니다.
 const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
-/// 재시도형 대기 API를 다시 확인할 기본 폴링 간격입니다.
+/// 명시적인 타임아웃이 있는 대기 API를 다시 확인할 기본 폴링 간격입니다.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// 무한 대기 계열을 다시 확인할 기본 폴링 간격입니다.
+///
+/// 외부 이벤트를 직접 깨울 수 없는 구조라 주기적 확인은 필요하지만,
+/// 10ms로 계속 폴링하면 idle CPU 사용량이 커져 조금 더 완만하게 확인합니다.
+const WAIT_POLL_INTERVAL_IDLE: Duration = Duration::from_millis(25);
 
 /// `KERNEL32.dll` 프록시 구현 모듈
 ///
@@ -84,7 +89,7 @@ impl KERNEL32 {
         let now = Instant::now();
         let next_resume = deadline
             .map(|limit| (now + WAIT_POLL_INTERVAL).min(limit))
-            .unwrap_or(now + WAIT_POLL_INTERVAL);
+            .unwrap_or(now + WAIT_POLL_INTERVAL_IDLE);
 
         if tid == 0 {
             *ctx.main_resume_time.lock().unwrap() = Some(next_resume);
@@ -126,6 +131,65 @@ impl KERNEL32 {
             }
         }
         false
+    }
+
+    /// WSA 이벤트 핸들의 현재 상태를 점검하고 필요하면 pending 비트를 갱신합니다.
+    fn poll_wsa_event(ctx: &Win32Context, handle: u32) -> bool {
+        let entry = ctx.wsa_event_map.lock().unwrap().get(&handle).cloned();
+        let Some(entry) = entry else {
+            return false;
+        };
+
+        if entry.pending != 0 {
+            return true;
+        }
+
+        let mut should_signal_read = false;
+        {
+            let mut sockets = ctx.tcp_sockets.lock().unwrap();
+            let Some(socket) = sockets.get_mut(&entry.socket) else {
+                return false;
+            };
+
+            if !socket.recv_buf.is_empty() {
+                should_signal_read = true;
+            } else if let Some(chan_rx) = socket.chan_rx.as_mut() {
+                match chan_rx.try_recv() {
+                    Ok(data) => {
+                        socket.recv_buf.extend(data);
+                        should_signal_read = true;
+                    }
+                    // EOF도 읽기 가능 상태처럼 전달해 상위 루프가 닫힘을 감지하게 합니다.
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        should_signal_read = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }
+
+        if should_signal_read {
+            ctx.wsa_event_map
+                .lock()
+                .unwrap()
+                .entry(handle)
+                .and_modify(|event| event.pending |= 0x01);
+            return true;
+        }
+
+        false
+    }
+
+    /// 대기 핸들 배열에서 즉시 준비된 첫 번째 항목의 인덱스를 반환합니다.
+    pub(crate) fn first_ready_wait_handle(ctx: &Win32Context, handles: &[u32]) -> Option<usize> {
+        handles.iter().enumerate().find_map(|(index, handle)| {
+            if Self::try_consume_signaled_event(ctx, *handle) || Self::poll_wsa_event(ctx, *handle)
+            {
+                Some(index)
+            } else {
+                None
+            }
+        })
     }
 
     // =========================================================
@@ -1870,6 +1934,7 @@ impl KERNEL32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dll::win32::{VirtualSocket, WsaEventEntry};
 
     fn sample_thread(thread_id: u32, alive: bool) -> EmulatedThread {
         EmulatedThread {
@@ -1918,5 +1983,47 @@ mod tests {
         let tls_slots = ctx.tls_slots.lock().unwrap();
         assert!(tls_slots.contains_key(&0x2001));
         assert!(!tls_slots.contains_key(&0x2002));
+    }
+
+    #[test]
+    fn first_ready_wait_handle_detects_buffered_wsa_events() {
+        let ctx = Win32Context::new(None);
+        let sock = 0x2200;
+        let event = 0x3300;
+
+        ctx.tcp_sockets.lock().unwrap().insert(
+            sock,
+            VirtualSocket {
+                af: 2,
+                sock_type: 1,
+                protocol: 6,
+                chan_tx: None,
+                chan_rx: None,
+                connected: true,
+                recv_buf: vec![0x41],
+                non_blocking: false,
+                remote_addr: None,
+            },
+        );
+        ctx.wsa_event_map.lock().unwrap().insert(
+            event,
+            WsaEventEntry {
+                socket: sock,
+                interest: 0x01,
+                pending: 0,
+            },
+        );
+
+        let ready = KERNEL32::first_ready_wait_handle(&ctx, &[0x1111, event]);
+
+        assert_eq!(ready, Some(1));
+        let pending = ctx
+            .wsa_event_map
+            .lock()
+            .unwrap()
+            .get(&event)
+            .map(|entry| entry.pending)
+            .unwrap_or(0);
+        assert_eq!(pending & 0x01, 0x01);
     }
 }

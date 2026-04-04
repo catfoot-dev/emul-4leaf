@@ -53,8 +53,7 @@ impl GDI32 {
 
                 match bpp {
                     8 => {
-                        let gray =
-                            ((r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100) as u8;
+                        let gray = ((r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100) as u8;
                         raw[row_offset + col] = gray;
                     }
                     24 => {

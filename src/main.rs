@@ -26,6 +26,15 @@ use std::{
 
 const CAPTURE_DIR: &str = "./docs/Capture";
 
+/// 로그를 stderr에도 그대로 복제할지 여부를 반환합니다.
+///
+/// 디버그 창과 캡처 파일이 이미 있는 상태에서 stderr까지 동기 출력하면
+/// 핫패스 I/O 비용이 커지므로, 명시적으로 요청한 경우에만 활성화합니다.
+fn should_mirror_logs_to_stderr() -> bool {
+    static STDERR_LOG_ENABLED: OnceLock<bool> = OnceLock::new();
+    *STDERR_LOG_ENABLED.get_or_init(|| env::var("EMUL_STDERR_LOG").ok().as_deref() == Some("1"))
+}
+
 /// UI 스레드와 로그 출력 스레드 간 동기화를 위한 전역 로그 큐 형태의 버퍼입니다.
 pub static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 /// 새로운 로그가 들어올 때 마다 증가하여 UI 리프레시 타이밍을 결정하는 카운터입니다.
@@ -53,7 +62,9 @@ pub fn push_log(msg: String) {
     if !crate::debug::should_send_debug_messages() {
         return;
     }
-    eprintln!("[EMU] {}", msg);
+    if should_mirror_logs_to_stderr() {
+        eprintln!("[EMU] {}", msg);
+    }
     if let Some(buf) = LOG_BUFFER.get() {
         if let Ok(mut b) = buf.lock() {
             for line in msg.lines() {

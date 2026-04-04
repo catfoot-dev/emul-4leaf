@@ -73,6 +73,13 @@ fn return_unsupported_flags(
     Some(ApiHookResult::callee(argc, Some(SOCKET_ERROR)))
 }
 
+/// `select`의 `timeval` 값을 Rust `Duration`으로 변환합니다.
+///
+/// `None`은 Winsock의 `timeout == NULL`과 동일하며 무한 대기를 의미합니다.
+fn select_timeout_duration(timeval: Option<(u32, u32)>) -> Option<Duration> {
+    timeval.map(|(sec, usec)| Duration::from_secs(sec as u64) + Duration::from_micros(usec as u64))
+}
+
 /// 내부 수신 버퍼에서 필요한 만큼 복사하고, peek가 아니면 소비합니다.
 fn take_from_recv_buf(recv_buf: &mut Vec<u8>, requested: usize, peek: bool) -> Vec<u8> {
     let take = requested.min(recv_buf.len());
@@ -562,13 +569,13 @@ impl WS2_32 {
         let exceptfds_ptr = uc.read_arg(3);
         let timeout_ptr = uc.read_arg(4);
 
-        // timeval 구조체 파싱: tv_sec(4) + tv_usec(4)
-        let timeout_us = if timeout_ptr != 0 {
-            let sec = uc.read_u32(timeout_ptr as u64) as u64;
-            let usec = uc.read_u32(timeout_ptr as u64 + 4) as u64;
-            sec * 1_000_000 + usec
+        // Winsock에서 timeout == NULL은 기본 폴링이 아니라 무한 대기입니다.
+        let timeout = if timeout_ptr != 0 {
+            let sec = uc.read_u32(timeout_ptr as u64);
+            let usec = uc.read_u32(timeout_ptr as u64 + 4);
+            select_timeout_duration(Some((sec, usec)))
         } else {
-            500_000 // 기본 500ms 타임아웃
+            None
         };
 
         let mut total_ready = 0i32;
@@ -643,18 +650,15 @@ impl WS2_32 {
 
         let tid = uc.get_data().current_thread_idx.load(Ordering::SeqCst);
         if total_ready == 0 {
-            if timeout_us == 0 {
+            if timeout.is_some_and(|duration| duration.is_zero()) {
                 KERNEL32::clear_retry_wait(uc.get_data(), tid);
                 return Some(ApiHookResult::callee(5, Some(0)));
             }
 
             let now = Instant::now();
-            let deadline = if timeout_us == u64::MAX {
-                None
-            } else {
-                KERNEL32::current_wait_deadline(uc.get_data(), tid)
-                    .or(Some(now + Duration::from_micros(timeout_us)))
-            };
+            let deadline = timeout.and_then(|duration| {
+                KERNEL32::current_wait_deadline(uc.get_data(), tid).or(Some(now + duration))
+            });
 
             if let Some(limit) = deadline
                 && now >= limit
@@ -1289,7 +1293,7 @@ impl WS2_32 {
 
     /// 함수명 기준 `WS2_32.dll` API 구현체
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
-        crate::emu_log!("[WS2_32] handle(func_name={})", func_name);
+        // 각 API 구현체가 자체 로그를 남기므로 디스패치 레벨 중복 로그는 생략합니다.
         match func_name {
             // =========================================================
             // Ordinal → Real Winsock Function Mapping (WinXP ws2_32.dll)
@@ -1342,7 +1346,7 @@ impl WS2_32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::{sync::mpsc, time::Duration};
 
     use super::*;
 
@@ -1397,5 +1401,19 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn select_timeout_duration_preserves_infinite_wait_for_null_timeout() {
+        assert_eq!(select_timeout_duration(None), None);
+    }
+
+    #[test]
+    fn select_timeout_duration_parses_timeval_values() {
+        assert_eq!(
+            select_timeout_duration(Some((1, 500_000))),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(select_timeout_duration(Some((0, 0))), Some(Duration::ZERO));
     }
 }

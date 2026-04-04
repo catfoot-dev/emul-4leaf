@@ -89,10 +89,7 @@ pub(crate) struct RareWaveData {
 #[derive(Debug, Clone)]
 enum ResolvedAudioSource {
     File(PathBuf),
-    Packed {
-        display_name: String,
-        data: Vec<u8>,
-    },
+    Packed { display_name: String, data: Vec<u8> },
 }
 
 /// Rare.dll의 사운드 객체 상태입니다.
@@ -1230,7 +1227,8 @@ fn resolve_sound_source(filename: &str) -> Option<ResolvedAudioSource> {
         {
             return Some(source);
         }
-        if let Some(source) = resolve_sound_source_from_pack(pack_name, Path::new("Resources/BGM.pak"))
+        if let Some(source) =
+            resolve_sound_source_from_pack(pack_name, Path::new("Resources/BGM.pak"))
         {
             return Some(source);
         }
@@ -1260,7 +1258,9 @@ fn decode_audio_bytes(name_hint: &str, data: &[u8]) -> Result<RareWaveData, Stri
 
     if name_hint.to_ascii_lowercase().ends_with(".mp3")
         || data.starts_with(b"ID3")
-        || data.windows(2).any(|pair| pair[0] == 0xff && (pair[1] & 0xe0) == 0xe0)
+        || data
+            .windows(2)
+            .any(|pair| pair[0] == 0xff && (pair[1] & 0xe0) == 0xe0)
     {
         return decode_mp3_bytes(data);
     }

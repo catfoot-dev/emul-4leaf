@@ -38,6 +38,7 @@ const SIZE_4KB: u64 = 4 * 1024;
 const DEBUG_AUTO_QUANTUM: usize = 200_000;
 const DEBUG_STEP_QUANTUM: usize = 1;
 const DEBUG_STATE_SEND_INTERVAL: Duration = Duration::from_millis(250);
+const EMULATOR_IDLE_SLEEP_SLICE: Duration = Duration::from_millis(25);
 
 /// 함수 호출 규약에 따른 스택 정리(Cleanup) 시 이동해야 할 ESP의 상대적 위치를 계산합니다.
 ///
@@ -1158,7 +1159,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 let now = Instant::now();
                 if res_time > now {
                     let diff = res_time.duration_since(now);
-                    std::thread::sleep(diff.min(Duration::from_millis(10)));
+                    std::thread::sleep(diff.min(EMULATOR_IDLE_SLEEP_SLICE));
                 }
             }
         }

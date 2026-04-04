@@ -46,8 +46,7 @@ struct HostWindowStyle {
 
 impl HostWindowStyle {
     fn from_guest(style: u32, ex_style: u32, use_native_frame: bool) -> Self {
-        let decorations =
-            use_native_frame && (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
+        let decorations = use_native_frame && (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
         let resizable = use_native_frame && (style & WS_THICKFRAME) != 0;
         let transparent = (ex_style & WS_EX_LAYERED) != 0;
         let topmost = (ex_style & WS_EX_TOPMOST) != 0;
@@ -275,12 +274,7 @@ impl WinFrame {
                     {
                         let use_native_frame =
                             self.hwnd_native_frame.get(&hwnd).copied().unwrap_or(true);
-                        Self::apply_guest_window_style(
-                            window,
-                            style,
-                            ex_style,
-                            use_native_frame,
-                        );
+                        Self::apply_guest_window_style(window, style, ex_style, use_native_frame);
                         window.request_redraw();
                     }
                 }
@@ -646,15 +640,48 @@ impl ApplicationHandler<()> for WinFrame {
                         .mouse_y
                         .store(y, std::sync::atomic::Ordering::SeqCst);
 
+                    let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                     let lparam = (y << 16) | (x & 0xFFFF);
+                    let capture_hwnd = self
+                        .emu_context
+                        .capture_hwnd
+                        .load(std::sync::atomic::Ordering::SeqCst);
                     let mut q = self.emu_context.message_queue.lock().unwrap();
+
+                    if capture_hwnd == 0 {
+                        let setcursor_lparam = (0x0200u32 << 16) | 0x0001; // WM_MOUSEMOVE | HTCLIENT
+                        let setcursor_idx = q.iter().position(|m| m[0] == hwnd && m[1] == 0x0020);
+                        let mousemove_idx = q.iter().position(|m| m[0] == hwnd && m[1] == 0x0200);
+
+                        if let Some(idx) = setcursor_idx {
+                            if let Some(message) = q.get_mut(idx) {
+                                message[2] = hwnd;
+                                message[3] = setcursor_lparam;
+                                message[4] = time;
+                                message[5] = x;
+                                message[6] = y;
+                            }
+                        } else {
+                            let setcursor_message =
+                                [hwnd, 0x0020, hwnd, setcursor_lparam, time, x, y];
+                            if let Some(idx) = mousemove_idx {
+                                q.insert(idx, setcursor_message);
+                            } else {
+                                q.push_back(setcursor_message);
+                            }
+                        }
+                    }
+
                     // WM_MOUSEMOVE(0x0200) 중복 제거: 이미 큐에 있으면 위치만 업데이트
-                    if let Some(m) = q.iter_mut().find(|m| m[0] == hwnd && m[1] == 0x0200) {
-                        m[3] = lparam;
-                        m[5] = x;
-                        m[6] = y;
+                    if let Some(idx) = q.iter().position(|m| m[0] == hwnd && m[1] == 0x0200) {
+                        if let Some(message) = q.get_mut(idx) {
+                            message[3] = lparam;
+                            message[4] = time;
+                            message[5] = x;
+                            message[6] = y;
+                        }
                     } else {
-                        q.push_back([hwnd, 0x0200, 0, lparam, 0, x, y]);
+                        q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
                     }
 
                     // 마우스 트래킹 (TrackMouseEvent) 처리
