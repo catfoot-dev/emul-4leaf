@@ -353,6 +353,8 @@ pub struct WindowState {
     pub iconic: bool,
     pub wnd_proc: u32,
     pub user_data: u32,
+    /// 호스트가 네이티브 캡션/프레임을 유지할지 여부
+    pub use_native_frame: bool,
     /// 윈도우 렌더링을 위한 백버퍼 비트맵 핸들
     pub surface_bitmap: u32,
     /// 윈도우의 가시 영역(Region) 핸들

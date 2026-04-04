@@ -157,12 +157,27 @@ impl GdiRenderer {
         let scale = Scale::uniform(font_size);
         let v_metrics = font.v_metrics(scale);
         let offset = point(x as f32, y as f32 + v_metrics.ascent);
+        let text_width = Self::measure_text_width(text, font_size);
+        let text_height = (v_metrics.ascent - v_metrics.descent).ceil() as i32;
 
         let glyphs: Vec<_> = font.layout(text, scale, offset).collect();
 
         let fg_r = ((color >> 16) & 0xFF) as u16;
         let fg_g = ((color >> 8) & 0xFF) as u16;
         let fg_b = (color & 0xFF) as u16;
+
+        if let Some(bg_color) = bg_color {
+            let bg_left = x.max(0);
+            let bg_top = y.max(0);
+            let bg_right = (x + text_width).min(width as i32);
+            let bg_bottom = (y + text_height).min(height as i32);
+
+            for py in bg_top..bg_bottom {
+                for px in bg_left..bg_right {
+                    pixels[(py as u32 * width + px as u32) as usize] = bg_color;
+                }
+            }
+        }
 
         for glyph in glyphs {
             if let Some(bb) = glyph.pixel_bounding_box() {

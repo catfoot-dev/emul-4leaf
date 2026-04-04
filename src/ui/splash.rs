@@ -265,7 +265,7 @@ impl crate::ui::Painter for SplashPainter {
         self.should_close
     }
 
-    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
+    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) -> bool {
         let copy_w = width.min(self.width);
         let copy_h = height.min(self.height);
 
@@ -274,6 +274,8 @@ impl crate::ui::Painter for SplashPainter {
                 buffer[(y * width + x) as usize] = self.pixels[(y * self.width + x) as usize];
             }
         }
+
+        true
     }
 
     fn handle_event(

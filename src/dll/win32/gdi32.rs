@@ -12,6 +12,75 @@ use unicorn_engine::Unicorn;
 pub struct GDI32;
 
 impl GDI32 {
+    /// DIBSection 픽셀 버퍼를 게스트가 받은 `bits` 메모리로 역동기화합니다.
+    pub(crate) fn flush_dib_pixels_to_memory(uc: &mut Unicorn<Win32Context>, hbmp: u32) {
+        let bmp_info = {
+            let gdi = uc.get_data().gdi_objects.lock().unwrap();
+            match gdi.get(&hbmp) {
+                Some(GdiObject::Bitmap {
+                    width,
+                    height,
+                    pixels,
+                    bits_addr: Some(addr),
+                    bpp,
+                    top_down,
+                    ..
+                }) => Some((*width, *height, pixels.clone(), *addr, *bpp, *top_down)),
+                _ => None,
+            }
+        };
+        let (width, height, pixels_arc, addr, bpp, top_down) = match bmp_info {
+            Some(v) => v,
+            None => return,
+        };
+
+        let stride = ((width * bpp + 31) / 32) * 4;
+        let mut raw = vec![0u8; (stride * height) as usize];
+        let pixels = pixels_arc.lock().unwrap();
+
+        for row in 0..height as usize {
+            let dst_row = if top_down {
+                row
+            } else {
+                height as usize - 1 - row
+            };
+            let row_offset = dst_row * stride as usize;
+            for col in 0..width as usize {
+                let color = pixels[row * width as usize + col];
+                let r = ((color >> 16) & 0xFF) as u8;
+                let g = ((color >> 8) & 0xFF) as u8;
+                let b = (color & 0xFF) as u8;
+
+                match bpp {
+                    8 => {
+                        let gray =
+                            ((r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100) as u8;
+                        raw[row_offset + col] = gray;
+                    }
+                    24 => {
+                        let idx = row_offset + col * 3;
+                        if idx + 2 < raw.len() {
+                            raw[idx] = b;
+                            raw[idx + 1] = g;
+                            raw[idx + 2] = r;
+                        }
+                    }
+                    _ => {
+                        let idx = row_offset + col * 4;
+                        if idx + 3 < raw.len() {
+                            raw[idx] = b;
+                            raw[idx + 1] = g;
+                            raw[idx + 2] = r;
+                            raw[idx + 3] = 0xFF;
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = uc.mem_write(addr as u64, &raw);
+    }
+
     // API: HDC CreateCompatibleDC(HDC hdc)
     // 역할: 지정된 디바이스와 호환되는 메모리 디바이스 컨텍스트(DC)를 만듦
     pub fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -599,6 +668,7 @@ impl GDI32 {
 
         if let Some((hbmp, _hpen, text_color, bk_color, bk_mode, hwnd, font_height)) = draw_params {
             if hbmp != 0 {
+                Self::sync_dib_pixels(uc, hbmp);
                 let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
                 if let Some(GdiObject::Bitmap {
                     width,
@@ -623,6 +693,7 @@ impl GDI32 {
                     );
                     drop(pixels);
                     drop(gdi_objects);
+                    Self::flush_dib_pixels_to_memory(uc, hbmp);
                     if hwnd != 0 {
                         uc.get_data().win_event.lock().unwrap().update_window(hwnd);
                     }
@@ -1097,6 +1168,7 @@ impl GDI32 {
         };
 
         if hbmp_dest != 0 {
+            Self::sync_dib_pixels(uc, hbmp_dest);
             let gdi = uc.get_data().gdi_objects.lock().unwrap();
             if let Some(GdiObject::Bitmap {
                 width: dw,
@@ -1125,6 +1197,8 @@ impl GDI32 {
                     0,
                 );
             }
+            drop(gdi);
+            Self::flush_dib_pixels_to_memory(uc, hbmp_dest);
         }
         if hwnd_dest != 0 {
             uc.get_data()
@@ -1223,6 +1297,7 @@ impl GDI32 {
         };
 
         if hbmp_dest != 0 {
+            Self::sync_dib_pixels(uc, hbmp_dest);
             let gdi = uc.get_data().gdi_objects.lock().unwrap();
             if let Some(GdiObject::Bitmap {
                 width: dw,
@@ -1258,6 +1333,8 @@ impl GDI32 {
                     }
                 }
             }
+            drop(gdi);
+            Self::flush_dib_pixels_to_memory(uc, hbmp_dest);
         }
         if hwnd_dest != 0 {
             uc.get_data()
@@ -1348,7 +1425,7 @@ impl GDI32 {
     }
 
     // Helper: DIBSection 비트맵의 emulated memory 데이터를 GdiObject::Bitmap.pixels Vec에 동기화
-    fn sync_dib_pixels(uc: &mut Unicorn<Win32Context>, hbmp: u32) {
+    pub(crate) fn sync_dib_pixels(uc: &mut Unicorn<Win32Context>, hbmp: u32) {
         let bmp_info = {
             let gdi = uc.get_data().gdi_objects.lock().unwrap();
             match gdi.get(&hbmp) {
@@ -1419,7 +1496,8 @@ impl GDI32 {
 
             if let Some((hbmp_dest, hbmp_src, hwnd_dest)) = draw_params {
                 if hbmp_dest != 0 && hbmp_src != 0 {
-                    // DIBSection이면 emulated memory에서 pixels Vec으로 동기화
+                    // DIBSection이면 emulated memory와 pixels Vec을 먼저 맞춘 뒤 복사합니다.
+                    Self::sync_dib_pixels(uc, hbmp_dest);
                     Self::sync_dib_pixels(uc, hbmp_src);
                     let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
                     if let (
@@ -1455,6 +1533,10 @@ impl GDI32 {
                             x_src,
                             y_src,
                         );
+                        drop(dp);
+                        drop(sp);
+                        drop(gdi_objects);
+                        Self::flush_dib_pixels_to_memory(uc, hbmp_dest);
                         if hwnd_dest != 0 {
                             uc.get_data()
                                 .win_event
@@ -1510,6 +1592,7 @@ impl GDI32 {
 
         if let Some((hbmp, hpen, hbrush, hwnd)) = draw_params {
             if hbmp != 0 {
+                Self::sync_dib_pixels(uc, hbmp);
                 let (pen_color, brush_color) = {
                     let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
                     let pen_color = if hpen != 0 {
@@ -1555,6 +1638,9 @@ impl GDI32 {
                         pen_color,
                         brush_color,
                     );
+                    drop(pixels);
+                    drop(gdi_objects);
+                    Self::flush_dib_pixels_to_memory(uc, hbmp);
                     if hwnd != 0 {
                         uc.get_data().win_event.lock().unwrap().update_window(hwnd);
                     }
@@ -1640,6 +1726,7 @@ impl GDI32 {
 
         if let Some((x1, y1, hbmp, color, hwnd)) = draw_data {
             if hbmp != 0 {
+                Self::sync_dib_pixels(uc, hbmp);
                 let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
                 if let Some(GdiObject::Bitmap {
                     width,
@@ -1652,6 +1739,9 @@ impl GDI32 {
                     let height = *height;
                     let mut pixels = pixels.lock().unwrap();
                     GdiRenderer::draw_line(&mut pixels, width, height, x1, y1, x, y, color);
+                    drop(pixels);
+                    drop(gdi_objects);
+                    Self::flush_dib_pixels_to_memory(uc, hbmp);
                     if hwnd != 0 {
                         uc.get_data().win_event.lock().unwrap().update_window(hwnd);
                     }
@@ -1867,6 +1957,7 @@ impl GDI32 {
         }
 
         // DIBSection 동기화
+        Self::sync_dib_pixels(uc, hbmp_dest);
         Self::sync_dib_pixels(uc, hbmp_src);
 
         let gdi = uc.get_data().gdi_objects.lock().unwrap();
@@ -1910,6 +2001,7 @@ impl GDI32 {
             }
         }
         drop(gdi);
+        Self::flush_dib_pixels_to_memory(uc, hbmp_dest);
 
         if hwnd_dest != 0 {
             uc.get_data()

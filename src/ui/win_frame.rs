@@ -45,9 +45,10 @@ struct HostWindowStyle {
 }
 
 impl HostWindowStyle {
-    fn from_guest(style: u32, ex_style: u32) -> Self {
-        let decorations = (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
-        let resizable = (style & WS_THICKFRAME) != 0;
+    fn from_guest(style: u32, ex_style: u32, use_native_frame: bool) -> Self {
+        let decorations =
+            use_native_frame && (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
+        let resizable = use_native_frame && (style & WS_THICKFRAME) != 0;
         let transparent = (ex_style & WS_EX_LAYERED) != 0;
         let topmost = (ex_style & WS_EX_TOPMOST) != 0;
         #[cfg(target_os = "windows")]
@@ -97,6 +98,8 @@ pub struct WinFrame {
     hwnd_to_id: HashMap<u32, WindowId>,
     /// 윈도우 ID -> 가상 HWND
     id_to_hwnd: HashMap<WindowId, u32>,
+    /// 가상 HWND -> 호스트 네이티브 프레임 사용 여부
+    hwnd_native_frame: HashMap<u32, bool>,
 
     /// softbuffer 컨텍스트
     sb_context: Option<SoftContext<DisplayHandle<'static>>>,
@@ -119,6 +122,7 @@ impl WinFrame {
             painters: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             id_to_hwnd: HashMap::new(),
+            hwnd_native_frame: HashMap::new(),
             sb_context: None,
             emu_context: context,
             initial_painters,
@@ -142,8 +146,9 @@ impl WinFrame {
         mut attributes: WindowAttributes,
         style: u32,
         ex_style: u32,
+        use_native_frame: bool,
     ) -> WindowAttributes {
-        let host_style = HostWindowStyle::from_guest(style, ex_style);
+        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
 
         attributes = attributes
             .with_decorations(host_style.decorations)
@@ -163,8 +168,13 @@ impl WinFrame {
         attributes
     }
 
-    fn apply_guest_window_style(window: &Window, style: u32, ex_style: u32) {
-        let host_style = HostWindowStyle::from_guest(style, ex_style);
+    fn apply_guest_window_style(
+        window: &Window,
+        style: u32,
+        ex_style: u32,
+        use_native_frame: bool,
+    ) {
+        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
 
         window.set_decorations(host_style.decorations);
         window.set_resizable(host_style.resizable);
@@ -193,6 +203,7 @@ impl WinFrame {
                     ex_style,
                     parent,
                     visible,
+                    use_native_frame,
                     surface_bitmap,
                 } => {
                     // 자식 윈도우는 별도 호스트 OS 창으로 만들지 않고 guest 상태만 유지합니다.
@@ -216,7 +227,12 @@ impl WinFrame {
                         .with_inner_size(winit::dpi::LogicalSize::new(width, height))
                         .with_visible(visible);
 
-                    attributes = Self::apply_guest_window_attributes(attributes, style, ex_style);
+                    attributes = Self::apply_guest_window_attributes(
+                        attributes,
+                        style,
+                        ex_style,
+                        use_native_frame,
+                    );
 
                     let window = event_loop.create_window(attributes).unwrap();
                     let id = window.id();
@@ -232,6 +248,7 @@ impl WinFrame {
                     );
                     self.hwnd_to_id.insert(hwnd, id);
                     self.id_to_hwnd.insert(id, hwnd);
+                    self.hwnd_native_frame.insert(hwnd, use_native_frame);
 
                     let painter = DefaultEmulatorPainter {
                         hwnd,
@@ -256,7 +273,14 @@ impl WinFrame {
                     if let Some(id) = self.hwnd_to_id.get(&hwnd)
                         && let Some(window) = self.get_window(id)
                     {
-                        Self::apply_guest_window_style(window, style, ex_style);
+                        let use_native_frame =
+                            self.hwnd_native_frame.get(&hwnd).copied().unwrap_or(true);
+                        Self::apply_guest_window_style(
+                            window,
+                            style,
+                            ex_style,
+                            use_native_frame,
+                        );
                         window.request_redraw();
                     }
                 }
@@ -264,6 +288,7 @@ impl WinFrame {
                 UiCommand::DestroyWindow { hwnd } => {
                     if let Some(id) = self.hwnd_to_id.remove(&hwnd) {
                         self.id_to_hwnd.remove(&id);
+                        self.hwnd_native_frame.remove(&hwnd);
                         self.painters.remove(&id);
                         self.surfaces.remove(&id);
                     }
@@ -517,6 +542,7 @@ impl ApplicationHandler<()> for WinFrame {
             self.painters.remove(&id);
             if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
                 self.hwnd_to_id.remove(&hwnd);
+                self.hwnd_native_frame.remove(&hwnd);
             }
         }
 
@@ -558,22 +584,8 @@ impl ApplicationHandler<()> for WinFrame {
 
         match event {
             WindowEvent::RedrawRequested => {
-                // 1. 게스트에게 그리기 요청 (더티 플래그 설정 및 메시지 큐 삽입)
-                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
-                    let mut win_event = self.emu_context.win_event.lock().unwrap();
-                    if let Some(state) = win_event.windows.get_mut(&hwnd) {
-                        state.needs_paint = true;
-                    }
-
-                    let mut q = self.emu_context.message_queue.lock().unwrap();
-                    // 이미 WM_PAINT가 큐에 있는지 확인하고 없으면 삽입 (메시지 중복 방지)
-                    if !q.iter().any(|m| m[0] == hwnd && m[1] == 0x000F) {
-                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                        q.push_back([hwnd, 0x000F, 0, 0, time, 0, 0]); // WM_PAINT
-                    }
-                }
-
-                // 2. 호스트 화면에 현재 버퍼 출력 (캐시된 Surface 사용)
+                // 호스트 redraw는 현재 guest 표면을 출력만 해야 합니다.
+                // 여기서 다시 WM_PAINT를 만들면 EndPaint/UpdateWindow와 순환해 과도한 redraw가 발생합니다.
                 if let Some(surface) = self.surfaces.get_mut(&id) {
                     let (width, height) = {
                         let size = surface.window().inner_size();
@@ -588,10 +600,10 @@ impl ApplicationHandler<()> for WinFrame {
                         buffer.fill(0);
 
                         if let Some(painter) = self.painters.get_mut(&id) {
-                            painter.paint(&mut buffer, width, height);
+                            if painter.paint(&mut buffer, width, height) {
+                                buffer.present().unwrap();
+                            }
                         }
-
-                        buffer.present().unwrap();
                     }
                 }
             }
@@ -609,6 +621,7 @@ impl ApplicationHandler<()> for WinFrame {
                     self.painters.remove(&id);
                     if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
                         self.hwnd_to_id.remove(&hwnd);
+                        self.hwnd_native_frame.remove(&hwnd);
 
                         let mut q = self.emu_context.message_queue.lock().unwrap();
                         q.push_back([hwnd, 0x0002, 0, 0, 0, 0, 0]); // WM_DESTROY
@@ -929,23 +942,23 @@ impl Painter for DefaultEmulatorPainter {
         false
     }
 
-    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
+    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) -> bool {
         let windows = {
             let win_event = match self.emu_context.win_event.try_lock() {
                 Ok(event) => event,
-                Err(_) => return,
+                Err(_) => return false,
             };
             win_event.windows.clone()
         };
 
         if windows.contains_key(&self.hwnd) {
             self.composite_window_tree(buffer, width, height, &windows, self.hwnd, 0, 0, true);
-            return;
+            return true;
         }
 
         let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
             Ok(g) => g,
-            Err(_) => return, // 락 획득 실패 시 이번 프레임은 건너뜀 (데드락 방지)
+            Err(_) => return false, // 락 획득 실패 시 이번 프레임은 건너뜀 (데드락 방지)
         };
 
         if let Some(GdiObject::Bitmap {
@@ -958,6 +971,8 @@ impl Painter for DefaultEmulatorPainter {
             let p = p.lock().unwrap();
             Self::blit_bitmap(buffer, width, height, 0, 0, &p, *sw, *sh);
         }
+
+        true
     }
 
     fn handle_event(

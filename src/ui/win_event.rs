@@ -102,6 +102,7 @@ impl WinEvent {
         let ex_style = state.ex_style;
         let parent = state.parent;
         let visible = state.visible;
+        let use_native_frame = state.use_native_frame;
         let surface_bitmap = state.surface_bitmap;
 
         crate::emu_log!(
@@ -124,6 +125,7 @@ impl WinEvent {
             ex_style,
             parent,
             visible,
+            use_native_frame,
             surface_bitmap,
         });
     }

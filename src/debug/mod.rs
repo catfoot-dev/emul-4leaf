@@ -302,7 +302,7 @@ impl Painter for Debug {
         }
     }
 
-    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) {
+    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) -> bool {
         // 그리기 도구 준비
         let mut display = FrameBuffer { buffer, width };
 
@@ -365,7 +365,7 @@ impl Painter for Debug {
             (self.show_stack as i32) + (self.show_socket_log as i32) + (self.show_log as i32);
 
         if active_panels == 0 {
-            return;
+            return true;
         }
 
         let panel_h = usable_h / active_panels;
@@ -545,5 +545,7 @@ impl Painter for Debug {
                 }
             }
         }
+
+        true
     }
 }

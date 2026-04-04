@@ -23,6 +23,8 @@ pub enum UiCommand {
         parent: u32,
         /// 초기 표시 여부
         visible: bool,
+        /// 호스트 네이티브 프레임 사용 여부
+        use_native_frame: bool,
         /// 표면 비트맵 핸들
         surface_bitmap: u32,
     },
@@ -84,7 +86,8 @@ pub trait Painter: std::any::Any {
     fn should_close(&self) -> bool {
         false
     }
-    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32);
+    /// 버퍼에 현재 프레임을 정상적으로 그렸으면 `true`를 반환합니다.
+    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) -> bool;
     fn handle_event(
         &mut self,
         _event: &winit::event::WindowEvent,

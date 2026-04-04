@@ -1,9 +1,10 @@
 use crate::{
     dll::win32::{
         ApiHookResult, CursorFrame, GdiObject, StackCleanup, Timer, Win32Context, WindowClass,
-        WindowState, kernel32::KERNEL32,
+        WindowState, gdi32::GDI32, kernel32::KERNEL32,
     },
     helper::{EXIT_ADDRESS, UnicornHelper, run_nested_guest_until_exit},
+    ui::gdi_renderer::GdiRenderer,
 };
 use encoding_rs::EUC_KR;
 use unicorn_engine::{RegisterX86, Unicorn};
@@ -419,6 +420,7 @@ impl USER32 {
                 (0, instance)
             }
         };
+        let use_native_frame = Self::is_builtin_window_class(&class_name);
 
         let surface_bitmap = uc.get_data().create_surface_bitmap(width, height);
 
@@ -439,6 +441,7 @@ impl USER32 {
             iconic: false,
             wnd_proc: class_wnd_proc,
             user_data: 0,
+            use_native_frame,
             surface_bitmap,
             window_rgn: 0,
             needs_paint: true,
@@ -576,7 +579,26 @@ impl USER32 {
     // 역할: 창의 클라이언트 영역을 강제로 업데이트
     pub fn update_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hwnd = uc.read_arg(0);
-        uc.get_data().win_event.lock().unwrap().update_window(hwnd);
+        let ctx = uc.get_data();
+        let needs_paint = {
+            let win_event = ctx.win_event.lock().unwrap();
+            win_event
+                .windows
+                .get(&hwnd)
+                .map(|state| state.needs_paint)
+                .unwrap_or(false)
+        };
+
+        if needs_paint {
+            let mut q = ctx.message_queue.lock().unwrap();
+            if !q.iter().any(|m| m[0] == hwnd && m[1] == 0x000F) {
+                let time = ctx.start_time.elapsed().as_millis() as u32;
+                q.push_back([hwnd, 0x000F, 0, 0, time, 0, 0]);
+            }
+        } else {
+            ctx.win_event.lock().unwrap().update_window(hwnd);
+        }
+
         crate::emu_log!("[USER32] UpdateWindow({:#x}) -> BOOL 1", hwnd);
         Some(ApiHookResult::callee(1, Some(1)))
     }
@@ -1969,38 +1991,224 @@ impl USER32 {
     // API: int DrawTextA(HDC hDC, LPCSTR lpchText, int nCount, LPRECT lpRect, UINT uFormat)
     // 역할: 서식화된 텍스트를 사각형 내에 그림
     pub fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+        const DT_CENTER: u32 = 0x0001;
+        const DT_RIGHT: u32 = 0x0002;
+        const DT_VCENTER: u32 = 0x0004;
+        const DT_BOTTOM: u32 = 0x0008;
+        const DT_WORDBREAK: u32 = 0x0010;
+        const DT_SINGLELINE: u32 = 0x0020;
+        const DT_CALCRECT: u32 = 0x0400;
+
         let hdc = uc.read_arg(0);
         let lpch_text = uc.read_arg(1);
         let n_count = uc.read_arg(2);
         let lp_rect = uc.read_arg(3);
         let u_format = uc.read_arg(4);
 
-        let text = if n_count == 0xffffffff {
+        let raw_text = if n_count == 0xffffffff {
             uc.read_euc_kr(lpch_text as u64)
         } else {
-            // Limited length read
-            uc.read_euc_kr(lpch_text as u64) // Simplification
+            uc.read_euc_kr(lpch_text as u64)
+                .chars()
+                .take(n_count as usize)
+                .collect::<String>()
         };
 
-        // DT_CALCRECT = 0x00000400
-        if u_format & 0x00000400 != 0 {
-            let width = text.len() as i32 * 8; // Estimate
-            let height = 16;
-            let left = uc.read_u32(lp_rect as u64) as i32;
-            let top = uc.read_u32(lp_rect as u64 + 4) as i32;
-            uc.write_u32(lp_rect as u64 + 8, (left + width) as u32);
-            uc.write_u32(lp_rect as u64 + 12, (top + height) as u32);
+        if lp_rect == 0 {
+            crate::emu_log!(
+                "[USER32] DrawTextA({:#x}, \"{}\", {}, {:#x}, {:#x}) -> int 0",
+                hdc,
+                raw_text,
+                n_count,
+                lp_rect,
+                u_format
+            );
+            return Some(ApiHookResult::callee(5, Some(0)));
+        }
+
+        let left = uc.read_u32(lp_rect as u64) as i32;
+        let top = uc.read_u32(lp_rect as u64 + 4) as i32;
+        let right = uc.read_u32(lp_rect as u64 + 8) as i32;
+        let bottom = uc.read_u32(lp_rect as u64 + 12) as i32;
+        let rect_width = (right - left).max(0);
+        let rect_height = (bottom - top).max(0);
+
+        let draw_params = {
+            let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
+            if let Some(GdiObject::Dc {
+                selected_bitmap,
+                selected_font,
+                text_color,
+                bk_color,
+                bk_mode,
+                associated_window,
+                ..
+            }) = gdi_objects.get(&hdc)
+            {
+                let font_height =
+                    if let Some(GdiObject::Font { height, .. }) = gdi_objects.get(selected_font) {
+                        *height
+                    } else {
+                        12
+                    };
+                Some((
+                    *selected_bitmap,
+                    *text_color,
+                    *bk_color,
+                    *bk_mode,
+                    *associated_window,
+                    font_height,
+                ))
+            } else {
+                None
+            }
+        };
+
+        let Some((hbmp, text_color, bk_color, bk_mode, hwnd, font_height)) = draw_params else {
+            crate::emu_log!(
+                "[USER32] DrawTextA({:#x}, \"{}\", {}, {:#x}, {:#x}) -> int 0",
+                hdc,
+                raw_text,
+                n_count,
+                lp_rect,
+                u_format
+            );
+            return Some(ApiHookResult::callee(5, Some(0)));
+        };
+
+        let font_size = font_height.abs().max(1) as f32;
+        let (line_height, _, _) = GdiRenderer::font_metrics(font_size);
+        let line_height = line_height.max(1);
+        let normalized_text = raw_text.replace("\r\n", "\n").replace('\r', "\n");
+        let single_line = (u_format & DT_SINGLELINE) != 0;
+        let max_line_width = if rect_width > 0 {
+            rect_width
+        } else {
+            i32::MAX
+        };
+
+        // `DT_WORDBREAK`가 들어온 경우만 간단한 폭 기준 줄바꿈을 적용하고,
+        // 그 외에는 게스트가 만든 개행을 그대로 존중합니다.
+        let lines = if single_line {
+            vec![normalized_text.replace('\n', " ")]
+        } else {
+            let mut lines = Vec::new();
+            for paragraph in normalized_text.split('\n') {
+                if paragraph.is_empty() {
+                    lines.push(String::new());
+                    continue;
+                }
+
+                if (u_format & DT_WORDBREAK) == 0 || max_line_width == i32::MAX {
+                    lines.push(paragraph.to_string());
+                    continue;
+                }
+
+                let mut current = String::new();
+                for word in paragraph.split_whitespace() {
+                    let candidate = if current.is_empty() {
+                        word.to_string()
+                    } else {
+                        format!("{} {}", current, word)
+                    };
+                    if current.is_empty()
+                        || GdiRenderer::measure_text_width(&candidate, font_size) <= max_line_width
+                    {
+                        current = candidate;
+                    } else {
+                        lines.push(current);
+                        current = word.to_string();
+                    }
+                }
+
+                if current.is_empty() {
+                    lines.push(paragraph.to_string());
+                } else {
+                    lines.push(current);
+                }
+            }
+
+            if lines.is_empty() {
+                vec![String::new()]
+            } else {
+                lines
+            }
+        };
+
+        let measured_width = lines
+            .iter()
+            .map(|line| GdiRenderer::measure_text_width(line, font_size))
+            .max()
+            .unwrap_or(0);
+        let measured_height = line_height * lines.len().max(1) as i32;
+
+        if (u_format & DT_CALCRECT) != 0 {
+            uc.write_u32(lp_rect as u64 + 8, left.saturating_add(measured_width) as u32);
+            uc.write_u32(lp_rect as u64 + 12, top.saturating_add(measured_height) as u32);
+        } else if hbmp != 0 {
+            GDI32::sync_dib_pixels(uc, hbmp);
+            let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
+            if let Some(GdiObject::Bitmap {
+                width,
+                height,
+                pixels,
+                ..
+            }) = gdi_objects.get(&hbmp)
+            {
+                let width = *width;
+                let height = *height;
+                let mut pixels = pixels.lock().unwrap();
+                let block_y = if (u_format & DT_VCENTER) != 0 {
+                    top + (rect_height - measured_height).max(0) / 2
+                } else if (u_format & DT_BOTTOM) != 0 {
+                    bottom - measured_height
+                } else {
+                    top
+                };
+
+                for (index, line) in lines.iter().enumerate() {
+                    let line_width = GdiRenderer::measure_text_width(line, font_size);
+                    let draw_x = if (u_format & DT_RIGHT) != 0 {
+                        right - line_width
+                    } else if (u_format & DT_CENTER) != 0 {
+                        left + (rect_width - line_width).max(0) / 2
+                    } else {
+                        left
+                    };
+                    let draw_y = block_y + index as i32 * line_height;
+
+                    GdiRenderer::draw_text(
+                        &mut pixels,
+                        width,
+                        height,
+                        draw_x,
+                        draw_y,
+                        line,
+                        font_size,
+                        text_color,
+                        if bk_mode == 2 { Some(bk_color) } else { None },
+                    );
+                }
+
+                drop(pixels);
+                drop(gdi_objects);
+                GDI32::flush_dib_pixels_to_memory(uc, hbmp);
+                if hwnd != 0 {
+                    uc.get_data().win_event.lock().unwrap().update_window(hwnd);
+                }
+            }
         }
 
         crate::emu_log!(
-            "[USER32] DrawTextA({:#x}, \"{}\", {}, {:#x}, {:#x}) -> int 16",
+            "[USER32] DrawTextA({:#x}, \"{}\", {}, {:#x}, {:#x}) -> int {}",
             hdc,
-            text,
+            raw_text,
             n_count,
             lp_rect,
-            u_format
+            u_format,
+            measured_height
         );
-        Some(ApiHookResult::callee(5, Some(16))) // Return line height
+        Some(ApiHookResult::callee(5, Some(measured_height)))
     }
 
     // API: BOOL GetCursorPos(LPPOINT lpPoint)
