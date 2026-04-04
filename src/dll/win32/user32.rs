@@ -558,12 +558,12 @@ impl USER32 {
         let hwnd = uc.read_arg(0);
         let n_cmd_show = uc.read_arg(1);
         // SW_HIDE = 0, 그 외는 대부분 표시
-        // let visible = n_cmd_show != 0;
-        // uc.get_data()
-        //     .win_event
-        //     .lock()
-        //     .unwrap()
-        //     .show_window(hwnd, visible);
+        let visible = n_cmd_show != 0;
+        uc.get_data()
+            .win_event
+            .lock()
+            .unwrap()
+            .show_window(hwnd, visible);
         crate::emu_log!(
             "[USER32] ShowWindow({:#x}, {:#x}) -> BOOL 1",
             hwnd,
@@ -2789,6 +2789,7 @@ impl USER32 {
         let found = {
             let ctx = uc.get_data();
             let mut win_event = ctx.win_event.lock().unwrap();
+            let mut sync_style = false;
             if let Some(win) = win_event.windows.get_mut(&hwnd) {
                 match index {
                     -4 => {
@@ -2805,11 +2806,13 @@ impl USER32 {
                         // GWL_STYLE
                         old = win.style;
                         win.style = new_val;
+                        sync_style = true;
                     }
                     -20 => {
                         // GWL_EXSTYLE
                         old = win.ex_style;
                         win.ex_style = new_val;
+                        sync_style = true;
                     }
                     -21 => {
                         // GWL_USERDATA
@@ -2819,6 +2822,11 @@ impl USER32 {
                     _ => {
                         crate::emu_log!("[USER32] SetWindowLongA index {} not implemented", index);
                     }
+                }
+
+                if sync_style {
+                    // Win32 앱이 프레임/캡션 비트를 바꾸면 호스트 창 외형도 즉시 맞춰 둡니다.
+                    win_event.sync_window_style(hwnd);
                 }
                 true
             } else {

@@ -71,8 +71,8 @@ impl PacketLogger {
         }
 
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
-        let mirrors_previous_send = direction == PacketDirection::Recv
-            && self.mirrors_previous_send(socket_id, data);
+        let mirrors_previous_send =
+            direction == PacketDirection::Recv && self.mirrors_previous_send(socket_id, data);
         if crate::debug::should_send_debug_messages() {
             let dir_str = match direction {
                 PacketDirection::Send => "SEND",
@@ -106,7 +106,13 @@ impl PacketLogger {
             );
         }
 
-        self.write_capture_line(timestamp_ms, direction, socket_id, data, mirrors_previous_send);
+        self.write_capture_line(
+            timestamp_ms,
+            direction,
+            socket_id,
+            data,
+            mirrors_previous_send,
+        );
         self.write_frame_lines(timestamp_ms, direction, socket_id, data, advance_stream);
 
         // 캡처 이력은 고정 크기로 유지해 장시간 실행 시 메모리 사용량이 계속 커지지 않게 합니다.
@@ -175,10 +181,7 @@ impl PacketLogger {
             let body = &data[cursor + 4..cursor + frame_len];
             if channel_id == 0 {
                 if let Some(ctrl) = ControlMessage::from_bytes(body) {
-                    parts.push(format!(
-                        "ctrl msg={} ch={}",
-                        ctrl.msg_type, ctrl.channel_id
-                    ));
+                    parts.push(format!("ctrl msg={} ch={}", ctrl.msg_type, ctrl.channel_id));
                 } else {
                     parts.push(format!("ctrl malformed len={}", body.len()));
                 }
@@ -210,7 +213,11 @@ impl PacketLogger {
                     hex::encode(&packet.payload)
                 ));
             } else {
-                parts.push(format!("app ch={} malformed len={}", channel_id, body.len()));
+                parts.push(format!(
+                    "app ch={} malformed len={}",
+                    channel_id,
+                    body.len()
+                ));
             }
 
             cursor += frame_len;
@@ -308,8 +315,8 @@ impl PacketLogger {
         };
 
         for frame in self.drain_complete_frames(direction, socket_id, data, advance_stream) {
-            let mirror_prev_send = direction == PacketDirection::Recv
-                && self.mirrors_previous_send(socket_id, &frame);
+            let mirror_prev_send =
+                direction == PacketDirection::Recv && self.mirrors_previous_send(socket_id, &frame);
             crate::append_capture_line(
                 "frames.log",
                 &format!(
@@ -455,10 +462,8 @@ mod tests {
         let frame = protocol::create_app_packet(1, 0xe0, 0x04, &[0xaa, 0xbb]);
 
         let frames_a = logger.drain_complete_frames(PacketDirection::Recv, 11, &frame[..1], true);
-        let frames_b =
-            logger.drain_complete_frames(PacketDirection::Recv, 11, &frame[1..4], true);
-        let frames_c =
-            logger.drain_complete_frames(PacketDirection::Recv, 11, &frame[4..], true);
+        let frames_b = logger.drain_complete_frames(PacketDirection::Recv, 11, &frame[1..4], true);
+        let frames_c = logger.drain_complete_frames(PacketDirection::Recv, 11, &frame[4..], true);
 
         assert!(frames_a.is_empty());
         assert!(frames_b.is_empty());

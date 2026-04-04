@@ -5,25 +5,84 @@ use crate::{
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use softbuffer::{Context as SoftContext, Surface};
 use std::{collections::HashMap, num::NonZeroU32, sync::mpsc::Receiver};
+#[cfg(target_os = "windows")]
+use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
     raw_window_handle::{DisplayHandle, HasDisplayHandle},
-    window::{Window, WindowId},
+    window::{Window, WindowAttributes, WindowButtons, WindowId, WindowLevel},
 };
 
 // Windows 스타일 -> winit 속성 매핑
 const WS_POPUP: u32 = 0x80000000;
 const WS_CHILD: u32 = 0x40000000;
 const WS_CAPTION: u32 = 0x00C00000;
+const WS_SYSMENU: u32 = 0x00080000;
 const WS_THICKFRAME: u32 = 0x00040000; // WS_SIZEBOX
 const WS_MINIMIZEBOX: u32 = 0x00020000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
 const WS_EX_TOPMOST: u32 = 0x00000008;
+const WS_EX_LAYERED: u32 = 0x00080000;
+#[cfg(target_os = "windows")]
+const WS_EX_TOOLWINDOW: u32 = 0x00000080;
+#[cfg(target_os = "windows")]
+const WS_EX_APPWINDOW: u32 = 0x00040000;
 
 type WinSurface = Surface<DisplayHandle<'static>, Window>;
+
+#[derive(Clone, Copy)]
+struct HostWindowStyle {
+    decorations: bool,
+    resizable: bool,
+    transparent: bool,
+    topmost: bool,
+    #[cfg(target_os = "windows")]
+    skip_taskbar: bool,
+    enabled_buttons: WindowButtons,
+}
+
+impl HostWindowStyle {
+    fn from_guest(style: u32, ex_style: u32) -> Self {
+        let decorations = (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
+        let resizable = (style & WS_THICKFRAME) != 0;
+        let transparent = (ex_style & WS_EX_LAYERED) != 0;
+        let topmost = (ex_style & WS_EX_TOPMOST) != 0;
+        #[cfg(target_os = "windows")]
+        let skip_taskbar = (ex_style & WS_EX_TOOLWINDOW) != 0 && (ex_style & WS_EX_APPWINDOW) == 0;
+
+        let mut enabled_buttons = WindowButtons::empty();
+        if decorations && (style & WS_SYSMENU) != 0 {
+            enabled_buttons |= WindowButtons::CLOSE;
+            if (style & WS_MINIMIZEBOX) != 0 {
+                enabled_buttons |= WindowButtons::MINIMIZE;
+            }
+            if (style & WS_MAXIMIZEBOX) != 0 {
+                enabled_buttons |= WindowButtons::MAXIMIZE;
+            }
+        }
+
+        Self {
+            decorations,
+            resizable,
+            transparent,
+            topmost,
+            #[cfg(target_os = "windows")]
+            skip_taskbar,
+            enabled_buttons,
+        }
+    }
+
+    fn window_level(self) -> WindowLevel {
+        if self.topmost {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        }
+    }
+}
 
 /// 윈도우 애플리케이션 핸들러
 /// 모든 winit 윈도우와 Painter를 관리함
@@ -79,6 +138,47 @@ impl WinFrame {
             .and_then(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    fn apply_guest_window_attributes(
+        mut attributes: WindowAttributes,
+        style: u32,
+        ex_style: u32,
+    ) -> WindowAttributes {
+        let host_style = HostWindowStyle::from_guest(style, ex_style);
+
+        attributes = attributes
+            .with_decorations(host_style.decorations)
+            .with_resizable(host_style.resizable)
+            .with_enabled_buttons(host_style.enabled_buttons)
+            .with_transparent(host_style.transparent)
+            .with_window_level(host_style.window_level());
+
+        #[cfg(target_os = "windows")]
+        {
+            // 툴 윈도우/레이어드 윈도우 같은 Win32 확장 스타일을 가능한 범위에서 반영합니다.
+            attributes = attributes
+                .with_skip_taskbar(host_style.skip_taskbar)
+                .with_undecorated_shadow(!host_style.decorations && !host_style.transparent);
+        }
+
+        attributes
+    }
+
+    fn apply_guest_window_style(window: &Window, style: u32, ex_style: u32) {
+        let host_style = HostWindowStyle::from_guest(style, ex_style);
+
+        window.set_decorations(host_style.decorations);
+        window.set_resizable(host_style.resizable);
+        window.set_enabled_buttons(host_style.enabled_buttons);
+        window.set_transparent(host_style.transparent);
+        window.set_window_level(host_style.window_level());
+
+        #[cfg(target_os = "windows")]
+        {
+            window.set_skip_taskbar(host_style.skip_taskbar);
+            window.set_undecorated_shadow(!host_style.decorations && !host_style.transparent);
+        }
+    }
+
     fn process_ui_commands(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let mut needs_redraw = false;
 
@@ -116,23 +216,7 @@ impl WinFrame {
                         .with_inner_size(winit::dpi::LogicalSize::new(width, height))
                         .with_visible(visible);
 
-                    if (style & WS_POPUP) != 0 || (style & WS_CAPTION) == 0 {
-                        attributes = attributes.with_decorations(false);
-                    }
-
-                    attributes = if (style & WS_THICKFRAME) != 0 {
-                        attributes.with_resizable(true)
-                    } else {
-                        attributes.with_resizable(false)
-                    };
-
-                    let _has_min = (style & WS_MINIMIZEBOX) != 0;
-                    let _has_max = (style & WS_MAXIMIZEBOX) != 0;
-
-                    if (ex_style & WS_EX_TOPMOST) != 0 {
-                        attributes =
-                            attributes.with_window_level(winit::window::WindowLevel::AlwaysOnTop);
-                    }
+                    attributes = Self::apply_guest_window_attributes(attributes, style, ex_style);
 
                     let window = event_loop.create_window(attributes).unwrap();
                     let id = window.id();
@@ -162,6 +246,19 @@ impl WinFrame {
                     let surface = Surface::new(context, window).unwrap();
                     self.surfaces.insert(id, surface);
                     needs_redraw = true;
+                }
+
+                UiCommand::SyncWindowStyle {
+                    hwnd,
+                    style,
+                    ex_style,
+                } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        Self::apply_guest_window_style(window, style, ex_style);
+                        window.request_redraw();
+                    }
                 }
 
                 UiCommand::DestroyWindow { hwnd } => {
@@ -231,6 +328,20 @@ impl WinFrame {
                         && let Some(window) = self.get_window(id)
                     {
                         window.focus_window();
+                    }
+                }
+
+                UiCommand::EnableWindow { hwnd, enabled } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        #[cfg(target_os = "windows")]
+                        {
+                            window.set_enable(enabled);
+                        }
+
+                        #[cfg(not(target_os = "windows"))]
+                        let _ = (window, enabled);
                     }
                 }
 

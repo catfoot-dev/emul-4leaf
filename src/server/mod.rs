@@ -1,7 +1,10 @@
 pub mod packet_logger;
 pub mod protocol;
 
-use std::{collections::{HashMap, HashSet}, fs};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+};
 
 use self::protocol::{ControlMessage, DNetPacket, ProtocolPacket};
 
@@ -72,14 +75,12 @@ fn should_promote_open_to_mainframe_stage(
     analysis_states: &HashMap<u16, ChannelAnalysisState>,
 ) -> bool {
     is_stage_channel(channel_id)
-        && analysis_states
-            .values()
-            .any(|state| {
-                matches!(
-                    state.phase,
-                    ChannelPhase::BootstrapVersionSent | ChannelPhase::AwaitingMainFrameStageInfo
-                )
-            })
+        && analysis_states.values().any(|state| {
+            matches!(
+                state.phase,
+                ChannelPhase::BootstrapVersionSent | ChannelPhase::AwaitingMainFrameStageInfo
+            )
+        })
 }
 
 fn should_parse_as_raw_stage_packet(
@@ -104,7 +105,9 @@ fn build_stage_open_acceptance_responses(channel_id: u16) -> Vec<Vec<u8>> {
         channel_id,
     )];
     if channel_id == 3 {
-        responses.push(build_provisional_worldmap_stage_bootstrap_response(channel_id));
+        responses.push(build_provisional_worldmap_stage_bootstrap_response(
+            channel_id,
+        ));
     }
     responses
 }
@@ -377,17 +380,17 @@ pub fn run_dnet_handler(
                         pkt.payload.len(),
                         hex::encode(&pkt.payload)
                     );
-                    let post_bootstrap_probe = if let Some(state) = analysis_states.get_mut(&channel_id)
-                    {
-                        if is_post_initial_handshake_phase(state.phase) {
-                            state.post_bootstrap_client_packets += 1;
-                            Some(state.post_bootstrap_client_packets)
+                    let post_bootstrap_probe =
+                        if let Some(state) = analysis_states.get_mut(&channel_id) {
+                            if is_post_initial_handshake_phase(state.phase) {
+                                state.post_bootstrap_client_packets += 1;
+                                Some(state.post_bootstrap_client_packets)
+                            } else {
+                                None
+                            }
                         } else {
                             None
-                        }
-                    } else {
-                        None
-                    };
+                        };
 
                     let previous_phase = analysis_states.get(&channel_id).map(|state| state.phase);
                     let outcome = match pkt.main_type {
@@ -412,10 +415,13 @@ pub fn run_dnet_handler(
                     };
 
                     let current_phase = if let Some(next_phase) = outcome.phase_update {
-                        let state = analysis_states.entry(channel_id).or_insert(ChannelAnalysisState {
-                            phase: next_phase,
-                            post_bootstrap_client_packets: 0,
-                        });
+                        let state =
+                            analysis_states
+                                .entry(channel_id)
+                                .or_insert(ChannelAnalysisState {
+                                    phase: next_phase,
+                                    post_bootstrap_client_packets: 0,
+                                });
                         state.phase = next_phase;
                         next_phase
                     } else {
@@ -770,10 +776,7 @@ mod tests {
         let version_resp = from_handler_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
-        assert_eq!(
-            version_resp,
-            build_main_frame_status_message_response(1, 4)
-        );
+        assert_eq!(version_resp, build_main_frame_status_message_response(1, 4));
         let version_resp = from_handler_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
@@ -781,10 +784,7 @@ mod tests {
         expected_body.extend_from_slice(&0u32.to_le_bytes());
         expected_body.extend_from_slice(&0u32.to_le_bytes());
         expected_body.extend_from_slice(&protocol::write_u16(54));
-        assert_eq!(
-            version_resp,
-            DNetPacket::new(1, expected_body).to_bytes()
-        );
+        assert_eq!(version_resp, DNetPacket::new(1, expected_body).to_bytes());
         let final_status = from_handler_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
@@ -808,10 +808,7 @@ mod tests {
         expected_body.extend_from_slice(&0u32.to_le_bytes());
         expected_body.extend_from_slice(&protocol::write_u16(54));
 
-        assert_eq!(
-            response,
-            DNetPacket::new(3, expected_body).to_bytes()
-        );
+        assert_eq!(response, DNetPacket::new(3, expected_body).to_bytes());
     }
 
     #[test]
@@ -881,7 +878,9 @@ mod tests {
             .send(protocol::create_control_message(protocol::CTRL_OPEN, 1))
             .unwrap();
         assert_eq!(
-            from_handler_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            from_handler_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
             protocol::create_control_message(protocol::CTRL_OPEN_OK, 1)
         );
 
@@ -889,20 +888,30 @@ mod tests {
         to_handler_tx
             .send(protocol::create_app_packet(1, 0xE0, 0x04, &payload))
             .unwrap();
-        let _status_four = from_handler_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let _bootstrap = from_handler_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let _status_six = from_handler_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let _status_four = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let _bootstrap = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let _status_six = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
 
         to_handler_tx
             .send(protocol::create_control_message(protocol::CTRL_OPEN, 3))
             .unwrap();
 
         assert_eq!(
-            from_handler_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            from_handler_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
             protocol::create_control_message(protocol::CTRL_OPEN_OK, 3)
         );
         assert_eq!(
-            from_handler_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            from_handler_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
             build_provisional_worldmap_stage_bootstrap_response(3)
         );
 
@@ -927,10 +936,8 @@ mod tests {
 
     #[test]
     fn raw_stage_packet_parser_extracts_msg_id_and_payload() {
-        let pkt = raw_stage_packet_from_bytes(&[
-            0x09, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd,
-        ])
-        .unwrap();
+        let pkt =
+            raw_stage_packet_from_bytes(&[0x09, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd]).unwrap();
 
         assert_eq!(pkt.msg_id, 9);
         assert_eq!(pkt.payload, vec![0xaa, 0xbb, 0xcc, 0xdd]);

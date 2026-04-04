@@ -280,9 +280,9 @@ impl WinEvent {
         self.windows.get(&hwnd).map(|w| w.visible).unwrap_or(false)
     }
 
-    /// 윈도우 활성화 여부 반환 (현재는 항상 true)
-    pub fn is_window_enabled(&self, _hwnd: u32) -> bool {
-        true
+    /// 윈도우 활성화 여부를 반환합니다.
+    pub fn is_window_enabled(&self, hwnd: u32) -> bool {
+        self.windows.get(&hwnd).map(|w| w.enabled).unwrap_or(false)
     }
 
     /// 윈도우 닫기 요청
@@ -290,13 +290,35 @@ impl WinEvent {
         self.send_ui_command(UiCommand::DestroyWindow { hwnd });
     }
 
-    /// 윈도우 활성화/비활성화 설정 (스텁)
-    pub fn enable_window(&mut self, _hwnd: u32, _enable: bool) -> bool {
-        true
+    /// 윈도우 활성화/비활성화 상태를 UI와 동기화합니다.
+    pub fn enable_window(&mut self, hwnd: u32, enable: bool) -> bool {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.enabled = enable;
+            self.send_ui_command(UiCommand::EnableWindow {
+                hwnd,
+                enabled: enable,
+            });
+            true
+        } else {
+            false
+        }
     }
 
     /// 윈도우 활성화 요청 (포커스)
     pub fn activate_window(&mut self, hwnd: u32) {
         self.send_ui_command(UiCommand::ActivateWindow { hwnd });
+    }
+
+    /// 윈도우 스타일/확장 스타일을 UI 스레드와 동기화합니다.
+    pub fn sync_window_style(&mut self, hwnd: u32) {
+        let Some(state) = self.windows.get(&hwnd) else {
+            return;
+        };
+
+        self.send_ui_command(UiCommand::SyncWindowStyle {
+            hwnd,
+            style: state.style,
+            ex_style: state.ex_style,
+        });
     }
 }

@@ -26,6 +26,15 @@ pub enum UiCommand {
         /// 표면 비트맵 핸들
         surface_bitmap: u32,
     },
+    /// 윈도우 스타일/확장 스타일 동기화 요청
+    SyncWindowStyle {
+        /// 가상 HWND 핸들
+        hwnd: u32,
+        /// 윈도우 스타일 (WS_*)
+        style: u32,
+        /// 확장 스타일 (WS_EX_*)
+        ex_style: u32,
+    },
     /// 특정 윈도우 창 파괴 요청
     DestroyWindow {
         /// 가상 HWND 핸들
@@ -47,6 +56,13 @@ pub enum UiCommand {
     UpdateWindow { hwnd: u32 },
     /// 윈도우 활성화(포커스) 요청
     ActivateWindow { hwnd: u32 },
+    /// 윈도우 활성화/비활성화 요청
+    EnableWindow {
+        /// 가상 HWND 핸들
+        hwnd: u32,
+        /// 입력 활성화 여부
+        enabled: bool,
+    },
     /// 메시지 박스 표시 요청 (동기 응답 채널 포함)
     MessageBox {
         caption: String,

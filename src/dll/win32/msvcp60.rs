@@ -398,12 +398,7 @@ impl MSVCP60 {
             buffer_ptr = Self::alloc_zeroed(uc, STREAMBUF_HOST_BUFFER_SIZE);
             capacity = STREAMBUF_HOST_BUFFER_SIZE;
             Self::write_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET, buffer_ptr);
-            Self::write_streambuf_field(
-                uc,
-                this_ptr,
-                STREAMBUF_CAPACITY_OFFSET,
-                capacity as u32,
-            );
+            Self::write_streambuf_field(uc, this_ptr, STREAMBUF_CAPACITY_OFFSET, capacity as u32);
         }
         (buffer_ptr, capacity)
     }
@@ -538,7 +533,11 @@ impl MSVCP60 {
         Some(value)
     }
 
-    fn write_bytes_to_streambuf(uc: &mut Unicorn<Win32Context>, this_ptr: u32, bytes: &[u8]) -> usize {
+    fn write_bytes_to_streambuf(
+        uc: &mut Unicorn<Win32Context>,
+        this_ptr: u32,
+        bytes: &[u8],
+    ) -> usize {
         if bytes.is_empty() {
             return 0;
         }
@@ -1710,19 +1709,22 @@ impl MSVCP60 {
         let this_ptr = Self::this_ptr(uc);
         let filename_ptr = uc.read_arg(0);
         let mode = uc.read_arg(1);
-        let (result, filename) =
-            if let Some((file_handle, filename)) = Self::open_host_file_from_guest(uc, filename_ptr, mode)
-            {
-                Self::close_streambuf_file_handle(uc, this_ptr);
-                Self::init_filebuf_layout(uc, this_ptr, file_handle, mode);
-                (this_ptr, filename)
-            } else {
-                (0, if filename_ptr != 0 {
+        let (result, filename) = if let Some((file_handle, filename)) =
+            Self::open_host_file_from_guest(uc, filename_ptr, mode)
+        {
+            Self::close_streambuf_file_handle(uc, this_ptr);
+            Self::init_filebuf_layout(uc, this_ptr, file_handle, mode);
+            (this_ptr, filename)
+        } else {
+            (
+                0,
+                if filename_ptr != 0 {
                     uc.read_euc_kr(filename_ptr as u64)
                 } else {
                     String::new()
-                })
-            };
+                },
+            )
+        };
         crate::emu_log!(
             "[MSVCP60] (this={:#x}) basic_filebuf::open(\"{}\", {}) -> (this={:#x})",
             this_ptr,
@@ -2062,17 +2064,20 @@ impl MSVCP60 {
     fn fiopen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let filename_ptr = uc.read_arg(0);
         let mode = uc.read_arg(1);
-        let (handle, filename) =
-            if let Some((file_handle, filename)) = Self::open_host_file_from_guest(uc, filename_ptr, mode)
-            {
-                (file_handle, filename)
-            } else {
-                (0, if filename_ptr != 0 {
+        let (handle, filename) = if let Some((file_handle, filename)) =
+            Self::open_host_file_from_guest(uc, filename_ptr, mode)
+        {
+            (file_handle, filename)
+        } else {
+            (
+                0,
+                if filename_ptr != 0 {
                     uc.read_euc_kr(filename_ptr as u64)
                 } else {
                     String::new()
-                })
-            };
+                },
+            )
+        };
         crate::emu_log!(
             "[MSVCP60] __Fiopen(\"{}\", {}) -> {:#x}",
             filename,
@@ -2795,7 +2800,8 @@ mod tests {
         assert_eq!(ctor_result.return_value, Some(locale_obj as i32));
         assert_ne!(MSVCP60::read_locale_impl(&uc, locale_obj), 0);
 
-        uc.reg_write(RegisterX86::ECX, streambuf_obj as u64).unwrap();
+        uc.reg_write(RegisterX86::ECX, streambuf_obj as u64)
+            .unwrap();
         write_call_frame(&mut uc, &[]);
         let init_result = MSVCP60::handle(
             &mut uc,
@@ -2803,7 +2809,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(init_result.cleanup, StackCleanup::Callee(0));
-        assert_eq!(uc.read_u32(streambuf_obj as u64), MSVCP60::vtable_export_addr(&mut uc, BASIC_STREAMBUF_VTABLE));
+        assert_eq!(
+            uc.read_u32(streambuf_obj as u64),
+            MSVCP60::vtable_export_addr(&mut uc, BASIC_STREAMBUF_VTABLE)
+        );
         assert_ne!(
             uc.read_u32(streambuf_obj as u64 + STREAMBUF_LOCALE_OFFSET),
             0
