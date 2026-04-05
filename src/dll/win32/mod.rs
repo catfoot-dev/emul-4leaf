@@ -566,6 +566,57 @@ impl Win32Context {
         hbmp
     }
 
+    /// 윈도우 상태의 현재 크기에 맞춰 연결된 표면 비트맵 저장소를 동기화합니다.
+    pub(crate) fn sync_window_surface_bitmap(&self, hwnd: u32) {
+        let Some((surface_bitmap, target_width, target_height)) = ({
+            let win_event = self.win_event.lock().unwrap();
+            win_event.windows.get(&hwnd).and_then(|state| {
+                let width = u32::try_from(state.width).ok()?;
+                let height = u32::try_from(state.height).ok()?;
+                Some((state.surface_bitmap, width, height))
+            })
+        }) else {
+            return;
+        };
+
+        let mut gdi_objects = self.gdi_objects.lock().unwrap();
+        let Some(GdiObject::Bitmap {
+            width,
+            height,
+            pixels,
+            ..
+        }) = gdi_objects.get_mut(&surface_bitmap)
+        else {
+            return;
+        };
+
+        if *width == target_width && *height == target_height {
+            return;
+        }
+
+        let old_width = *width as usize;
+        let old_height = *height as usize;
+        let new_width = target_width as usize;
+        let new_height = target_height as usize;
+        let copy_width = old_width.min(new_width);
+        let copy_height = old_height.min(new_height);
+
+        let mut pixels_guard = pixels.lock().unwrap();
+        let mut resized_pixels = vec![0u32; new_width.saturating_mul(new_height)];
+
+        // 기존 프레임의 겹치는 영역만 보존해 리사이즈 직후에도 화면이 깨지지 않게 합니다.
+        for row in 0..copy_height {
+            let src_row = row * old_width;
+            let dst_row = row * new_width;
+            resized_pixels[dst_row..dst_row + copy_width]
+                .copy_from_slice(&pixels_guard[src_row..src_row + copy_width]);
+        }
+
+        *pixels_guard = resized_pixels;
+        *width = target_width;
+        *height = target_height;
+    }
+
     /// DLL 이름과 함수 이름을 기반으로 적절한 Win32 API 핸들러로 분기합니다.
     ///
     /// # 인자

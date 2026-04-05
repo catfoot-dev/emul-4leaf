@@ -237,7 +237,7 @@ impl crate::ui::Painter for SplashPainter {
     ) -> winit::window::Window {
         let attributes = winit::window::Window::default_attributes()
             .with_title("4Leaf Emulator")
-            .with_inner_size(winit::dpi::LogicalSize::new(self.width, self.height))
+            .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
             .with_resizable(false)
             .with_decorations(false)
             .with_visible(true)

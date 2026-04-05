@@ -1032,6 +1032,7 @@ impl USER32 {
             .lock()
             .unwrap()
             .move_window(hwnd, x, y, width, height);
+        uc.get_data().sync_window_surface_bitmap(hwnd);
         crate::emu_log!(
             "[USER32] MoveWindow({:#x}, {}, {}, {}, {}, {}) -> BOOL 1",
             hwnd,
@@ -1063,6 +1064,7 @@ impl USER32 {
             cy,
             flags,
         );
+        uc.get_data().sync_window_surface_bitmap(hwnd);
         crate::emu_log!(
             "[USER32] SetWindowPos({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
             hwnd,

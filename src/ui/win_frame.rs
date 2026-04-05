@@ -223,7 +223,8 @@ impl WinFrame {
 
                     let mut attributes = Window::default_attributes()
                         .with_title(title)
-                        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+                        // 게스트가 다루는 좌표계는 픽셀 기반이므로 backing store 크기와 1:1로 맞춥니다.
+                        .with_inner_size(winit::dpi::PhysicalSize::new(width, height))
                         .with_visible(visible);
 
                     attributes = Self::apply_guest_window_attributes(
@@ -322,7 +323,7 @@ impl WinFrame {
                     {
                         window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                         let _ =
-                            window.request_inner_size(winit::dpi::LogicalSize::new(width, height));
+                            window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
                     }
                 }
 
@@ -803,14 +804,15 @@ impl ApplicationHandler<()> for WinFrame {
                     let height = size.height;
                     let lparam = (height << 16) | (width & 0xFFFF);
 
-                    let mut q = self.emu_context.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
-
                     self.emu_context
                         .win_event
                         .lock()
                         .unwrap()
                         .resize_window(hwnd, width, height);
+                    self.emu_context.sync_window_surface_bitmap(hwnd);
+
+                    let mut q = self.emu_context.message_queue.lock().unwrap();
+                    q.push_back([hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
                 }
             }
 

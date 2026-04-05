@@ -218,7 +218,11 @@ impl MSVCP60 {
         Self::write_basic_ios_streambuf_ptr(uc, this_ptr, streambuf_ptr);
     }
 
-    fn write_basic_ios_streambuf_ptr(uc: &mut Unicorn<Win32Context>, this_ptr: u32, streambuf_ptr: u32) {
+    fn write_basic_ios_streambuf_ptr(
+        uc: &mut Unicorn<Win32Context>,
+        this_ptr: u32,
+        streambuf_ptr: u32,
+    ) {
         if this_ptr == 0 {
             return;
         }
@@ -498,10 +502,7 @@ impl MSVCP60 {
         Self::open_host_file_by_name(uc, &filename, mode).map(|handle| (handle, filename))
     }
 
-    fn attach_version_dat_fallback(
-        uc: &mut Unicorn<Win32Context>,
-        this_ptr: u32,
-    ) -> bool {
+    fn attach_version_dat_fallback(uc: &mut Unicorn<Win32Context>, this_ptr: u32) -> bool {
         if this_ptr == 0 || Self::streambuf_file_handle(uc, this_ptr) != 0 {
             return false;
         }
