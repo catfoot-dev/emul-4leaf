@@ -492,18 +492,12 @@ fn handle_main_frame(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
     match pkt.sub_type {
         0x04 => {
             // 정적 분석상 `DMainFrame::OnReceived`는 `Version.dat`를 읽어 서버 값과 비교합니다.
-            // 최신 캡처에서는 버전 응답만 보내면 곧바로 채널 1을 닫습니다.
-            // 반면 이전 런타임 로그에는 bootstrap 직후 커스텀 메시지 4/8/6이
-            // 순서대로 올라간 흔적이 있어, 현재는 그중 가장 보수적인 채널 1
-            // compatibility sequence `msg=4 -> msg=0(version) -> msg=6`를 시도합니다.
-            let prelude = build_main_frame_status_message_response(ch, 4);
             let response = build_provisional_main_frame_bootstrap_response(pkt, ch);
-            let epilogue = build_main_frame_status_message_response(ch, 6);
             HandlerOutcome {
-                responses: vec![prelude, response, epilogue],
+                responses: vec![response],
                 phase_update: Some(ChannelPhase::BootstrapVersionSent),
                 analysis_note: Some(format!(
-                    "bootstrap responded with compatibility sequence msg=4 -> msg=0(version={}) -> msg=6; deferred msg=8/msg=9 until real client stage-channel opens are observed",
+                    "bootstrap responded with raw msg=0(version={}, trailing operator-line text stub); client-side custom message 4/8/6 are internal events posted after OPEN_OK / data receive / CLOSE",
                     read_local_package_version()
                 )),
             }
@@ -537,25 +531,26 @@ fn read_local_package_version() -> u16 {
     text.trim().parse::<u16>().unwrap_or(54)
 }
 
+/// `DMainFrame` 로그인 화면에 표시되는 공지 타이틀 텍스트입니다.
+fn get_news_title_text() -> &'static [u8] {
+    b"4Leaf Emulator!\r\n\0"
+}
+
 /// `DMainFrame` 채널의 초기 부트스트랩 요청에 대해 서버 패키지 버전 응답을 생성합니다.
 ///
 /// 정적 분석상 `DMainFrame` raw body는 선두 `handler_ptr`과 `msg_id`를 분리해 다루고,
 /// `msg_id == 0`일 때 payload 선두 `u16`을 서버 패키지 버전으로 읽습니다.
-/// 따라서 bootstrap 응답 body는 최소 `[handler_ptr:u32=0][msg_id:u32=0][server_version:u16]`
+/// 그 뒤에는 바로 `char*`처럼 해석되는 CRLF/NUL 종료 텍스트 블록을 추가로 읽습니다.
+/// 따라서 bootstrap 응답 body는 최소
+/// `[handler_ptr:u32=0][msg_id:u32=0][server_version:u16][text...\r\n\0]`
 /// 형식이어야 합니다.
 fn build_provisional_main_frame_bootstrap_response(pkt: &ProtocolPacket, ch: u16) -> Vec<u8> {
     let _ = pkt;
-    build_main_frame_raw_message(ch, 0, &read_local_package_version().to_le_bytes())
-}
-
-/// `DMainFrame` state 10이 채널 2/3을 열도록 유도하는 후속 메시지 8입니다.
-fn build_main_frame_stage_open_response(ch: u16) -> Vec<u8> {
-    build_main_frame_raw_message(ch, 8, &[])
-}
-
-/// `DMainFrame` bootstrap 직후 사용하는 상태 알림 raw 메시지를 생성합니다.
-fn build_main_frame_status_message_response(ch: u16, msg_id: u32) -> Vec<u8> {
-    build_main_frame_raw_message(ch, msg_id, &[])
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&read_local_package_version().to_le_bytes());
+    // 원본은 version 뒤를 공지 문자열처럼 계속 읽으므로 euc-kr 텍스트를 포함합니다.
+    payload.extend_from_slice(get_news_title_text());
+    build_main_frame_raw_message(ch, 0, &payload)
 }
 
 /// `DMainFrame` state 11이 소비하는 임시 stage-info 메시지 9를 생성합니다.
@@ -776,19 +771,14 @@ mod tests {
         let version_resp = from_handler_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
-        assert_eq!(version_resp, build_main_frame_status_message_response(1, 4));
-        let version_resp = from_handler_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
         let mut expected_body = Vec::new();
         expected_body.extend_from_slice(&0u32.to_le_bytes());
         expected_body.extend_from_slice(&0u32.to_le_bytes());
         expected_body.extend_from_slice(&protocol::write_u16(54));
+        expected_body.extend_from_slice(get_news_title_text());
         assert_eq!(version_resp, DNetPacket::new(1, expected_body).to_bytes());
-        let final_status = from_handler_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(final_status, build_main_frame_status_message_response(1, 6));
+        let timeout = from_handler_rx.recv_timeout(Duration::from_millis(100));
+        assert!(timeout.is_err());
 
         drop(to_handler_tx);
         handle.join().unwrap();
@@ -807,20 +797,28 @@ mod tests {
         expected_body.extend_from_slice(&0u32.to_le_bytes());
         expected_body.extend_from_slice(&0u32.to_le_bytes());
         expected_body.extend_from_slice(&protocol::write_u16(54));
+        expected_body.extend_from_slice(get_news_title_text());
 
         assert_eq!(response, DNetPacket::new(3, expected_body).to_bytes());
     }
 
     #[test]
-    fn main_frame_stage_open_response_uses_raw_message_id_eight() {
-        assert_eq!(
-            build_main_frame_stage_open_response(2),
-            DNetPacket::new(
-                2,
-                [0u32.to_le_bytes().as_slice(), 8u32.to_le_bytes().as_slice()].concat(),
-            )
-            .to_bytes()
-        );
+    fn main_frame_bootstrap_response_terminates_followup_text_block() {
+        let request = ProtocolPacket {
+            main_type: 0xE0,
+            sub_type: 0x04,
+            payload: vec![0x0d, 0x35, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00],
+        };
+
+        let response = build_provisional_main_frame_bootstrap_response(&request, 1);
+        let (channel_id, body_len) =
+            DNetPacket::parse_header(response[..4].try_into().unwrap()).unwrap();
+        assert_eq!(channel_id, 1);
+        assert_eq!(body_len as usize, response.len() - 4);
+        assert_eq!(&response[4..8], &0u32.to_le_bytes());
+        assert_eq!(&response[8..12], &0u32.to_le_bytes());
+        assert_eq!(&response[12..14], &54u16.to_le_bytes());
+        assert_eq!(&response[14..], get_news_title_text());
     }
 
     #[test]
@@ -845,18 +843,6 @@ mod tests {
         expected_body.extend_from_slice(&[0xaa, 0xbb]);
 
         assert_eq!(wire, DNetPacket::new(4, expected_body).to_bytes());
-    }
-
-    #[test]
-    fn main_frame_status_message_response_has_empty_payload() {
-        assert_eq!(
-            build_main_frame_status_message_response(1, 4),
-            DNetPacket::new(
-                1,
-                [0u32.to_le_bytes().as_slice(), 4u32.to_le_bytes().as_slice()].concat(),
-            )
-            .to_bytes()
-        );
     }
 
     #[test]
@@ -888,13 +874,7 @@ mod tests {
         to_handler_tx
             .send(protocol::create_app_packet(1, 0xE0, 0x04, &payload))
             .unwrap();
-        let _status_four = from_handler_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
         let _bootstrap = from_handler_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
-        let _status_six = from_handler_rx
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
 

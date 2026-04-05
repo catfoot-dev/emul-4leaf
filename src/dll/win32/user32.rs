@@ -3099,13 +3099,12 @@ impl USER32 {
                 if class_cursor != 0 {
                     ctx.current_cursor
                         .store(class_cursor, std::sync::atomic::Ordering::SeqCst);
-                    ctx.win_event
-                        .lock()
-                        .unwrap()
-                        .send_ui_command(crate::ui::UiCommand::SetCursor {
+                    ctx.win_event.lock().unwrap().send_ui_command(
+                        crate::ui::UiCommand::SetCursor {
                             hwnd,
                             hcursor: class_cursor,
-                        });
+                        },
+                    );
                     1
                 } else {
                     0
@@ -4003,8 +4002,8 @@ mod tests {
 
     #[test]
     fn parse_cur_data_supports_paletted_cursor() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("Resources/Cursor/Hand.ani");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Resources/Cursor/Hand.ani");
         let data = std::fs::read(path).expect("커서 리소스를 읽을 수 있어야 합니다");
         let frame = USER32::parse_cur_data(&data).expect("8bpp CUR 파싱이 성공해야 합니다");
 

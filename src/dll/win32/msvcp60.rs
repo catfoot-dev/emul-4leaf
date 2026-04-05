@@ -13,6 +13,7 @@ const BASIC_STRING_LEN_OFFSET: u64 = 8;
 const BASIC_STRING_RES_OFFSET: u64 = 12;
 
 const IOS_STREAMBUF_OFFSET: u64 = 4;
+const IOS_STREAMBUF_ALT_OFFSET: u64 = 40;
 const IOS_FLAGS_OFFSET: u64 = 8;
 const IOS_STATE_OFFSET: u64 = 16;
 const IOS_LOCALE_OFFSET: u64 = 20;
@@ -30,7 +31,7 @@ const FACET_REFCOUNT_OFFSET: u64 = 4;
 
 const STREAM_OBJECT_SIZE: usize = 0x80;
 const STREAMBUF_OBJECT_SIZE: usize = 0x40;
-const LOCALE_OBJECT_SIZE: usize = 0x10;
+const LOCALE_OBJECT_SIZE: usize = 0x20;
 const LOCIMP_OBJECT_SIZE: usize = 0x20;
 const STREAMBUF_HOST_BUFFER_SIZE: usize = 0x400;
 
@@ -143,6 +144,9 @@ impl MSVCP60 {
 
     fn write_locale_value(uc: &mut Unicorn<Win32Context>, locale_addr: u32, locimp_addr: u32) {
         if locale_addr != 0 {
+            // 원본은 locale 스택 객체의 뒤쪽 필드도 상태 분기에 사용하므로
+            // locimp 포인터만 쓰지 말고 전체 객체를 0으로 초기화합니다.
+            let _ = uc.mem_write(locale_addr as u64, &[0u8; LOCALE_OBJECT_SIZE]);
             uc.write_u32(locale_addr as u64, locimp_addr);
         }
     }
@@ -211,9 +215,34 @@ impl MSVCP60 {
         streambuf_ptr: u32,
     ) {
         Self::init_ios_base_layout(uc, this_ptr, vtable_name);
-        if this_ptr != 0 {
-            uc.write_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET, streambuf_ptr);
+        Self::write_basic_ios_streambuf_ptr(uc, this_ptr, streambuf_ptr);
+    }
+
+    fn write_basic_ios_streambuf_ptr(uc: &mut Unicorn<Win32Context>, this_ptr: u32, streambuf_ptr: u32) {
+        if this_ptr == 0 {
+            return;
         }
+        uc.write_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET, streambuf_ptr);
+        uc.write_u32(this_ptr as u64 + IOS_STREAMBUF_ALT_OFFSET, streambuf_ptr);
+    }
+
+    fn looks_like_streambuf_ptr(uc: &Unicorn<Win32Context>, ptr: u32) -> bool {
+        ptr != 0 && Self::is_mapped_ptr(uc, ptr) && uc.read_u32(ptr as u64) != 0
+    }
+
+    fn read_basic_ios_streambuf_ptr(uc: &Unicorn<Win32Context>, this_ptr: u32) -> u32 {
+        if this_ptr == 0 {
+            return 0;
+        }
+        let primary = uc.read_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET);
+        if Self::looks_like_streambuf_ptr(uc, primary) {
+            return primary;
+        }
+        let alternate = uc.read_u32(this_ptr as u64 + IOS_STREAMBUF_ALT_OFFSET);
+        if Self::looks_like_streambuf_ptr(uc, alternate) {
+            return alternate;
+        }
+        primary
     }
 
     fn init_global_stream_object(uc: &mut Unicorn<Win32Context>, func_name: &str) -> u32 {
@@ -469,6 +498,36 @@ impl MSVCP60 {
         Self::open_host_file_by_name(uc, &filename, mode).map(|handle| (handle, filename))
     }
 
+    fn attach_version_dat_fallback(
+        uc: &mut Unicorn<Win32Context>,
+        this_ptr: u32,
+    ) -> bool {
+        if this_ptr == 0 || Self::streambuf_file_handle(uc, this_ptr) != 0 {
+            return false;
+        }
+        if Self::streambuf_available(uc, this_ptr) != 0 {
+            return false;
+        }
+
+        let mode = Self::read_streambuf_field(uc, this_ptr, STREAMBUF_FILE_MODE_OFFSET);
+        let fallback_mode = if mode == 0 { 1 } else { mode };
+        let Some(file_handle) = Self::open_host_file_by_name(uc, "version.dat", fallback_mode)
+        else {
+            return false;
+        };
+
+        // 원본 런타임에서는 이 시점에 Version.dat가 이미 연결돼 있어야 합니다.
+        // 현재 에뮬레이터는 일부 생성 경로가 누락돼 있어, 빈 filebuf일 때만 국소적으로 보정합니다.
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_FILE_HANDLE_OFFSET, file_handle);
+        Self::write_streambuf_field(uc, this_ptr, STREAMBUF_FILE_MODE_OFFSET, fallback_mode);
+        let _ = Self::refill_streambuf_from_file(uc, this_ptr);
+        crate::emu_log!(
+            "[MSVCP60] (this={:#x}) attached fallback Resources/version.dat",
+            this_ptr
+        );
+        true
+    }
+
     fn close_streambuf_file_handle(uc: &mut Unicorn<Win32Context>, this_ptr: u32) {
         let file_handle = Self::streambuf_file_handle(uc, this_ptr);
         if file_handle == 0 {
@@ -629,10 +688,8 @@ impl MSVCP60 {
     fn basic_ios_copy_assign(uc: &mut Unicorn<Win32Context>, this_ptr: u32, other_ptr: u32) {
         Self::ios_base_copy_assign(uc, this_ptr, other_ptr);
         if this_ptr != 0 && other_ptr != 0 {
-            uc.write_u32(
-                this_ptr as u64 + IOS_STREAMBUF_OFFSET,
-                uc.read_u32(other_ptr as u64 + IOS_STREAMBUF_OFFSET),
-            );
+            let streambuf_ptr = Self::read_basic_ios_streambuf_ptr(uc, other_ptr);
+            Self::write_basic_ios_streambuf_ptr(uc, this_ptr, streambuf_ptr);
         }
     }
 
@@ -641,7 +698,7 @@ impl MSVCP60 {
             return;
         }
 
-        let streambuf_ptr = uc.read_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET);
+        let streambuf_ptr = Self::read_basic_ios_streambuf_ptr(uc, this_ptr);
         if streambuf_ptr == 0 {
             return;
         }
@@ -1565,7 +1622,7 @@ impl MSVCP60 {
         let this_ptr = Self::this_ptr(uc);
         let pos = uc.read_arg(0);
         let _high = uc.read_arg(1);
-        let streambuf_ptr = uc.read_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET);
+        let streambuf_ptr = Self::read_basic_ios_streambuf_ptr(uc, this_ptr);
         if Self::seek_streambuf_file(uc, streambuf_ptr, SeekFrom::Start(pos as u64)).is_some() {
             crate::emu_log!(
                 "[MSVCP60] (this={:#x}) basic_istream::seekg({:#x}) -> (this={:#x})",
@@ -1590,7 +1647,8 @@ impl MSVCP60 {
     ) -> Option<ApiHookResult> {
         let this_ptr = Self::this_ptr(uc);
         let out_ptr = uc.read_arg(0);
-        let streambuf_ptr = uc.read_u32(this_ptr as u64 + IOS_STREAMBUF_OFFSET);
+        let streambuf_ptr = Self::read_basic_ios_streambuf_ptr(uc, this_ptr);
+        let used_fallback = Self::attach_version_dat_fallback(uc, streambuf_ptr);
 
         while let Some(byte) = Self::streambuf_peek_byte(uc, streambuf_ptr) {
             if !(byte as char).is_ascii_whitespace() {
@@ -1609,7 +1667,7 @@ impl MSVCP60 {
             }
         }
 
-        let mut state = uc.read_u32(this_ptr as u64 + IOS_STATE_OFFSET);
+        let mut state = 0;
         if token.is_empty() {
             state |= 0x4;
             if Self::streambuf_peek_byte(uc, streambuf_ptr).is_none() {
@@ -1620,6 +1678,9 @@ impl MSVCP60 {
                 if out_ptr != 0 {
                     uc.write_u16(out_ptr as u64, value);
                 }
+                if Self::streambuf_peek_byte(uc, streambuf_ptr).is_none() {
+                    state |= 0x2;
+                }
             } else {
                 state |= 0x4;
             }
@@ -1629,9 +1690,10 @@ impl MSVCP60 {
         uc.write_u32(this_ptr as u64 + IOS_STATE_OFFSET, state);
 
         crate::emu_log!(
-            "[MSVCP60] (this={:#x}) basic_istream::operator>>({:#x})",
+            "[MSVCP60] (this={:#x}) basic_istream::operator>>({:#x}) fallback={}",
             this_ptr,
-            out_ptr
+            out_ptr,
+            used_fallback
         );
         Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
     }
@@ -2799,6 +2861,7 @@ mod tests {
         assert_eq!(ctor_result.cleanup, StackCleanup::Callee(0));
         assert_eq!(ctor_result.return_value, Some(locale_obj as i32));
         assert_ne!(MSVCP60::read_locale_impl(&uc, locale_obj), 0);
+        assert_eq!(uc.read_u32(locale_obj as u64 + 0x1c), 0);
 
         uc.reg_write(RegisterX86::ECX, streambuf_obj as u64)
             .unwrap();
@@ -2868,6 +2931,46 @@ mod tests {
         .unwrap();
         assert_eq!(extract_result.return_value, Some(istream as i32));
         assert_eq!(uc.read_u16(out_value as u64), 4321);
-        assert_eq!(uc.read_u32(istream as u64 + IOS_STATE_OFFSET) & 0x4, 0);
+        assert_eq!(uc.read_u32(istream as u64 + IOS_STATE_OFFSET) & 0x6, 0);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn extract_unsigned_short_uses_version_dat_fallback_for_empty_filebuf() {
+        let mut uc = new_test_uc();
+        let filebuf = MSVCP60::alloc_zeroed(&mut uc, STREAMBUF_OBJECT_SIZE);
+        let istream = MSVCP60::alloc_zeroed(&mut uc, STREAM_OBJECT_SIZE);
+        let out_value = MSVCP60::alloc_zeroed(&mut uc, 2);
+
+        uc.reg_write(RegisterX86::ECX, filebuf as u64).unwrap();
+        write_call_frame(&mut uc, &[0]);
+        MSVCP60::handle(
+            &mut uc,
+            "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z",
+        )
+        .unwrap();
+
+        uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
+        write_call_frame(&mut uc, &[filebuf, 0]);
+        MSVCP60::handle(
+            &mut uc,
+            "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z",
+        )
+        .unwrap();
+
+        uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
+        write_call_frame(&mut uc, &[out_value]);
+        let extract_result = MSVCP60::handle(
+            &mut uc,
+            "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV01@AAG@Z",
+        )
+        .unwrap();
+        assert_eq!(extract_result.return_value, Some(istream as i32));
+        assert_eq!(uc.read_u16(out_value as u64), 54);
+        assert_eq!(uc.read_u32(istream as u64 + IOS_STATE_OFFSET) & 0x6, 0);
+        assert_ne!(MSVCP60::streambuf_file_handle(&uc, filebuf), 0);
     }
 }
