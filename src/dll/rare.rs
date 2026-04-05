@@ -1198,13 +1198,13 @@ fn resolve_sound_source(filename: &str) -> Option<ResolvedAudioSource> {
     let normalized_path = Path::new(&normalized);
     let mut candidates = vec![
         PathBuf::from(&normalized),
-        Path::new("Resources").join(&normalized),
+        crate::resource_dir().join(&normalized),
     ];
     if normalized_path.extension().is_none() {
         candidates.push(PathBuf::from(format!("{normalized}.wav")));
-        candidates.push(Path::new("Resources").join(format!("{normalized}.wav")));
+        candidates.push(crate::resource_dir().join(format!("{normalized}.wav")));
         candidates.push(PathBuf::from(format!("{normalized}.mp3")));
-        candidates.push(Path::new("Resources").join(format!("{normalized}.mp3")));
+        candidates.push(crate::resource_dir().join(format!("{normalized}.mp3")));
     }
 
     for candidate in candidates {
@@ -1223,18 +1223,18 @@ fn resolve_sound_source(filename: &str) -> Option<ResolvedAudioSource> {
 
     for pack_name in &pack_names {
         if let Some(source) =
-            resolve_sound_source_from_pack(pack_name, Path::new("Resources/Sound.pak"))
+            resolve_sound_source_from_pack(pack_name, &crate::resource_dir().join("Sound.pak"))
         {
             return Some(source);
         }
         if let Some(source) =
-            resolve_sound_source_from_pack(pack_name, Path::new("Resources/BGM.pak"))
+            resolve_sound_source_from_pack(pack_name, &crate::resource_dir().join("BGM.pak"))
         {
             return Some(source);
         }
     }
 
-    find_resource_file(Path::new("Resources"), &wanted_name).map(ResolvedAudioSource::File)
+    find_resource_file(crate::resource_dir(), &wanted_name).map(ResolvedAudioSource::File)
 }
 
 fn decode_audio_source(source: &ResolvedAudioSource) -> Result<RareWaveData, String> {

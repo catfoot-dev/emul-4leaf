@@ -1226,7 +1226,7 @@ impl MSVCRT {
         let filename = uc.read_euc_kr(filename_addr as u64);
         let mode = uc.read_euc_kr(mode_addr as u64);
 
-        let filename = format!("Resources/{}", filename);
+        let filename = crate::resource_dir().join(&filename).to_string_lossy().to_string();
         let mut options = std::fs::OpenOptions::new();
         // Parse mode: r, w, a, +, b, t
 
@@ -1250,7 +1250,7 @@ impl MSVCRT {
 
         let mut file_result = options.open(&filename);
         if file_result.is_err() && !filename.contains('/') && !filename.contains('\\') {
-            let alt_path = format!("Resources/{}", filename);
+            let alt_path = crate::resource_dir().join(&filename).to_string_lossy().to_string();
             file_result = options.open(&alt_path);
         }
 
@@ -1488,7 +1488,7 @@ impl MSVCRT {
 
         let mut file_result = options.open(&filename);
         if file_result.is_err() && !filename.contains('/') && !filename.contains('\\') {
-            let alt_path = format!("Resources/{}", filename);
+            let alt_path = crate::resource_dir().join(&filename).to_string_lossy().to_string();
             file_result = options.open(&alt_path);
         }
 

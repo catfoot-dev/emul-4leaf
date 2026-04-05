@@ -20,6 +20,8 @@ pub struct WinEvent {
     pub windows: HashMap<u32, WindowState>,
     /// UI 스레드와의 통신 채널
     ui_tx: Option<Sender<UiCommand>>,
+    /// 윈도우 상태 변경 시 증가하는 세대 카운터 (paint 최적화용)
+    pub generation: u64,
 }
 
 impl WinEvent {
@@ -57,6 +59,7 @@ impl WinEvent {
         Self {
             windows: HashMap::new(),
             ui_tx,
+            generation: 0,
         }
     }
 
@@ -68,9 +71,16 @@ impl WinEvent {
         }
     }
 
+    /// 윈도우 상태 변경을 알리는 세대 카운터를 증가시킵니다.
+    #[inline]
+    pub fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// 새 윈도우 상태를 등록합니다.
     pub fn create_window(&mut self, hwnd: u32, state: WindowState) {
         self.windows.insert(hwnd, state);
+        self.bump_generation();
     }
 
     /// 이미 등록된 윈도우 상태를 바탕으로 UI 스레드에 실제 창 생성을 요청합니다.
@@ -139,6 +149,7 @@ impl WinEvent {
             .unwrap_or(false);
         let redraw_target = is_child.then(|| self.redraw_target_for(hwnd)).flatten();
         self.windows.remove(&hwnd);
+        self.bump_generation();
         if !is_child {
             self.send_ui_command(UiCommand::DestroyWindow { hwnd });
         }
@@ -152,6 +163,7 @@ impl WinEvent {
         if let Some(state) = self.windows.get_mut(&hwnd) {
             state.width = width as i32;
             state.height = height as i32;
+            self.bump_generation();
         }
     }
 
@@ -169,6 +181,7 @@ impl WinEvent {
             .unwrap_or(false);
         if let Some(state) = self.windows.get_mut(&hwnd) {
             state.visible = visible;
+            self.bump_generation();
         }
         if is_child {
             self.request_visual_refresh(hwnd);
@@ -189,6 +202,7 @@ impl WinEvent {
             state.y = y;
             state.width = width as i32;
             state.height = height as i32;
+            self.bump_generation();
         }
         if is_child {
             self.request_visual_refresh(hwnd);
@@ -229,6 +243,7 @@ impl WinEvent {
                 state.width = cx as i32;
                 state.height = cy as i32;
             }
+            self.bump_generation();
         }
         // 자식 창은 부모 표면 합성으로 그리므로 호스트 창만 다시 그리면 됩니다.
         if is_child {

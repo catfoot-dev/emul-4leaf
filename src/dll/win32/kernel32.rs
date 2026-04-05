@@ -1101,7 +1101,7 @@ impl KERNEL32 {
         let module = uc.read_arg(0);
         let buf_addr = uc.read_arg(1);
         let buf_size = uc.read_arg(2);
-        let path = ".\\Resources\\4Leaf.exe\0";
+        let path = format!("{}\\4Leaf.exe\0", crate::resource_dir().display()).replace('/', "\\");
         let bytes = path.as_bytes();
         let copy_len = bytes.len().min(buf_size as usize);
         uc.mem_write(buf_addr as u64, &bytes[..copy_len]).unwrap();
@@ -1610,90 +1610,64 @@ impl KERNEL32 {
 
     /// 대기 중인 에뮬레이션 스레드들을 각각 QUANTUM 명령어만큼 실행하는 협력적 스케줄러
     pub(crate) fn schedule_threads(uc: &mut Unicorn<Win32Context>) {
-        let has_threads = {
+        // 스레드 목록을 한 번만 잠그고 실행할 스레드 스냅샷을 수집합니다.
+        // 이전에는 스레드당 5~7회 lock/unlock이 발생했으나, 이제는 루프 전후 각 1회로 줄입니다.
+        let runnable: Vec<(usize, EmulatedThread)> = {
             let ctx = uc.get_data();
-            ctx.threads.lock().unwrap().iter().any(|t| t.alive)
+            let mut threads = ctx.threads.lock().unwrap();
+            let now = Instant::now();
+            let mut result = Vec::new();
+            for (i, t) in threads.iter_mut().enumerate() {
+                if !t.alive {
+                    continue;
+                }
+                if t.eip == 0 {
+                    t.alive = false;
+                    crate::emu_log!(
+                        "[KERNEL32] Thread (handle={:#x}, id={}) has EIP=0 and will be terminated",
+                        t.handle,
+                        t.thread_id
+                    );
+                    continue;
+                }
+                if t.terminate_requested {
+                    result.push((i, t.clone()));
+                } else if t.suspended {
+                    continue;
+                } else if let Some(res_time) = t.resume_time {
+                    if now < res_time {
+                        continue;
+                    }
+                    result.push((i, t.clone()));
+                } else {
+                    result.push((i, t.clone()));
+                }
+            }
+            result
         };
-        if !has_threads {
+
+        if runnable.is_empty() {
             return;
         }
 
-        // 메인 스레드 레지스터 저장
+        // 메인 스레드 레지스터를 일괄 저장
         let caller_tid = uc.get_data().current_thread_idx.load(Ordering::SeqCst);
-        let m_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32;
-        let m_eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-        let m_ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
-        let m_edx = uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32;
-        let m_ebx = uc.reg_read(RegisterX86::EBX).unwrap_or(0) as u32;
-        let m_esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0) as u32;
-        let m_ebp = uc.reg_read(RegisterX86::EBP).unwrap_or(0) as u32;
-        let m_esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-        let m_edi = uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32;
+        let saved_regs = Self::read_regs(uc);
 
-        let count = uc.get_data().threads.lock().unwrap().len();
-        for i in 0..count {
-            let t_info = {
-                let ctx = uc.get_data();
-                ctx.threads.lock().unwrap().get(i).cloned()
-            };
-            let t = match t_info {
-                Some(t) if t.alive => {
-                    if t.eip == 0 {
-                        let ctx = uc.get_data();
-                        if let Some(thread) = ctx.threads.lock().unwrap().get_mut(i) {
-                            thread.alive = false;
-                        }
-                        crate::emu_log!(
-                            "[KERNEL32] Thread (handle={:#x}, id={}) has EIP=0 and will be terminated",
-                            t.handle,
-                            t.thread_id
-                        );
-                        continue;
-                    }
-                    if t.terminate_requested {
-                        // 종료 요청 시 yield 무시하고 진행 (이후 alive check에서 정리됨)
-                        t
-                    } else if t.suspended {
-                        continue; // 일시 중단된 스레드는 ResumeThread 전까지 건너뜀
-                    } else if let Some(res_time) = t.resume_time {
-                        if Instant::now() < res_time {
-                            continue; // 아직 대기 중
-                        }
-                        t
-                    } else {
-                        t
-                    }
-                }
-                _ => continue,
-            };
-
-            // 스레드 컨텍스트 표시 (Sleep/Wait 호출 시 재귀 방지)
+        for (i, t) in &runnable {
             uc.get_data()
                 .current_thread_idx
                 .store(t.thread_id, Ordering::SeqCst);
 
-            // crate::emu_log!(
-            //     "[*] Scheduling thread id={} at EIP={:#x}",
-            //     t.thread_id,
-            //     t.eip
-            // );
+            // 스레드 레지스터 일괄 복원 (EIP는 emu_start에서 설정하므로 0으로 채움)
+            Self::write_regs(uc, [0, t.eax, t.ecx, t.edx, t.ebx, t.esp, t.ebp, t.esi, t.edi]);
 
-            // 스레드 레지스터 복원
-            let _ = uc.reg_write(RegisterX86::EAX, t.eax as u64);
-            let _ = uc.reg_write(RegisterX86::ECX, t.ecx as u64);
-            let _ = uc.reg_write(RegisterX86::EDX, t.edx as u64);
-            let _ = uc.reg_write(RegisterX86::EBX, t.ebx as u64);
-            let _ = uc.reg_write(RegisterX86::ESP, t.esp as u64);
-            let _ = uc.reg_write(RegisterX86::EBP, t.ebp as u64);
-            let _ = uc.reg_write(RegisterX86::ESI, t.esi as u64);
-            let _ = uc.reg_write(RegisterX86::EDI, t.edi as u64);
-
-            // 스레드를 QUANTUM 명령어만큼 실행
             const QUANTUM: usize = 200_000;
             let res = uc.emu_start(t.eip as u64, EXIT_ADDRESS as u64, 0, QUANTUM);
-            let new_eip_after_run = uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32;
+            let new_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32;
+
             if let Err(e) = res {
-                if new_eip_after_run == 0 {
+                if new_eip == 0 {
                     crate::emu_log!(
                         "[KERNEL32] Thread id={} stopped with EIP=0 and will be terminated",
                         t.thread_id
@@ -1701,51 +1675,38 @@ impl KERNEL32 {
                 } else {
                     crate::emu_log!("[!] Thread id={} emu_start failed: {:?}", t.thread_id, e);
                 }
-            } else {
-                // crate::emu_log!("[*] Thread id={} quantum finished", t.thread_id);
             }
 
-            // 스레드 레지스터 저장
-            let new_eip = new_eip_after_run;
-            let new_eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-            // crate::emu_log!(
-            //     "[*] Thread id={} stopped at EIP={:#x}",
-            //     t.thread_id,
-            //     new_eip
-            // );
-            let new_ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
-            let new_edx = uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32;
-            let new_ebx = uc.reg_read(RegisterX86::EBX).unwrap_or(0) as u32;
-            let new_esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0) as u32;
-            let new_ebp = uc.reg_read(RegisterX86::EBP).unwrap_or(0) as u32;
-            let new_esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-            let new_edi = uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32;
+            // 스레드 레지스터를 일괄 읽기
+            let new_regs = Self::read_regs(uc);
 
-            // terminate_requested 플래그 또는 EXIT_ADDRESS 도달 시 스레드 종료
+            // terminate_requested는 emu_start 도중 변경될 수 있으므로 여기서 확인
             let terminate_requested = {
                 let ctx = uc.get_data();
                 ctx.threads
                     .lock()
                     .unwrap()
-                    .get(i)
+                    .get(*i)
                     .map(|t| t.terminate_requested)
                     .unwrap_or(false)
             };
             let alive = !terminate_requested && new_eip != EXIT_ADDRESS as u32 && new_eip != 0;
+
             {
                 let ctx = uc.get_data();
                 let mut threads = ctx.threads.lock().unwrap();
-                if let Some(thread) = threads.get_mut(i) {
+                if let Some(thread) = threads.get_mut(*i) {
                     thread.alive = alive;
                     thread.eip = new_eip;
-                    thread.eax = new_eax;
-                    thread.ecx = new_ecx;
-                    thread.edx = new_edx;
-                    thread.ebx = new_ebx;
-                    thread.esp = new_esp;
-                    thread.ebp = new_ebp;
-                    thread.esi = new_esi;
-                    thread.edi = new_edi;
+                    // read_regs: [0]=EIP, [1]=EAX, [2]=ECX, ..., [8]=EDI
+                    thread.eax = new_regs[1];
+                    thread.ecx = new_regs[2];
+                    thread.edx = new_regs[3];
+                    thread.ebx = new_regs[4];
+                    thread.esp = new_regs[5];
+                    thread.ebp = new_regs[6];
+                    thread.esi = new_regs[7];
+                    thread.edi = new_regs[8];
                 }
             }
             if !alive {
@@ -1763,17 +1724,38 @@ impl KERNEL32 {
         uc.get_data()
             .current_thread_idx
             .store(caller_tid, Ordering::SeqCst);
+        Self::write_regs(uc, saved_regs);
+        let _ = uc.reg_write(RegisterX86::EIP, saved_regs[0] as u64);
+    }
 
-        // 메인 스레드 레지스터 복원
-        let _ = uc.reg_write(RegisterX86::EIP, m_eip as u64);
-        let _ = uc.reg_write(RegisterX86::EAX, m_eax as u64);
-        let _ = uc.reg_write(RegisterX86::ECX, m_ecx as u64);
-        let _ = uc.reg_write(RegisterX86::EDX, m_edx as u64);
-        let _ = uc.reg_write(RegisterX86::EBX, m_ebx as u64);
-        let _ = uc.reg_write(RegisterX86::ESP, m_esp as u64);
-        let _ = uc.reg_write(RegisterX86::EBP, m_ebp as u64);
-        let _ = uc.reg_write(RegisterX86::ESI, m_esi as u64);
-        let _ = uc.reg_write(RegisterX86::EDI, m_edi as u64);
+    /// 현재 CPU 레지스터를 [EIP, EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI] 배열로 일괄 읽기
+    #[inline]
+    fn read_regs(uc: &mut Unicorn<Win32Context>) -> [u32; 9] {
+        [
+            uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::EBX).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::ESP).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::EBP).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32,
+            uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32,
+        ]
+    }
+
+    /// [EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI]를 일괄 기록 (EIP 제외)
+    #[inline]
+    fn write_regs(uc: &mut Unicorn<Win32Context>, r: [u32; 9]) {
+        // r[0] = EIP — 별도 처리 필요
+        let _ = uc.reg_write(RegisterX86::EAX, r[1] as u64);
+        let _ = uc.reg_write(RegisterX86::ECX, r[2] as u64);
+        let _ = uc.reg_write(RegisterX86::EDX, r[3] as u64);
+        let _ = uc.reg_write(RegisterX86::EBX, r[4] as u64);
+        let _ = uc.reg_write(RegisterX86::ESP, r[5] as u64);
+        let _ = uc.reg_write(RegisterX86::EBP, r[6] as u64);
+        let _ = uc.reg_write(RegisterX86::ESI, r[7] as u64);
+        let _ = uc.reg_write(RegisterX86::EDI, r[8] as u64);
     }
 
     // API: HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD)

@@ -13,6 +13,7 @@ mod ui;
 use dll::win32::LoadedDll;
 use helper::{SHARED_MEM_BASE, UnicornHelper};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
 use std::{
     any::Any,
@@ -23,6 +24,97 @@ use std::{
     sync::mpsc::{Receiver, Sender, channel},
     thread,
 };
+
+/// 실행 시 결정된 리소스 디렉토리 경로를 전역 캐시합니다.
+static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 리소스 디렉토리로 인정하기 위해 반드시 존재해야 하는 파일 목록입니다.
+const REQUIRED_RESOURCE_FILES: &[&str] = &[
+    "4Leaf.exe",
+    "4Leaf.dll",
+    "Core.dll",
+    "WinCore.dll",
+    "DNet.dll",
+    "Lime.dll",
+];
+
+/// 리소스 디렉토리를 동적으로 탐색하여 확정합니다.
+///
+/// 후보 디렉토리에 필수 파일이 모두 존재하는지 검증합니다.
+///
+/// 탐색 순서:
+/// - 실행 파일이 위치한 디렉토리
+/// - 실행 파일 기준 디렉토리
+/// - 현재 작업 디렉토리
+/// - ./Resources, ../4Leaf
+fn detect_resource_dir() {
+    let candidates: Vec<PathBuf> = {
+        let mut v = Vec::new();
+
+        // 실행 파일 위치 기준 후보
+        if let Ok(exe) = env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                v.push(exe_dir.to_path_buf());
+                v.push(exe_dir.join("Resources"));
+                v.push(exe_dir.join("../4Leaf"));
+            }
+        }
+
+        // 현재 작업 디렉토리 기준 후보
+        if let Ok(cwd) = env::current_dir() {
+            v.push(cwd.clone());
+            v.push(cwd.join("Resources"));
+            v.push(cwd.join("../4Leaf"));
+        } else {
+            v.push(PathBuf::from("./Resources"));
+            v.push(PathBuf::from("../4Leaf"));
+        }
+
+        v
+    };
+
+    for candidate in &candidates {
+        if !candidate.is_dir() {
+            continue;
+        }
+        let all_present = REQUIRED_RESOURCE_FILES
+            .iter()
+            .all(|f| candidate.join(f).is_file());
+        if all_present {
+            let resolved = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            eprintln!("[BOOT] Resource directory: {}", resolved.display());
+            let _ = RESOURCE_DIR.set(resolved);
+            return;
+        }
+    }
+
+    // fallback — 필수 파일이 없더라도 기존 동작을 유지
+    let fallback = PathBuf::from("./Resources");
+    let missing: Vec<&str> = REQUIRED_RESOURCE_FILES
+        .iter()
+        .filter(|f| !fallback.join(f).is_file())
+        .copied()
+        .collect();
+    if missing.is_empty() {
+        eprintln!("[BOOT] Resource directory (fallback): ./Resources");
+    } else {
+        eprintln!(
+            "[BOOT] Resource directory not found! Missing files: {}",
+            missing.join(", ")
+        );
+    }
+    let _ = RESOURCE_DIR.set(fallback);
+}
+
+/// 확정된 리소스 디렉토리 경로를 반환합니다.
+pub fn resource_dir() -> &'static Path {
+    RESOURCE_DIR
+        .get()
+        .map(|p| p.as_path())
+        .unwrap_or(Path::new("./Resources"))
+}
 
 const CAPTURE_DIR: &str = "./docs/Capture";
 
@@ -116,16 +208,31 @@ pub(crate) fn reset_capture_file(file_name: &str) {
         .open(path);
 }
 
+/// 캡처 파일의 버퍼드 핸들을 캐시하여 매번 open/close를 반복하지 않습니다.
+static CAPTURE_FILES: OnceLock<Mutex<HashMap<String, std::io::BufWriter<fs::File>>>> =
+    OnceLock::new();
+
 /// 캡처 디렉터리의 지정된 파일 끝에 한 줄을 추가합니다.
 pub(crate) fn append_capture_line(file_name: &str, line: &str) {
     if !should_write_capture_files() {
         return;
     }
 
-    let _ = fs::create_dir_all(CAPTURE_DIR);
-    let path = Path::new(CAPTURE_DIR).join(file_name);
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{}", line);
+    let map = CAPTURE_FILES.get_or_init(|| {
+        let _ = fs::create_dir_all(CAPTURE_DIR);
+        Mutex::new(HashMap::new())
+    });
+    if let Ok(mut files) = map.lock() {
+        let writer = files.entry(file_name.to_string()).or_insert_with(|| {
+            let path = Path::new(CAPTURE_DIR).join(file_name);
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .expect("Failed to open capture file");
+            std::io::BufWriter::new(file)
+        });
+        let _ = writeln!(writer, "{}", line);
     }
 }
 
@@ -203,8 +310,15 @@ use crate::ui::UiCommand;
 /// 어플리케이션 메인 진입점입니다.
 /// 하위 시스템(로그, 에뮬레이션, 서버, UI)들을 초기화하고 실행합니다.
 fn main() {
+    detect_resource_dir();
     init_logger();
-    append_capture_line("emu.log", "[BOOT] main() entered");
+    append_capture_line(
+        "emu.log",
+        &format!(
+            "[BOOT] main() entered (resources={})",
+            resource_dir().display()
+        ),
+    );
     let headless_mode = env::var("EMUL_HEADLESS").ok().as_deref() == Some("1");
     let debug_window_enabled = crate::debug::should_create_debug_window();
     append_capture_line(
@@ -259,7 +373,7 @@ fn main() {
 
     // 2. UI 렌더러 준비 (스플래시 화면 및 디버그 창)
     let mut initial_painters: Vec<Box<dyn ui::Painter>> = Vec::new();
-    if let Some((pixels, width, height)) = ui::splash::load_splash_data("./Resources") {
+    if let Some((pixels, width, height)) = ui::splash::load_splash_data(resource_dir()) {
         let splash_painter = ui::splash::SplashPainter {
             pixels,
             width,
@@ -314,7 +428,10 @@ fn emu_4leaf(
     unicorn.get_data().dll_modules.lock().unwrap().insert(
         "Rare.dll".to_string(),
         LoadedDll {
-            name: "Resources/Rare.dll".to_string(),
+            name: resource_dir()
+                .join("Rare.dll")
+                .to_string_lossy()
+                .to_string(),
             base_addr: 0x3400_0000,
             size: 0,
             entry_point: 0,
@@ -332,7 +449,7 @@ fn emu_4leaf(
     ];
 
     for (dll_name, target_base) in dll_list {
-        let filename = format!("Resources/{}", dll_name);
+        let filename = resource_dir().join(dll_name).to_string_lossy().to_string();
         append_capture_line(
             "emu.log",
             &format!("[BOOT] loading {} at {:#x}", dll_name, target_base),

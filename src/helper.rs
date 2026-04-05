@@ -550,97 +550,18 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         .map_err(|e| crate::emu_log!("[!] Failed to install API hook: {:?}", e))?;
         crate::append_capture_line("emu.log", "[SETUP] add fake import hook done");
 
-        // [5] 전역 코드 훅 (JIT 블록 비활성화 + EIP=0 보호)
-        // API 코드 훅에서 중첩 emu_start를 호출할 때 unicorn의 JIT 블록이 내부 상태를
-        // 손상시킬 수 있으므로, 전체 주소 범위에 코드 훅을 설치하여 인터프리터 모드로 강제합니다.
+        // [5] 전역 코드 훅 (JIT 비활성화 + EIP=0 보호)
+        // 가짜 import 훅 내부에서 schedule_threads(), dispatch_to_wndproc(), qsort 콜백 등이
+        // 중첩 emu_start를 호출합니다. Unicorn의 JIT 블록은 이 중첩 호출 시 내부 상태가
+        // 손상될 수 있으므로, 전체 주소 범위에 코드 훅을 설치하여 인터프리터 모드로 강제합니다.
+        //
+        // 성능 영향: 인터프리터 모드는 JIT 대비 느리지만, 이전 버전에 있던 디버그 트레이스
+        // 로깅(레지스터 읽기 + 문자열 포매팅)을 제거하여 명령어당 오버헤드를 최소화했습니다.
         crate::append_capture_line("emu.log", "[SETUP] add global code hook begin");
         self.add_code_hook(
             0,
             u64::MAX,
             |uc: &mut Unicorn<Win32Context>, addr, _size| {
-                if addr == 0x3100_23f4 {
-                    let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
-                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-                    let ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
-                    let edx = uc.reg_read(RegisterX86::EDX).unwrap_or(0) as u32;
-                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-                    let edi = uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32;
-                    let frame = (0..10)
-                        .map(|i| format!("{:#x}", uc.read_u32(esp + (i * 4))))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    crate::emu_log!(
-                        "[TRACE] WinCore::TWindow::Create callsite EIP=0x310023f4 ESP={:#x} EAX={:#x} ECX={:#x} EDX={:#x} ESI={:#x} EDI={:#x} STACK=[{}]",
-                        esp as u32,
-                        eax,
-                        ecx,
-                        edx,
-                        esi,
-                        edi,
-                        frame
-                    );
-                } else if addr == 0x3100_23fa {
-                    let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
-                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-                    let hwnd_field = if esi >= 0x2000_0000 {
-                        uc.read_u32(esi as u64 + 4)
-                    } else {
-                        0
-                    };
-                    crate::emu_log!(
-                        "[TRACE] WinCore::TWindow::Create return EIP=0x310023fa ESP={:#x} EAX={:#x} ESI={:#x} [ESI+4]={:#x}",
-                        esp as u32,
-                        eax,
-                        esi,
-                        hwnd_field
-                    );
-                } else if addr == 0x3100_242f {
-                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-                    let hwnd_field = if esi >= 0x2000_0000 {
-                        uc.read_u32(esi as u64 + 4)
-                    } else {
-                        0
-                    };
-                    crate::emu_log!(
-                        "[TRACE] WinCore::TWindow::Create compare branch EAX={:#x} ESI={:#x} [ESI+4]={:#x}",
-                        eax,
-                        esi,
-                        hwnd_field
-                    );
-                } else if addr == 0x3100_2434 {
-                    let eax = uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32;
-                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-                    let hwnd_field = if esi >= 0x2000_0000 {
-                        uc.read_u32(esi as u64 + 4)
-                    } else {
-                        0
-                    };
-                    crate::emu_log!(
-                        "[TRACE] WinCore::TWindow::Create throw path entered EAX={:#x} ESI={:#x} [ESI+4]={:#x}",
-                        eax,
-                        esi,
-                        hwnd_field
-                    );
-                } else if addr == 0x3100_4964 || addr == 0x3100_35d0 {
-                    let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
-                    let ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
-                    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-                    let frame = (0..10)
-                        .map(|i| format!("{:#x}", uc.read_u32(esp + (i * 4))))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    crate::emu_log!(
-                        "[TRACE] WinCore child create direct USER32 call EIP={:#x} ESP={:#x} ECX={:#x} ESI={:#x} STACK=[{}]",
-                        addr as u32,
-                        esp as u32,
-                        ecx,
-                        esi,
-                        frame
-                    );
-                }
-
                 if addr == 0 {
                     crate::emu_log!("[!] Execution at address 0x0 detected. Stopping.");
                     uc.emu_stop().unwrap_or_default();

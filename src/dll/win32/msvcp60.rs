@@ -447,7 +447,7 @@ impl MSVCP60 {
 
         let mut candidates = vec![raw_filename.to_string()];
         if !raw_filename.contains('/') && !raw_filename.contains('\\') {
-            candidates.insert(0, format!("Resources/{}", raw_filename));
+            candidates.insert(0, crate::resource_dir().join(raw_filename).to_string_lossy().to_string());
         }
 
         let want_read = mode == 0 || (mode & 0x01) != 0;

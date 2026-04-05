@@ -2,9 +2,8 @@ use std::thread;
 
 use goblin::pe::PE;
 
-pub fn load_splash_data(path: &str) -> Option<(Vec<u32>, u32, u32)> {
-    let dir = std::path::PathBuf::from(path);
-    let exe_path = dir.join("4Leaf.exe");
+pub fn load_splash_data(path: &std::path::Path) -> Option<(Vec<u32>, u32, u32)> {
+    let exe_path = path.join("4Leaf.exe");
 
     let buffer = match std::fs::read(&exe_path) {
         Ok(b) => b,

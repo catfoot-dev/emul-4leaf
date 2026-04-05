@@ -522,9 +522,9 @@ fn handle_main_frame(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
     }
 }
 
-/// `Resources/version.dat`의 패키지 버전을 읽습니다.
+/// `version.dat`의 패키지 버전을 읽습니다.
 fn read_local_package_version() -> u16 {
-    let Ok(text) = fs::read_to_string("Resources/version.dat") else {
+    let Ok(text) = fs::read_to_string(crate::resource_dir().join("version.dat")) else {
         return 54;
     };
 

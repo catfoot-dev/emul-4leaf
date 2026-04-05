@@ -7,6 +7,7 @@ use crate::{
     ui::gdi_renderer::GdiRenderer,
 };
 use encoding_rs::EUC_KR;
+use std::time::Instant;
 use unicorn_engine::{RegisterX86, Unicorn};
 
 /// `USER32.dll` 프록시 구현 모듈
@@ -1696,7 +1697,7 @@ impl USER32 {
         let filename = uc.read_string(lpfilename as u64);
         let ctx = uc.get_data();
 
-        let filename = format!("Resources/{}", filename);
+        let filename = crate::resource_dir().join(&filename).to_string_lossy().to_string();
         let mut frames = Vec::new();
         let mut is_animated = false;
 
@@ -3598,16 +3599,6 @@ impl USER32 {
             uc.write_u32(lp_msg as u64 + 24, m[6].max(pt_y)); // pt.y
             1
         } else {
-            // 일부 게스트 루프가 `PeekMessage`를 바쁘게 폴링하므로, 메시지가 전혀 없을 때는
-            // 메인 스레드 기준 아주 짧게 양보하여 호스트 CPU 점유율을 낮춥니다.
-            if uc
-                .get_data()
-                .current_thread_idx
-                .load(std::sync::atomic::Ordering::SeqCst)
-                == 0
-            {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
             0
         };
 
@@ -3659,32 +3650,15 @@ impl USER32 {
             q.pop_front()
         };
 
-        // 메시지가 없으면 타 스레드에게 기회를 준 뒤 재시도 (GetMessage는 블로킹 API)
+        // 메시지가 없으면 retry를 반환하여 에뮬레이터 메인 루프에 양보합니다.
+        // 메인 루프가 schedule_threads() 호출 및 idle sleep을 처리하므로
+        // 여기서 직접 sleep/polling 할 필요가 없습니다.
         if msg.is_none() {
-            KERNEL32::schedule_threads(uc);
-            // 재귀 호출 대신 루프로 구현하는 것이 좋으나, Unicorn 환경에서는 루프 내에서 emu_stop/start 제어가 복잡하므로
-            // 현재는 1회 스케줄링 후 메시지가 여전히 없으면 WM_NULL을 반환하거나 짧게 대기합니다.
-            // 여기서는 안정성을 위해 10ms 대기 후 다시 큐를 확인합니다.
-            let mut retry_count = 0;
-            let mut final_msg = msg;
-            while final_msg.is_none() && retry_count < 5 {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                KERNEL32::schedule_threads(uc);
-                final_msg = {
-                    let ctx = uc.get_data();
-                    let mut q = ctx.message_queue.lock().unwrap();
-                    q.pop_front()
-                };
-                retry_count += 1;
-            }
-
-            if let Some(m) = final_msg {
-                for i in 0..7 {
-                    uc.write_u32(lp_msg as u64 + (i * 4) as u64, m[i as usize]);
-                }
-                let is_quit = m[1] == 0x0012;
-                return Some(ApiHookResult::callee(4, Some(if is_quit { 0 } else { 1 })));
-            }
+            // 메인 스레드가 idle 상태임을 표시하여 메인 루프의 idle sleep이 작동하도록 합니다.
+            let ctx = uc.get_data();
+            let resume = Instant::now() + std::time::Duration::from_millis(10);
+            *ctx.main_resume_time.lock().unwrap() = Some(resume);
+            return Some(ApiHookResult::retry());
         }
 
         if let Some(m) = msg {

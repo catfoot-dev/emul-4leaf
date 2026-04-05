@@ -254,6 +254,8 @@ impl WinFrame {
                         hwnd,
                         surface_bitmap,
                         emu_context: self.emu_context.clone(),
+                        cached_windows: HashMap::new(),
+                        cached_generation: u64::MAX, // 첫 paint에서 반드시 갱신되도록
                     };
                     self.painters.insert(id, Box::new(painter));
                     let context = self
@@ -649,11 +651,24 @@ impl ApplicationHandler<()> for WinFrame {
                         .load(std::sync::atomic::Ordering::SeqCst);
                     let mut q = self.emu_context.message_queue.lock().unwrap();
 
+                    // 단일 패스로 WM_SETCURSOR(0x0020)와 WM_MOUSEMOVE(0x0200) 인덱스를 동시에 탐색
+                    let mut setcursor_idx = None;
+                    let mut mousemove_idx = None;
+                    for (i, m) in q.iter().enumerate() {
+                        if m[0] == hwnd {
+                            if m[1] == 0x0020 && setcursor_idx.is_none() {
+                                setcursor_idx = Some(i);
+                            } else if m[1] == 0x0200 && mousemove_idx.is_none() {
+                                mousemove_idx = Some(i);
+                            }
+                            if setcursor_idx.is_some() && mousemove_idx.is_some() {
+                                break;
+                            }
+                        }
+                    }
+
                     if capture_hwnd == 0 {
                         let setcursor_lparam = (0x0200u32 << 16) | 0x0001; // WM_MOUSEMOVE | HTCLIENT
-                        let setcursor_idx = q.iter().position(|m| m[0] == hwnd && m[1] == 0x0020);
-                        let mousemove_idx = q.iter().position(|m| m[0] == hwnd && m[1] == 0x0200);
-
                         if let Some(idx) = setcursor_idx {
                             if let Some(message) = q.get_mut(idx) {
                                 message[2] = hwnd;
@@ -667,6 +682,8 @@ impl ApplicationHandler<()> for WinFrame {
                                 [hwnd, 0x0020, hwnd, setcursor_lparam, time, x, y];
                             if let Some(idx) = mousemove_idx {
                                 q.insert(idx, setcursor_message);
+                                // insert가 mousemove_idx를 1칸 밀었으므로 보정
+                                mousemove_idx = mousemove_idx.map(|i| i + 1);
                             } else {
                                 q.push_back(setcursor_message);
                             }
@@ -674,7 +691,7 @@ impl ApplicationHandler<()> for WinFrame {
                     }
 
                     // WM_MOUSEMOVE(0x0200) 중복 제거: 이미 큐에 있으면 위치만 업데이트
-                    if let Some(idx) = q.iter().position(|m| m[0] == hwnd && m[1] == 0x0200) {
+                    if let Some(idx) = mousemove_idx {
                         if let Some(message) = q.get_mut(idx) {
                             message[3] = lparam;
                             message[4] = time;
@@ -687,7 +704,7 @@ impl ApplicationHandler<()> for WinFrame {
 
                     // 마우스 트래킹 (TrackMouseEvent) 처리
                     let mut track_opt = self.emu_context.track_mouse_event.lock().unwrap();
-                    if let Some(track) = track_opt.clone() {
+                    if let Some(track) = track_opt.as_ref() {
                         if track.hwnd != hwnd && (track.flags & 0x00000002 != 0) {
                             let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                             q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
@@ -826,6 +843,9 @@ pub struct DefaultEmulatorPainter {
     hwnd: u32,
     surface_bitmap: u32,
     emu_context: Win32Context,
+    /// 캐시된 윈도우 스냅샷 및 세대 카운터 (변경 시에만 재복제)
+    cached_windows: HashMap<u32, crate::dll::win32::WindowState>,
+    cached_generation: u64,
 }
 
 impl DefaultEmulatorPainter {
@@ -875,12 +895,14 @@ impl DefaultEmulatorPainter {
     }
 
     /// 루트 창과 모든 자식 창 표면을 하나의 호스트 버퍼로 합성합니다.
+    /// gdi_objects 락을 한 번만 잡고 재귀 전체에서 재사용합니다.
     fn composite_window_tree(
         &self,
         buffer: &mut [u32],
         buffer_width: u32,
         buffer_height: u32,
         windows: &HashMap<u32, crate::dll::win32::WindowState>,
+        gdi_objects: &HashMap<u32, GdiObject>,
         hwnd: u32,
         dest_x: i32,
         dest_y: i32,
@@ -894,25 +916,19 @@ impl DefaultEmulatorPainter {
             return;
         }
 
-        let bitmap = {
-            let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            gdi_objects.get(&state.surface_bitmap).and_then(|obj| {
-                if let GdiObject::Bitmap {
-                    pixels,
-                    width,
-                    height,
-                    ..
-                } = obj
-                {
-                    Some((pixels.clone(), *width, *height))
-                } else {
-                    None
-                }
-            })
-        };
+        let bitmap = gdi_objects.get(&state.surface_bitmap).and_then(|obj| {
+            if let GdiObject::Bitmap {
+                pixels,
+                width,
+                height,
+                ..
+            } = obj
+            {
+                Some((pixels.clone(), *width, *height))
+            } else {
+                None
+            }
+        });
 
         if let Some((pixels, src_width, src_height)) = bitmap {
             let pixels = pixels.lock().unwrap();
@@ -933,7 +949,6 @@ impl DefaultEmulatorPainter {
                 continue;
             };
 
-            // 자식 좌표는 부모 클라이언트 기준이므로 누적 오프셋을 계산해 합성합니다.
             let child_x = if is_root {
                 child_state.x
             } else {
@@ -950,6 +965,7 @@ impl DefaultEmulatorPainter {
                 buffer_width,
                 buffer_height,
                 windows,
+                gdi_objects,
                 child_hwnd,
                 child_x,
                 child_y,
@@ -972,23 +988,27 @@ impl Painter for DefaultEmulatorPainter {
     }
 
     fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) -> bool {
-        let windows = {
+        // 세대 카운터가 변경된 경우에만 윈도우 상태를 재복제합니다.
+        {
             let win_event = match self.emu_context.win_event.try_lock() {
                 Ok(event) => event,
                 Err(_) => return false,
             };
-            win_event.windows.clone()
-        };
-
-        if windows.contains_key(&self.hwnd) {
-            self.composite_window_tree(buffer, width, height, &windows, self.hwnd, 0, 0, true);
-            return true;
+            if win_event.generation != self.cached_generation {
+                self.cached_windows = win_event.windows.clone();
+                self.cached_generation = win_event.generation;
+            }
         }
 
         let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
             Ok(g) => g,
-            Err(_) => return false, // 락 획득 실패 시 이번 프레임은 건너뜀 (데드락 방지)
+            Err(_) => return false, // 락 획��� 실패 시 이번 프레임은 건너뜀 (데드락 방지)
         };
+
+        if self.cached_windows.contains_key(&self.hwnd) {
+            self.composite_window_tree(buffer, width, height, &self.cached_windows, &gdi_objects, self.hwnd, 0, 0, true);
+            return true;
+        }
 
         if let Some(GdiObject::Bitmap {
             pixels: p,
