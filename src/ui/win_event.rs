@@ -338,4 +338,9 @@ impl WinEvent {
             ex_style: state.ex_style,
         });
     }
+
+    /// 윈도우 드래그 모드를 시작합니다.
+    pub fn drag_window(&mut self, hwnd: u32) {
+        self.send_ui_command(UiCommand::DragWindow { hwnd });
+    }
 }

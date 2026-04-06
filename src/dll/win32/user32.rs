@@ -3103,6 +3103,12 @@ impl USER32 {
         let _l_param = uc.read_arg(3);
         let default_ret = match msg {
             0x0081 => 1, // WM_NCCREATE
+            0x00A1 => {  // WM_NCLBUTTONDOWN
+                if _w_param == 2 { // HTCAPTION
+                    uc.get_data().win_event.lock().unwrap().drag_window(hwnd);
+                }
+                0
+            }
             0x0020 => {
                 let ctx = uc.get_data();
                 let class_cursor = {
@@ -3603,7 +3609,33 @@ impl USER32 {
             (time, x, y)
         };
 
-        let ret = if let Some(m) = msg {
+        let ret = if let Some(mut m) = msg {
+            if m[1] >= 0x0200 && m[1] <= 0x0209 {
+                let hwnd = m[0];
+                let wnd_proc = {
+                    let ctx = uc.get_data();
+                    let win_event = ctx.win_event.lock().unwrap();
+                    win_event.windows.get(&hwnd).map(|w| w.wnd_proc).unwrap_or(0)
+                };
+                if wnd_proc != 0 {
+                    let (win_x, win_y) = {
+                        let ctx = uc.get_data();
+                        let win_event = ctx.win_event.lock().unwrap();
+                        win_event.windows.get(&hwnd).map(|w| (w.x, w.y)).unwrap_or((0, 0))
+                    };
+                    let screen_x = (m[5] as i32) + win_x;
+                    let screen_y = (m[6] as i32) + win_y;
+                    let screen_lparam = ((screen_y as u32) << 16) | ((screen_x as u32) & 0xFFFF);
+                    
+                    let hit_test = Self::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0084, 0, screen_lparam);
+                    if hit_test != 1 && hit_test != 0 {
+                        m[1] = m[1] - 0x0200 + 0x00A0;
+                        m[2] = hit_test as u32;
+                        m[3] = screen_lparam;
+                    }
+                }
+            }
+
             // MSG 구조체 채우기
             uc.write_u32(lp_msg as u64 + 0, m[0]); // hwnd
             uc.write_u32(lp_msg as u64 + 4, m[1]); // message
@@ -3676,7 +3708,33 @@ impl USER32 {
             return Some(ApiHookResult::retry());
         }
 
-        if let Some(m) = msg {
+        if let Some(mut m) = msg {
+            if m[1] >= 0x0200 && m[1] <= 0x0209 {
+                let hwnd = m[0];
+                let wnd_proc = {
+                    let ctx = uc.get_data();
+                    let win_event = ctx.win_event.lock().unwrap();
+                    win_event.windows.get(&hwnd).map(|w| w.wnd_proc).unwrap_or(0)
+                };
+                if wnd_proc != 0 {
+                    let (win_x, win_y) = {
+                        let ctx = uc.get_data();
+                        let win_event = ctx.win_event.lock().unwrap();
+                        win_event.windows.get(&hwnd).map(|w| (w.x, w.y)).unwrap_or((0, 0))
+                    };
+                    let screen_x = (m[5] as i32) + win_x;
+                    let screen_y = (m[6] as i32) + win_y;
+                    let screen_lparam = ((screen_y as u32) << 16) | ((screen_x as u32) & 0xFFFF);
+                    
+                    let hit_test = Self::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0084, 0, screen_lparam);
+                    if hit_test != 1 && hit_test != 0 {
+                        m[1] = m[1] - 0x0200 + 0x00A0;
+                        m[2] = hit_test as u32;
+                        m[3] = screen_lparam;
+                    }
+                }
+            }
+
             for i in 0..7 {
                 uc.write_u32(lp_msg as u64 + (i * 4) as u64, m[i as usize]);
             }

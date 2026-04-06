@@ -74,6 +74,8 @@ pub enum UiCommand {
     },
     /// 윈도우 커서 변경 요청
     SetCursor { hwnd: u32, hcursor: u32 },
+    /// 윈도우 드래그 시작 요청
+    DragWindow { hwnd: u32 },
 }
 
 /// 윈도우 콘텐츠를 그리는 인터페이스

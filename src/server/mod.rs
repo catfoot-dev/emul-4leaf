@@ -36,6 +36,45 @@ struct RawStagePacket {
     payload: Vec<u8>,
 }
 
+// =========================================================
+// 게임 상태 (인메모리 유저 DB 및 세션)
+// =========================================================
+
+struct UserRecord {
+    password: Vec<u8>, // EUC-KR raw bytes
+}
+
+struct SessionInfo {
+    user_id: String,
+    nickname: Vec<u8>, // EUC-KR, max 22 bytes
+    character: u8,
+    gp: u32,
+    fp: u32,
+}
+
+struct GameState {
+    users: HashMap<String, UserRecord>,
+    session: Option<SessionInfo>,
+    client_version_code: u32,
+}
+
+impl GameState {
+    fn new() -> Self {
+        let mut users = HashMap::new();
+        users.insert(
+            "test".to_string(),
+            UserRecord {
+                password: b"test".to_vec(),
+            },
+        );
+        GameState {
+            users,
+            session: None,
+            client_version_code: 0x400d04e0,
+        }
+    }
+}
+
 fn phase_label(phase: ChannelPhase) -> &'static str {
     match phase {
         ChannelPhase::OpenAccepted => "open-accepted",
@@ -99,12 +138,96 @@ fn should_parse_as_raw_stage_packet(
         && is_stage_channel(channel_id)
 }
 
+/// 버전 코드를 ProtocolPacket의 main_type/sub_type/payload에서 재구성합니다.
+fn extract_version_code(pkt: &ProtocolPacket) -> u32 {
+    let mut bytes = [0u8; 4];
+    bytes[0] = pkt.main_type;
+    bytes[1] = pkt.sub_type;
+    if pkt.payload.len() >= 2 {
+        bytes[2] = pkt.payload[0];
+        bytes[3] = pkt.payload[1];
+    }
+    u32::from_le_bytes(bytes)
+}
+
+/// payload에서 control 필드를 추출합니다 (offset 2..6).
+fn extract_control(payload: &[u8]) -> Option<u32> {
+    if payload.len() < 6 {
+        return None;
+    }
+    Some(u32::from_le_bytes(
+        payload[2..6].try_into().unwrap_or([0; 4]),
+    ))
+}
+
+/// 에이전트 프로토콜 응답 패킷을 생성합니다.
+///
+/// Wire: `[ch:u16][body_len:u16][version_code:u32 LE][control:u32 LE][data...]`
+fn build_agent_response(ch: u16, version_code: u32, control: u32, data: &[u8]) -> Vec<u8> {
+    let vc = version_code.to_le_bytes();
+    let mut payload = Vec::with_capacity(2 + 4 + data.len());
+    payload.extend_from_slice(&vc[2..4]);
+    payload.extend_from_slice(&control.to_le_bytes());
+    payload.extend_from_slice(data);
+    protocol::create_app_packet(ch, vc[0], vc[1], &payload)
+}
+
+/// null-terminated 바이트 배열에서 문자열을 추출합니다.
+fn extract_null_terminated_string(data: &[u8]) -> String {
+    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    String::from_utf8_lossy(&data[..end]).to_string()
+}
+
+/// 아바타 상세정보 바이트를 빌드합니다.
+///
+/// 포맷: `<character>.1b <nick>.22b 00*5 <equip>.short*16 00*24`
+///       `<knights>.24b <gp>.long <fp>.long 00*16`
+///       `(<inventory_item_code><inventory_item_type>).4b*35`
+fn build_avatar_detail_data(session: &SessionInfo) -> Vec<u8> {
+    let mut data = Vec::with_capacity(272);
+
+    // character (1 byte)
+    data.push(session.character);
+
+    // nickname (22 bytes, null-padded)
+    let mut nick = [0u8; 22];
+    let len = session.nickname.len().min(22);
+    nick[..len].copy_from_slice(&session.nickname[..len]);
+    data.extend_from_slice(&nick);
+
+    // padding (5 bytes)
+    data.extend_from_slice(&[0u8; 5]);
+
+    // equip (16 * u16 = 32 bytes)
+    data.extend_from_slice(&[0u8; 32]);
+
+    // padding (24 bytes)
+    data.extend_from_slice(&[0u8; 24]);
+
+    // knights name (24 bytes)
+    data.extend_from_slice(&[0u8; 24]);
+
+    // GP (4 bytes)
+    data.extend_from_slice(&session.gp.to_le_bytes());
+
+    // FP (4 bytes)
+    data.extend_from_slice(&session.fp.to_le_bytes());
+
+    // padding (16 bytes)
+    data.extend_from_slice(&[0u8; 16]);
+
+    // inventory (35 items * 4 bytes = 140 bytes)
+    data.extend_from_slice(&[0u8; 140]);
+
+    data
+}
+
 fn build_stage_open_acceptance_responses(channel_id: u16) -> Vec<Vec<u8>> {
     let mut responses = vec![protocol::create_control_message(
         protocol::CTRL_OPEN_OK,
         channel_id,
     )];
-    if channel_id == 3 {
+    if channel_id == 2 || channel_id == 3 {
         responses.push(build_provisional_worldmap_stage_bootstrap_response(
             channel_id,
         ));
@@ -126,6 +249,7 @@ pub fn run_dnet_handler(
     let mut byte_buf: Vec<u8> = Vec::new();
     let mut open_channels: HashSet<u16> = HashSet::new();
     let mut analysis_states: HashMap<u16, ChannelAnalysisState> = HashMap::new();
+    let mut game_state = GameState::new();
 
     loop {
         // 데이터가 올 때까지 블로킹 대기
@@ -394,8 +518,11 @@ pub fn run_dnet_handler(
 
                     let previous_phase = analysis_states.get(&channel_id).map(|state| state.phase);
                     let outcome = match pkt.main_type {
-                        0xE0 => handle_main_frame(&pkt, channel_id),
-                        0x64 => handle_system(&pkt, channel_id),
+                        0xE0 | 0x60 => {
+                            handle_main_frame(&pkt, channel_id, &mut game_state)
+                        }
+                        0x64 => handle_system(&pkt, channel_id, &mut game_state),
+                        0x0A => handle_world_map(&pkt, channel_id),
                         0x0B => handle_chat_town_main(&pkt, channel_id),
                         0x0C => handle_chat_town_sub(&pkt, channel_id),
                         other => {
@@ -487,19 +614,68 @@ pub fn run_dnet_handler(
 // MainType별 핸들러
 // =========================================================
 
-/// MainType 0xE0 — 메인 프레임 초기 채널 메시지를 임시 처리합니다.
-fn handle_main_frame(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
+/// MainType 0xE0/0x60 — 메인 프레임 채널 메시지를 처리합니다.
+///
+/// 본문 구조: `[version_code:u32 LE][control:u32 LE][data...]`
+/// ProtocolPacket 파싱 후: main=vc[0], sub=vc[1], payload=[vc[2..4], control[4], data...]
+fn handle_main_frame(
+    pkt: &ProtocolPacket,
+    ch: u16,
+    state: &mut GameState,
+) -> HandlerOutcome {
     match pkt.sub_type {
-        0x04 => {
-            // 정적 분석상 `DMainFrame::OnReceived`는 `Version.dat`를 읽어 서버 값과 비교합니다.
-            let response = build_provisional_main_frame_bootstrap_response(pkt, ch);
-            HandlerOutcome {
-                responses: vec![response],
-                phase_update: Some(ChannelPhase::BootstrapVersionSent),
-                analysis_note: Some(format!(
-                    "bootstrap responded with raw msg=0(version={}, trailing operator-line text stub); client-side custom message 4/8/6 are internal events posted after OPEN_OK / data receive / CLOSE",
-                    read_local_package_version()
-                )),
+        0x04 | 0x05 => {
+            // 클라이언트 버전 코드를 캡처합니다
+            state.client_version_code = extract_version_code(pkt);
+
+            // control 필드에 따라 분기합니다
+            match extract_control(&pkt.payload) {
+                Some(0) => {
+                    // 초기 부트스트랩 (버전 + 공지)
+                    let response =
+                        build_provisional_main_frame_bootstrap_response(pkt, ch);
+                    HandlerOutcome {
+                        responses: vec![response],
+                        phase_update: Some(ChannelPhase::BootstrapVersionSent),
+                        analysis_note: Some(format!(
+                            "bootstrap responded with raw msg=0(version={})",
+                            read_local_package_version()
+                        )),
+                    }
+                }
+                Some(3) => handle_registration_request(ch, state),
+                Some(4) => handle_id_check(pkt, ch, state),
+                Some(5) => handle_registration_submit(pkt, ch, state),
+                Some(7) => handle_avatar_selection(pkt, ch, state),
+                Some(9) => handle_logout(ch, state),
+                Some(control) => {
+                    crate::emu_socket_log!(
+                        "[MainFrame] 미구현 control={} payload={}",
+                        control,
+                        hex::encode(&pkt.payload)
+                    );
+                    HandlerOutcome {
+                        responses: Vec::new(),
+                        phase_update: None,
+                        analysis_note: Some(format!(
+                            "unhandled main-frame control={} payload={}B",
+                            control,
+                            pkt.payload.len()
+                        )),
+                    }
+                }
+                None => {
+                    // payload가 너무 짧으면 부트스트랩으로 처리
+                    let response =
+                        build_provisional_main_frame_bootstrap_response(pkt, ch);
+                    HandlerOutcome {
+                        responses: vec![response],
+                        phase_update: Some(ChannelPhase::BootstrapVersionSent),
+                        analysis_note: Some(
+                            "bootstrap (short payload fallback)".to_string(),
+                        ),
+                    }
+                }
             }
         }
         sub => {
@@ -584,7 +760,11 @@ fn build_provisional_worldmap_stage_bootstrap_response(ch: u16) -> Vec<u8> {
 }
 
 /// MainType 0x64 — 공통 시스템 메시지 (버전 핸드셰이크, 로그인 등)를 처리합니다.
-fn handle_system(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
+fn handle_system(
+    pkt: &ProtocolPacket,
+    ch: u16,
+    state: &mut GameState,
+) -> HandlerOutcome {
     match pkt.sub_type {
         0x01 => {
             // 버전 확인 요청 → 프로토콜 버전 54로 응답
@@ -598,14 +778,42 @@ fn handle_system(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
             }
         }
         0x02 => {
-            // 로그인 요청 → result=0 (성공) 응답
-            crate::emu_socket_log!("[SYS] 로그인 요청 → 성공 응답");
-            let mut payload = Vec::new();
-            payload.extend_from_slice(&protocol::write_u32(0));
+            // 로그인 요청: 세션을 생성하고 아바타 상세정보를 전송합니다
+            crate::emu_socket_log!("[SYS] 로그인 요청 수신");
+
+            // payload에서 ID를 추출합니다 (있으면)
+            let user_id = if !pkt.payload.is_empty() {
+                extract_null_terminated_string(&pkt.payload)
+            } else {
+                "test".to_string()
+            };
+
+            crate::emu_socket_log!("[SYS] 로그인 ID={}", user_id);
+
+            // 세션 생성 (모든 로그인을 수락합니다)
+            let nickname = if user_id.len() > 22 {
+                user_id[..22].as_bytes().to_vec()
+            } else {
+                user_id.as_bytes().to_vec()
+            };
+            state.session = Some(SessionInfo {
+                user_id: user_id.clone(),
+                nickname,
+                character: 0,
+                gp: 1000,
+                fp: 0,
+            });
+
+            // 로그인 성공 응답 (result=0)
+            let mut responses = Vec::new();
+            let mut login_payload = Vec::new();
+            login_payload.extend_from_slice(&protocol::write_u32(0));
+            responses.push(protocol::create_app_packet(ch, 0x64, 0x02, &login_payload));
+
             HandlerOutcome {
-                responses: vec![protocol::create_app_packet(ch, 0x64, 0x02, &payload)],
+                responses,
                 phase_update: Some(ChannelPhase::LoginAccepted),
-                analysis_note: Some("login request acknowledged with success".to_string()),
+                analysis_note: Some(format!("login accepted for user={}", user_id)),
             }
         }
         sub => {
@@ -625,6 +833,193 @@ fn handle_system(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
                 )),
             }
         }
+    }
+}
+
+// =========================================================
+// 회원가입 핸들러
+// =========================================================
+
+/// control=3 — 가입 요청: 가입 안내 메시지를 회신합니다.
+fn handle_registration_request(ch: u16, state: &GameState) -> HandlerOutcome {
+    crate::emu_socket_log!("[REG] 가입 요청 수신 → 가입 안내 메시지 송신");
+    // 가입 안내 메시지를 control=0으로 응답
+    let join_msg = b"Welcome to 4Leaf Server!\r\n\0";
+    let response = build_agent_response(ch, state.client_version_code, 0, join_msg);
+    HandlerOutcome {
+        responses: vec![response],
+        phase_update: None,
+        analysis_note: Some("registration request → join message sent".to_string()),
+    }
+}
+
+/// control=4 — 아이디 중복 확인: 사용 가능 여부를 회신합니다.
+///
+/// 요청 payload: `[version_hi:2][control=4:u32][id_data...]`
+/// 응답: `[version_code:u32][control=1:u32][result:u32]` (12=가능, 0=사용중)
+fn handle_id_check(pkt: &ProtocolPacket, ch: u16, state: &GameState) -> HandlerOutcome {
+    // payload[6..] 에서 ID를 추출합니다
+    let id = if pkt.payload.len() > 6 {
+        extract_null_terminated_string(&pkt.payload[6..])
+    } else {
+        String::new()
+    };
+
+    let available = !id.is_empty() && !state.users.contains_key(&id);
+    let result: u32 = if available { 12 } else { 0 };
+
+    crate::emu_socket_log!(
+        "[REG] 아이디 중복 확인: id={} available={}",
+        id,
+        available
+    );
+
+    let response = build_agent_response(
+        ch,
+        state.client_version_code,
+        1,
+        &result.to_le_bytes(),
+    );
+    HandlerOutcome {
+        responses: vec![response],
+        phase_update: None,
+        analysis_note: Some(format!("id-check id={} result={}", id, result)),
+    }
+}
+
+/// control=5 — 가입 정보 수신: 유저를 DB에 등록합니다.
+///
+/// 요청 payload: `[version_hi:2][control=5:u32][id:16b][unknown:20b][pass:16b][...]`
+fn handle_registration_submit(
+    pkt: &ProtocolPacket,
+    ch: u16,
+    state: &mut GameState,
+) -> HandlerOutcome {
+    let base = 6; // version_hi(2) + control(4) 이후
+    if pkt.payload.len() < base + 52 {
+        crate::emu_socket_log!("[REG] 가입 정보 패킷이 너무 짧음");
+        return HandlerOutcome {
+            responses: Vec::new(),
+            phase_update: None,
+            analysis_note: Some("registration submit too short".to_string()),
+        };
+    }
+
+    let id = extract_null_terminated_string(&pkt.payload[base..base + 16]);
+    let pass = pkt.payload[base + 36..base + 52].to_vec();
+
+    crate::emu_socket_log!("[REG] 가입 처리: id={}", id);
+
+    state
+        .users
+        .insert(id.clone(), UserRecord { password: pass });
+
+    // 가입 완료 메시지를 control=0으로 응답
+    let msg = b"Registration complete!\r\n\0";
+    let response = build_agent_response(ch, state.client_version_code, 0, msg);
+    HandlerOutcome {
+        responses: vec![response],
+        phase_update: None,
+        analysis_note: Some(format!("registration complete id={}", id)),
+    }
+}
+
+// =========================================================
+// 아바타 및 로그인 후 핸들러
+// =========================================================
+
+/// control=7 — 아바타 선택: 아바타 상세정보를 회신합니다.
+///
+/// 요청 payload: `[version_hi:2][control=7:u32][avatar_index:u8]`
+/// 응답: control=0 아바타 상세정보 + control=6 방문수당
+fn handle_avatar_selection(
+    pkt: &ProtocolPacket,
+    ch: u16,
+    state: &mut GameState,
+) -> HandlerOutcome {
+    let avatar_index = pkt.payload.get(6).copied().unwrap_or(0);
+    crate::emu_socket_log!("[AVATAR] 아바타 선택: index={}", avatar_index);
+
+    // 세션에 아바타 정보를 설정합니다
+    if let Some(ref mut session) = state.session {
+        session.character = avatar_index;
+    }
+
+    let mut responses = Vec::new();
+
+    // 아바타 상세정보 응답 (control=0)
+    if let Some(ref session) = state.session {
+        let detail = build_avatar_detail_data(session);
+        responses.push(build_agent_response(
+            ch,
+            state.client_version_code,
+            0,
+            &detail,
+        ));
+    }
+
+    // 방문수당 응답 (control=6): [0:u32][visit_gp:u32][0:u32]
+    let mut visit_data = Vec::new();
+    visit_data.extend_from_slice(&0u32.to_le_bytes());
+    visit_data.extend_from_slice(&100u32.to_le_bytes()); // 방문수당 100 GP
+    visit_data.extend_from_slice(&0u32.to_le_bytes());
+    responses.push(build_agent_response(
+        ch,
+        state.client_version_code,
+        6,
+        &visit_data,
+    ));
+
+    HandlerOutcome {
+        responses,
+        phase_update: None,
+        analysis_note: Some(format!("avatar selected index={}", avatar_index)),
+    }
+}
+
+/// control=9 — 종료: 이용시간/GP 정산 후 채널을 닫습니다.
+fn handle_logout(ch: u16, state: &mut GameState) -> HandlerOutcome {
+    crate::emu_socket_log!("[LOGOUT] 종료 정산 처리");
+
+    state.session = None;
+
+    // 종료 신호 (채널 닫기 시퀀스)
+    let responses = vec![
+        protocol::create_control_message(protocol::CTRL_CLOSE, ch),
+    ];
+
+    HandlerOutcome {
+        responses,
+        phase_update: None,
+        analysis_note: Some("logout settlement processed".to_string()),
+    }
+}
+
+// =========================================================
+// 월드맵 핸들러
+// =========================================================
+
+/// 월드맵 채널(0x0a) 데이터를 처리합니다.
+///
+/// 공통 포맷: `[control_type:u32 LE][message...]`
+fn handle_world_map(pkt: &ProtocolPacket, _ch: u16) -> HandlerOutcome {
+    crate::emu_socket_log!(
+        "[WorldMap] sub=0x{:02x} payload={}B",
+        pkt.sub_type,
+        pkt.payload.len()
+    );
+
+    // 월드맵 응답: 현재는 수신 확인만 합니다
+    // 클라이언트가 구역 이동을 요청하면 해당 구역의 유저 리스트 등을 응답해야 합니다
+    HandlerOutcome {
+        responses: Vec::new(),
+        phase_update: None,
+        analysis_note: Some(format!(
+            "world-map sub=0x{:02x} payload={}B {}",
+            pkt.sub_type,
+            pkt.payload.len(),
+            hex::encode(&pkt.payload)
+        )),
     }
 }
 
@@ -960,5 +1355,198 @@ mod tests {
             &states,
             &[0x08, 0x00, 0x00, 0x00]
         ));
+    }
+
+    // =========================================================
+    // 게임 상태 및 신규 핸들러 테스트
+    // =========================================================
+
+    #[test]
+    fn extract_version_code_reconstructs_original_value() {
+        let pkt = ProtocolPacket {
+            main_type: 0xe0,
+            sub_type: 0x04,
+            payload: vec![0x0d, 0x40, 0x00, 0x00, 0x00, 0x00],
+        };
+        assert_eq!(extract_version_code(&pkt), 0x400d04e0);
+    }
+
+    #[test]
+    fn extract_control_parses_from_payload_offset_two() {
+        // payload: [version_hi:2][control:4] = [0x0d, 0x40, 0x03, 0x00, 0x00, 0x00]
+        let payload = vec![0x0d, 0x40, 0x03, 0x00, 0x00, 0x00];
+        assert_eq!(extract_control(&payload), Some(3));
+    }
+
+    #[test]
+    fn extract_control_returns_none_for_short_payload() {
+        assert_eq!(extract_control(&[0x0d, 0x40, 0x03]), None);
+    }
+
+    #[test]
+    fn build_agent_response_produces_correct_wire_format() {
+        let wire = build_agent_response(1, 0x400d04e0, 3, &[0xaa]);
+        // Expected: [ch=1:u16][body_len:u16][0xe0][0x04][0x0d][0x40][03 00 00 00][0xaa]
+        let header = &wire[..4];
+        assert_eq!(header[0..2], [0x01, 0x00]); // channel 1
+        let body = &wire[4..];
+        assert_eq!(body[0], 0xe0); // main_type
+        assert_eq!(body[1], 0x04); // sub_type
+        assert_eq!(body[2..4], [0x0d, 0x40]); // version_hi
+        assert_eq!(body[4..8], [0x03, 0x00, 0x00, 0x00]); // control=3
+        assert_eq!(body[8], 0xaa); // data
+    }
+
+    #[test]
+    fn registration_request_returns_join_message() {
+        let state = GameState::new();
+        let outcome = handle_registration_request(1, &state);
+        assert_eq!(outcome.responses.len(), 1);
+        // 응답은 control=0이어야 합니다
+        let resp = &outcome.responses[0];
+        let body = &resp[4..];
+        // control at offset 4..8
+        let control = u32::from_le_bytes(body[4..8].try_into().unwrap());
+        assert_eq!(control, 0);
+    }
+
+    #[test]
+    fn id_check_reports_available_for_new_id() {
+        let state = GameState::new();
+        // control=4, id="newuser\0" after version_hi + control
+        let mut payload = vec![0x0d, 0x40, 0x04, 0x00, 0x00, 0x00];
+        payload.extend_from_slice(b"newuser\0");
+        let pkt = ProtocolPacket {
+            main_type: 0xe0,
+            sub_type: 0x04,
+            payload,
+        };
+        let outcome = handle_id_check(&pkt, 1, &state);
+        assert_eq!(outcome.responses.len(), 1);
+        // 응답에서 result=12 (사용 가능)를 확인
+        let resp = &outcome.responses[0];
+        let body = &resp[4..];
+        let result = u32::from_le_bytes(body[8..12].try_into().unwrap());
+        assert_eq!(result, 12);
+    }
+
+    #[test]
+    fn id_check_reports_taken_for_existing_id() {
+        let state = GameState::new();
+        let mut payload = vec![0x0d, 0x40, 0x04, 0x00, 0x00, 0x00];
+        payload.extend_from_slice(b"test\0");
+        let pkt = ProtocolPacket {
+            main_type: 0xe0,
+            sub_type: 0x04,
+            payload,
+        };
+        let outcome = handle_id_check(&pkt, 1, &state);
+        let resp = &outcome.responses[0];
+        let body = &resp[4..];
+        let result = u32::from_le_bytes(body[8..12].try_into().unwrap());
+        assert_eq!(result, 0); // 이미 사용 중
+    }
+
+    #[test]
+    fn registration_submit_creates_new_user() {
+        let mut state = GameState::new();
+        // payload: [version_hi:2][control=5:4][id:16][unknown:20][pass:16]
+        let mut payload = vec![0x0d, 0x40, 0x05, 0x00, 0x00, 0x00];
+        let mut id_field = [0u8; 16];
+        id_field[..5].copy_from_slice(b"hello");
+        payload.extend_from_slice(&id_field);
+        payload.extend_from_slice(&[0u8; 20]); // unknown
+        let mut pass_field = [0u8; 16];
+        pass_field[..5].copy_from_slice(b"world");
+        payload.extend_from_slice(&pass_field);
+        let pkt = ProtocolPacket {
+            main_type: 0xe0,
+            sub_type: 0x04,
+            payload,
+        };
+        let outcome = handle_registration_submit(&pkt, 1, &mut state);
+        assert!(!outcome.responses.is_empty());
+        assert!(state.users.contains_key("hello"));
+    }
+
+    #[test]
+    fn avatar_detail_data_has_expected_size() {
+        let session = SessionInfo {
+            user_id: "test".to_string(),
+            nickname: b"TestUser".to_vec(),
+            character: 1,
+            gp: 1000,
+            fp: 500,
+        };
+        let data = build_avatar_detail_data(&session);
+        // 1 + 22 + 5 + 32 + 24 + 24 + 4 + 4 + 16 + 140 = 272
+        assert_eq!(data.len(), 272);
+        assert_eq!(data[0], 1); // character
+        assert_eq!(&data[1..9], b"TestUser"); // nickname start
+    }
+
+    #[test]
+    fn avatar_selection_sends_detail_and_visit_reward() {
+        let mut state = GameState::new();
+        state.session = Some(SessionInfo {
+            user_id: "test".to_string(),
+            nickname: b"Tester".to_vec(),
+            character: 0,
+            gp: 1000,
+            fp: 0,
+        });
+        let payload = vec![0x0d, 0x40, 0x07, 0x00, 0x00, 0x00, 0x01];
+        let pkt = ProtocolPacket {
+            main_type: 0xe0,
+            sub_type: 0x04,
+            payload,
+        };
+        let outcome = handle_avatar_selection(&pkt, 1, &mut state);
+        // 아바타 상세정보 + 방문수당 = 2개 응답
+        assert_eq!(outcome.responses.len(), 2);
+        assert_eq!(state.session.as_ref().unwrap().character, 1);
+    }
+
+    #[test]
+    fn main_frame_dispatches_registration_request_on_control_three() {
+        let (to_handler_tx, to_handler_rx) = mpsc::channel();
+        let (from_handler_tx, from_handler_rx) = mpsc::channel();
+        let handle = thread::spawn(move || run_dnet_handler(to_handler_rx, from_handler_tx));
+
+        // 채널 1 오픈
+        to_handler_tx
+            .send(protocol::create_control_message(protocol::CTRL_OPEN, 1))
+            .unwrap();
+        let _open_ok = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        // 부트스트랩 (control=0)
+        let bootstrap_payload = [0x0d, 0x40, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00];
+        to_handler_tx
+            .send(protocol::create_app_packet(1, 0xE0, 0x04, &bootstrap_payload))
+            .unwrap();
+        let _bootstrap_resp = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        // 가입 요청 (control=3)
+        let reg_payload = [0x0d, 0x40, 0x03, 0x00, 0x00, 0x00];
+        to_handler_tx
+            .send(protocol::create_app_packet(1, 0xE0, 0x04, &reg_payload))
+            .unwrap();
+        let reg_resp = from_handler_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        // 응답이 agent protocol format (control=0, 가입 안내 메시지)인지 확인
+        let body = &reg_resp[4..];
+        assert_eq!(body[0], 0xe0); // main_type
+        assert_eq!(body[1], 0x04); // sub_type
+        let control = u32::from_le_bytes(body[4..8].try_into().unwrap());
+        assert_eq!(control, 0); // control=0 (가입 안내)
+
+        drop(to_handler_tx);
+        handle.join().unwrap();
     }
 }

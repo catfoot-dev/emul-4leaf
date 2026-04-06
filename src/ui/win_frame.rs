@@ -424,6 +424,16 @@ impl WinFrame {
                     let _ = response_tx.send(win_result);
                 }
 
+                UiCommand::DragWindow { hwnd } => {
+                    let window_id = self.hwnd_to_id.get(&hwnd).copied();
+                    if let Some(id) = window_id {
+                        if let Some(window) = self.get_window(&id) {
+                            crate::emu_log!("[UI] DragWindow called for HWND {:#x}", hwnd);
+                            let _ = window.drag_window();
+                        }
+                    }
+                }
+
                 UiCommand::SetCursor { hwnd, hcursor } => {
                     let window_id = self.hwnd_to_id.get(&hwnd).copied();
                     if let Some(id) = window_id {
