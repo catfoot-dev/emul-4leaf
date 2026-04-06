@@ -1674,6 +1674,7 @@ impl USER32 {
                 name: name.clone(),
                 frames: Vec::new(),
                 is_animated: false,
+                display_rate_jiffies: 0,
             },
         );
 
@@ -1700,6 +1701,7 @@ impl USER32 {
         let filename = crate::resource_dir().join(&filename).to_string_lossy().to_string();
         let mut frames = Vec::new();
         let mut is_animated = false;
+        let mut display_rate_jiffies: u32 = 10; // ANI 기본값 (≈167ms)
 
         if let Ok(data) = std::fs::read(&filename) {
             if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"ACON" {
@@ -1711,6 +1713,18 @@ impl USER32 {
                     let chunk_size =
                         u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
                     pos += 8;
+
+                    // anih 청크에서 기본 표시 간격(iDispRate)을 읽음
+                    // anih 구조: cbSize(4), nFrames(4), nSteps(4), cx(4), cy(4),
+                    //            cBitCount(4), cPlanes(4), iDispRate(4), ...
+                    if chunk_id == b"anih" && chunk_size >= 32 && pos + 32 <= data.len() {
+                        let rate = u32::from_le_bytes(
+                            data[pos + 28..pos + 32].try_into().unwrap(),
+                        );
+                        if rate > 0 {
+                            display_rate_jiffies = rate;
+                        }
+                    }
 
                     if chunk_id == b"LIST"
                         && pos + 4 <= data.len()
@@ -1754,6 +1768,7 @@ impl USER32 {
                 name: Some(filename.clone()),
                 frames,
                 is_animated,
+                display_rate_jiffies,
             },
         );
 

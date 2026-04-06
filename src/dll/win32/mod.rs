@@ -223,6 +223,8 @@ pub enum GdiObject {
         name: Option<String>,
         frames: Vec<CursorFrame>,
         is_animated: bool,
+        /// ANI 기본 프레임 표시 간격 (jiffies 단위, 1 jiffy = 1/60초)
+        display_rate_jiffies: u32,
     },
     /// 아이콘 오브젝트
     Icon {

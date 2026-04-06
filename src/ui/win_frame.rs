@@ -84,6 +84,22 @@ impl HostWindowStyle {
     }
 }
 
+/// 커서 애니메이션의 현재 상태를 저장하는 구조체
+struct CursorAnimState {
+    /// 애니메이션 대상 커서 GDI 핸들
+    hcursor: u32,
+    /// 대상 윈도우 ID
+    window_id: WindowId,
+    /// 현재 표시 중인 프레임 인덱스
+    frame_index: usize,
+    /// 총 프레임 수
+    frame_count: usize,
+    /// 프레임 간 전환 간격
+    interval: std::time::Duration,
+    /// 마지막으로 프레임을 전환한 시각
+    last_switch: std::time::Instant,
+}
+
 /// 윈도우 애플리케이션 핸들러
 /// 모든 winit 윈도우와 Painter를 관리함
 pub struct WinFrame {
@@ -107,6 +123,9 @@ pub struct WinFrame {
 
     /// 초기 페인터 목록 (resumed에서 창 생성 후 painters로 이동)
     initial_painters: Vec<Box<dyn Painter>>,
+
+    /// 현재 활성화된 커서 애니메이션 상태 (None이면 정적 커서)
+    cursor_anim: Option<CursorAnimState>,
 }
 
 impl WinFrame {
@@ -125,6 +144,7 @@ impl WinFrame {
             sb_context: None,
             emu_context: context,
             initial_painters,
+            cursor_anim: None,
         }
     }
 
@@ -405,48 +425,56 @@ impl WinFrame {
                 }
 
                 UiCommand::SetCursor { hwnd, hcursor } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
-                        && let Some(window) = self.get_window(id)
-                    {
-                        let mut cursor_applied = false;
-                        {
+                    let window_id = self.hwnd_to_id.get(&hwnd).copied();
+                    if let Some(id) = window_id {
+                        // GDI 오브젝트에서 커서 정보를 먼저 추출 (어떤 커서를 적용할지 결정)
+                        enum CursorAction {
+                            Animated {
+                                cursor: winit::window::CustomCursor,
+                                frame_count: usize,
+                                interval: std::time::Duration,
+                            },
+                            Static(winit::window::CustomCursor),
+                            SystemIcon(winit::window::CursorIcon),
+                            Default,
+                        }
+
+                        let action = {
                             let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
                             if let Some(GdiObject::Cursor {
                                 resource_id,
                                 frames,
+                                is_animated,
+                                display_rate_jiffies,
                                 ..
                             }) = gdi_objects.get(&hcursor)
                             {
-                                if let Some(frame) = frames.first()
+                                if *is_animated && frames.len() > 1 {
+                                    if let Some(custom) =
+                                        Self::create_custom_cursor_from_frame(&frames[0], event_loop)
+                                    {
+                                        let rate = (*display_rate_jiffies).max(1);
+                                        let ms = (rate as u64) * 1000 / 60;
+                                        CursorAction::Animated {
+                                            cursor: custom,
+                                            frame_count: frames.len(),
+                                            interval: std::time::Duration::from_millis(ms),
+                                        }
+                                    } else {
+                                        CursorAction::Default
+                                    }
+                                } else if let Some(frame) = frames.first()
                                     && !frame.pixels.is_empty()
                                 {
-                                    let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
-                                    for p in &frame.pixels {
-                                        let a = (p >> 24) as u8;
-                                        let r = (p >> 16) as u8;
-                                        let g = (p >> 8) as u8;
-                                        let b = *p as u8;
-                                        rgba.push(r);
-                                        rgba.push(g);
-                                        rgba.push(b);
-                                        rgba.push(a);
+                                    if let Some(custom) =
+                                        Self::create_custom_cursor_from_frame(frame, event_loop)
+                                    {
+                                        CursorAction::Static(custom)
+                                    } else {
+                                        CursorAction::Default
                                     }
-
-                                    let source = winit::window::CustomCursor::from_rgba(
-                                        rgba,
-                                        frame.width as u16,
-                                        frame.height as u16,
-                                        frame.hotspot_x as u16,
-                                        frame.hotspot_y as u16,
-                                    );
-                                    if let Ok(source) = source {
-                                        let custom_cursor = event_loop.create_custom_cursor(source);
-                                        window.set_cursor(custom_cursor);
-                                        cursor_applied = true;
-                                    }
-                                }
-
-                                if !cursor_applied {
+                                } else {
+                                    // 시스템 커서 폴백 (resource_id 기반)
                                     let icon = match *resource_id {
                                         32512 => winit::window::CursorIcon::Default,
                                         32513 => winit::window::CursorIcon::Text,
@@ -464,13 +492,50 @@ impl WinFrame {
                                         32651 => winit::window::CursorIcon::Help,
                                         _ => winit::window::CursorIcon::Default,
                                     };
-                                    window.set_cursor(icon);
-                                    cursor_applied = true;
+                                    CursorAction::SystemIcon(icon)
+                                }
+                            } else {
+                                CursorAction::Default
+                            }
+                        };
+
+                        // 결정된 커서를 윈도우에 적용하고 애니메이션 상태 갱신
+                        if let Some(window) = self.get_window(&id) {
+                            match &action {
+                                CursorAction::Animated { cursor, .. } => {
+                                    window.set_cursor(cursor.clone());
+                                }
+                                CursorAction::Static(cursor) => {
+                                    window.set_cursor(cursor.clone());
+                                }
+                                CursorAction::SystemIcon(icon) => {
+                                    window.set_cursor(*icon);
+                                }
+                                CursorAction::Default => {
+                                    window.set_cursor(winit::window::CursorIcon::Default);
                                 }
                             }
                         }
-                        if !cursor_applied {
-                            window.set_cursor(winit::window::CursorIcon::Default);
+
+                        // window 참조 해제 후 cursor_anim 갱신
+                        match action {
+                            CursorAction::Animated {
+                                frame_count,
+                                interval,
+                                ..
+                            } => {
+                                self.cursor_anim = Some(CursorAnimState {
+                                    hcursor,
+                                    window_id: id,
+                                    frame_index: 0,
+                                    frame_count,
+                                    interval,
+                                    last_switch: std::time::Instant::now(),
+                                });
+                            }
+                            _ => {
+                                self.cursor_anim = None;
+                            }
                         }
                     }
                 }
@@ -480,11 +545,96 @@ impl WinFrame {
         needs_redraw
     }
 
+    /// CursorFrame의 ARGB 픽셀을 RGBA로 변환하여 winit CustomCursor를 생성합니다.
+    fn create_custom_cursor_from_frame(
+        frame: &crate::dll::win32::CursorFrame,
+        event_loop: &ActiveEventLoop,
+    ) -> Option<winit::window::CustomCursor> {
+        if frame.pixels.is_empty() {
+            return None;
+        }
+        let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
+        for p in &frame.pixels {
+            let a = (p >> 24) as u8;
+            let r = (p >> 16) as u8;
+            let g = (p >> 8) as u8;
+            let b = *p as u8;
+            rgba.push(r);
+            rgba.push(g);
+            rgba.push(b);
+            rgba.push(a);
+        }
+        let source = winit::window::CustomCursor::from_rgba(
+            rgba,
+            frame.width as u16,
+            frame.height as u16,
+            frame.hotspot_x as u16,
+            frame.hotspot_y as u16,
+        )
+        .ok()?;
+        Some(event_loop.create_custom_cursor(source))
+    }
+
+    /// 커서 애니메이션 타이머를 체크하고, 프레임 전환이 필요하면 실행합니다.
+    fn tick_cursor_animation(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(anim) = self.cursor_anim.as_mut() else {
+            return;
+        };
+
+        let now = std::time::Instant::now();
+        if now.duration_since(anim.last_switch) < anim.interval {
+            return;
+        }
+
+        // 다음 프레임으로 전환
+        anim.frame_index = (anim.frame_index + 1) % anim.frame_count;
+        anim.last_switch = now;
+
+        let frame_index = anim.frame_index;
+        let hcursor = anim.hcursor;
+        let window_id = anim.window_id;
+
+        // gdi_objects 락에서 해당 프레임 데이터를 읽어 커서 적용
+        let frame_data = {
+            let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
+            if let Some(GdiObject::Cursor { frames, .. }) = gdi_objects.get(&hcursor) {
+                frames.get(frame_index).cloned()
+            } else {
+                // 커서가 삭제되었으면 애니메이션 중단
+                None
+            }
+        };
+
+        if let Some(frame) = frame_data {
+            if let Some(window) = self.get_window(&window_id) {
+                if let Some(custom) = Self::create_custom_cursor_from_frame(&frame, event_loop) {
+                    window.set_cursor(custom);
+                }
+            }
+        } else {
+            self.cursor_anim = None;
+        }
+    }
+
     fn next_poll_interval(&self) -> Option<std::time::Duration> {
-        self.painters
+        let painter_interval = self
+            .painters
             .values()
             .filter_map(|painter| painter.poll_interval())
-            .min()
+            .min();
+
+        // 커서 애니메이션이 활성화되어 있으면 그 간격도 고려
+        let cursor_interval = self.cursor_anim.as_ref().map(|anim| {
+            let elapsed = anim.last_switch.elapsed();
+            anim.interval.saturating_sub(elapsed)
+        });
+
+        match (painter_interval, cursor_interval) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
     }
 }
 
@@ -516,6 +666,9 @@ impl ApplicationHandler<()> for WinFrame {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let needs_redraw = self.process_ui_commands(event_loop);
+
+        // 커서 애니메이션 프레임 전환 체크
+        self.tick_cursor_animation(event_loop);
 
         // 모든 Painter에게 백그라운드 상태 변경 알림 및 종료 체크
         let mut windows_to_remove = Vec::new();
