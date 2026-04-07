@@ -1,6 +1,6 @@
 use crate::{
     dll::win32::{GdiObject, Win32Context},
-    ui::{Painter, UiCommand},
+    ui::{Painter, UiCommand, gdi_renderer::GdiRenderer},
 };
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use softbuffer::{Context as SoftContext, Surface};
@@ -17,10 +17,17 @@ use winit::{
 };
 
 // Windows 스타일 -> winit 속성 매핑
-const WS_POPUP: u32 = 0x80000000;
-const WS_CHILD: u32 = 0x40000000;
+const WS_BORDER: u32 = 0x00800000;
 const WS_CAPTION: u32 = 0x00C00000;
+const WS_CHILD: u32 = 0x40000000;
+const WS_CLIPCHILDREN: u32 = 0x02000000;
+const WS_CLIPSIBLINGS: u32 = 0x04000000;
+const WS_DLGFRAME: u32 = 0x00400000;
+const WS_GROUP: u32 = 0x00020000;
+const WS_HSCROLL: u32 = 0x00100000;
+const WS_SIZEBOX: u32 = 0x00040000;
 const WS_SYSMENU: u32 = 0x00080000;
+const WS_POPUP: u32 = 0x80000000;
 const WS_THICKFRAME: u32 = 0x00040000; // WS_SIZEBOX
 const WS_MINIMIZEBOX: u32 = 0x00020000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
@@ -1142,6 +1149,7 @@ impl DefaultEmulatorPainter {
         src_width: u32,
         src_height: u32,
         clip_region: Option<(i32, i32, i32, i32)>,
+        exclusion_regions: &[(i32, i32, i32, i32)],
     ) {
         for src_y in 0..src_height as i32 {
             let dst_y = dest_y + src_y;
@@ -1156,6 +1164,8 @@ impl DefaultEmulatorPainter {
                 }
 
                 let dst_idx = (dst_y as u32 * buffer_width + dst_x as u32) as usize;
+
+                // Inclusion 클리핑 (region 내부에만 그림)
                 if let Some((left, top, right, bottom)) = clip_region {
                     if src_x < left || src_x >= right || src_y < top || src_y >= bottom {
                         if dst_idx < buffer.len() {
@@ -1163,6 +1173,18 @@ impl DefaultEmulatorPainter {
                         }
                         continue;
                     }
+                }
+
+                // Exclusion 클리핑 (WS_CLIPCHILDREN, WS_CLIPSIBLINGS 등)
+                let mut excluded = false;
+                for (ex_l, ex_t, ex_r, ex_b) in exclusion_regions {
+                    if src_x >= *ex_l && src_x < *ex_r && src_y >= *ex_t && src_y < *ex_b {
+                        excluded = true;
+                        break;
+                    }
+                }
+                if excluded {
+                    continue;
                 }
 
                 let src_idx = (src_y as u32 * src_width + src_x as u32) as usize;
@@ -1227,19 +1249,130 @@ impl DefaultEmulatorPainter {
             None
         };
 
+        // 제외 영역 계산 (WS_CLIPCHILDREN, WS_CLIPSIBLINGS)
+        let mut exclusion_regions = Vec::new();
+
+        // WS_CLIPCHILDREN: 부모를 그릴 때 자식 영역을 제외
+        if (state.style & WS_CLIPCHILDREN) != 0 {
+            for child_hwnd in Self::child_windows(windows, hwnd) {
+                if let Some(child_state) = windows.get(&child_hwnd) {
+                    if child_state.visible {
+                        exclusion_regions.push((
+                            child_state.x,
+                            child_state.y,
+                            child_state.x + child_state.width,
+                            child_state.y + child_state.height,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // WS_CLIPSIBLINGS: 자기보다 위에 있는 형제(Sibling) 영역을 제외
+        if !is_root && (state.style & WS_CLIPSIBLINGS) != 0 {
+            let siblings = Self::child_windows(windows, state.parent);
+            let my_pos = siblings.iter().position(|&h| h == hwnd).unwrap_or(0);
+            // siblings는 Z-order 오름차순(뒤->앞)이므로, 자신보다 뒤에 있는(인덱스가 큰) 윈도우들이 위에 있음
+            for &sibling_hwnd in &siblings[my_pos + 1..] {
+                if let Some(sibling_state) = windows.get(&sibling_hwnd) {
+                    if sibling_state.visible {
+                        exclusion_regions.push((
+                            sibling_state.x - state.x,
+                            sibling_state.y - state.y,
+                            sibling_state.x - state.x + sibling_state.width,
+                            sibling_state.y - state.y + sibling_state.height,
+                        ));
+                    }
+                }
+            }
+        }
+
         if let Some((pixels, src_width, src_height)) = bitmap {
             let pixels = pixels.lock().unwrap();
+            let final_dest_x = if is_root { 0 } else { dest_x };
+            let final_dest_y = if is_root { 0 } else { dest_y };
+
             Self::blit_bitmap(
                 buffer,
                 buffer_width,
                 buffer_height,
-                if is_root { 0 } else { dest_x },
-                if is_root { 0 } else { dest_y },
+                final_dest_x,
+                final_dest_y,
                 &pixels,
                 src_width,
                 src_height,
                 clip_region,
+                &exclusion_regions,
             );
+
+            // WS_BORDER 처리: 검은색 1px 테두리
+            if (state.style & WS_BORDER) != 0 {
+                GdiRenderer::draw_rect(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    final_dest_x,
+                    final_dest_y,
+                    final_dest_x + src_width as i32,
+                    final_dest_y + src_height as i32,
+                    Some(0xFF000000), // Black
+                    None,
+                );
+            }
+
+            // WS_DLGFRAME / WS_SIZEBOX (WS_THICKFRAME) 처리: 3D 테두리
+            if !state.use_native_frame {
+                if (state.style & WS_DLGFRAME) != 0 || (state.style & WS_SIZEBOX) != 0 {
+                    GdiRenderer::draw_edge(
+                        buffer,
+                        buffer_width,
+                        buffer_height,
+                        final_dest_x,
+                        final_dest_y,
+                        final_dest_x + src_width as i32,
+                        final_dest_y + src_height as i32,
+                        false, // Raised
+                    );
+                }
+            }
+
+            // WS_HSCROLL 처리: 하단 가로 스크롤바 (단순 플레이스홀더)
+            if (state.style & WS_HSCROLL) != 0 {
+                let scroll_h = 16i32;
+                let top = (final_dest_y + src_height as i32 - scroll_h).max(final_dest_y);
+                GdiRenderer::draw_rect(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    final_dest_x,
+                    top,
+                    final_dest_x + src_width as i32,
+                    final_dest_y + src_height as i32,
+                    Some(0xFF808080), // Gray Pen
+                    Some(0xFFC0C0C0), // Face Brush
+                );
+                // 양쪽 버튼
+                GdiRenderer::draw_edge(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    final_dest_x,
+                    top,
+                    final_dest_x + 16,
+                    final_dest_y + src_height as i32,
+                    false,
+                );
+                GdiRenderer::draw_edge(
+                    buffer,
+                    buffer_width,
+                    buffer_height,
+                    final_dest_x + src_width as i32 - 16,
+                    top,
+                    final_dest_x + src_width as i32,
+                    final_dest_y + src_height as i32,
+                    false,
+                );
+            }
         }
 
         for child_hwnd in Self::child_windows(windows, hwnd) {
@@ -1326,7 +1459,7 @@ impl Painter for DefaultEmulatorPainter {
         }) = gdi_objects.get(&self.surface_bitmap)
         {
             let p = p.lock().unwrap();
-            Self::blit_bitmap(buffer, width, height, 0, 0, &p, *sw, *sh, None);
+            Self::blit_bitmap(buffer, width, height, 0, 0, &p, *sw, *sh, None, &[]);
         }
 
         true

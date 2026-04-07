@@ -341,6 +341,13 @@ impl WinEvent {
         }
     }
 
+    /// 윈도우의 유효성을 검사하여 다시 그리기 요청을 해제합니다. (needs_paint 플래그 해제)
+    pub fn validate_window(&mut self, hwnd: u32) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.needs_paint = false;
+        }
+    }
+
     /// 윈도우 강제 다시 그리기 (UpdateWindow) 알림
     pub fn update_window(&self, hwnd: u32) {
         self.request_visual_refresh(hwnd);

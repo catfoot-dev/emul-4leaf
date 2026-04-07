@@ -246,4 +246,149 @@ impl GdiRenderer {
         let descent = (-v.descent).ceil() as i32;
         (height, ascent, descent)
     }
+
+    /// Win32 DrawEdge 스타일의 3D 테두리를 그립니다.
+    pub fn draw_edge(
+        pixels: &mut [u32],
+        width: u32,
+        height: u32,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        is_sunken: bool,
+    ) {
+        let color_light = 0xFFFFFFFF; // 흰색
+        let color_shadow = 0xFF808080; // 회색
+        let color_dark = 0xFF000000; // 검은색
+        // let color_face = 0xFFC0C0C0; // 배경색 (밝은 회색)
+
+        if is_sunken {
+            // Sunken (눌린 효과)
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left,
+                top,
+                right - 1,
+                top,
+                color_shadow,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left,
+                top,
+                left,
+                bottom - 1,
+                color_shadow,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left + 1,
+                top + 1,
+                right - 2,
+                top + 1,
+                color_dark,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left + 1,
+                top + 1,
+                left + 1,
+                bottom - 2,
+                color_dark,
+            );
+
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left,
+                bottom - 1,
+                right - 1,
+                bottom - 1,
+                color_light,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                right - 1,
+                top,
+                right - 1,
+                bottom - 1,
+                color_light,
+            );
+        } else {
+            // Raised (튀어나온 효과)
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left,
+                top,
+                right - 2,
+                top,
+                color_light,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left,
+                top,
+                left,
+                bottom - 2,
+                color_light,
+            );
+
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left,
+                bottom - 1,
+                right - 1,
+                bottom - 1,
+                color_dark,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                right - 1,
+                top,
+                right - 1,
+                bottom - 1,
+                color_dark,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                left + 1,
+                bottom - 2,
+                right - 2,
+                bottom - 2,
+                color_shadow,
+            );
+            Self::draw_line(
+                pixels,
+                width,
+                height,
+                right - 2,
+                top + 1,
+                right - 2,
+                bottom - 2,
+                color_shadow,
+            );
+        }
+    }
 }

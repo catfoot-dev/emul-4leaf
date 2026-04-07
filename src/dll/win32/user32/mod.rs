@@ -3,6 +3,7 @@ mod dialog;
 mod input;
 mod menu;
 mod message;
+mod nc_paint;
 mod paint;
 mod window;
 
@@ -32,6 +33,8 @@ impl USER32 {
     const CREATE_STRUCT_A_LPSZ_NAME_OFFSET: u64 = 36;
     const CREATE_STRUCT_A_LPSZ_CLASS_OFFSET: u64 = 40;
     const CREATE_STRUCT_A_EX_STYLE_OFFSET: u64 = 44;
+    pub const FRAME_BORDER_WIDTH: i32 = 3;
+    pub const CAPTION_HEIGHT: i32 = 19;
 
     /// 만료된 타이머를 메시지 큐에 반영하되, 동일 타이머의 `WM_TIMER`는 하나만 유지합니다.
     fn enqueue_elapsed_timer_messages(
@@ -241,9 +244,32 @@ impl USER32 {
         }
     }
 
-    // API: LRESULT DefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
-    // 역할: 윈도우 프로시저를 호출
-    /// 지정된 윈도우 프로시저를 호출합니다. (SendMessage, DispatchMessage 등에서 공통으로 사용)
+    /// 윈도우 스타일과 확장 스타일에 따른 프레임 두께 및 캡션 높이를 계산합니다.
+    pub fn get_window_frame_size(style: u32, _ex_style: u32) -> (i32, i32, i32) {
+        const WS_THICKFRAME: u32 = 0x00040000;
+        const WS_DLGFRAME: u32 = 0x00400000;
+        const WS_BORDER: u32 = 0x00800000;
+        const WS_CAPTION: u32 = 0x00C00000;
+
+        let mut bw = 0;
+        let mut bh = 0;
+        let mut caption = 0;
+
+        if (style & WS_THICKFRAME) != 0 {
+            bw = Self::FRAME_BORDER_WIDTH;
+            bh = Self::FRAME_BORDER_WIDTH;
+        } else if (style & WS_DLGFRAME) != 0 || (style & WS_BORDER) != 0 {
+            bw = 1;
+            bh = 1;
+        }
+
+        if (style & WS_CAPTION) == WS_CAPTION {
+            caption = Self::CAPTION_HEIGHT;
+        }
+
+        (bw, bh, caption)
+    }
+
     fn dispatch_to_wndproc(
         uc: &mut Unicorn<Win32Context>,
         wnd_proc: u32,

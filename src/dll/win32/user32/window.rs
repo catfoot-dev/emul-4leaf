@@ -412,7 +412,16 @@ pub(super) fn get_client_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
         win_event
             .windows
             .get(&hwnd)
-            .map(|win| (win.width, win.height))
+            .map(|win| {
+                let (bw, bh, caption) = USER32::get_window_frame_size(win.style, win.ex_style);
+                let mut rect_w = win.width;
+                let mut rect_h = win.height;
+                if !win.use_native_frame {
+                    rect_w = (rect_w - bw * 2).max(0);
+                    rect_h = (rect_h - bh * 2 - caption).max(0);
+                }
+                (rect_w, rect_h)
+            })
             .unwrap_or((640, 480))
     };
 

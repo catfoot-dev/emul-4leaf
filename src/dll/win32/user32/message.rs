@@ -671,6 +671,109 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
     let _w_param = uc.read_arg(2);
     let _l_param = uc.read_arg(3);
     let default_ret = match msg {
+        0x0006 => {
+            // WM_ACTIVATE
+            let state = _w_param & 0xFFFF;
+            if state != 0 {
+                let ctx = uc.get_data();
+                ctx.active_hwnd
+                    .store(hwnd, std::sync::atomic::Ordering::SeqCst);
+                ctx.focus_hwnd
+                    .store(hwnd, std::sync::atomic::Ordering::SeqCst);
+                ctx.win_event.lock().unwrap().activate_window(hwnd);
+            }
+            0
+        }
+        0x0007 => {
+            // WM_SETFOCUS
+            uc.get_data()
+                .focus_hwnd
+                .store(hwnd, std::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        0x0008 => {
+            // WM_KILLFOCUS
+            let ctx = uc.get_data();
+            if ctx.focus_hwnd.load(std::sync::atomic::Ordering::SeqCst) == hwnd {
+                ctx.focus_hwnd
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
+            }
+            0
+        }
+        0x000C => {
+            // WM_SETTEXT
+            let text = uc.read_euc_kr(_l_param as u64);
+            uc.get_data()
+                .win_event
+                .lock()
+                .unwrap()
+                .set_window_text(hwnd, text);
+            1
+        }
+        0x000D => {
+            // WM_GETTEXT
+            let max_count = _w_param;
+            let buf_addr = _l_param;
+            let title_info = {
+                let ctx = uc.get_data();
+                let win_event = ctx.win_event.lock().unwrap();
+                win_event.windows.get(&hwnd).map(|win| {
+                    let (encoded, _, _) = EUC_KR.encode(&win.title);
+                    let copy_len = encoded.len().min((max_count as usize).saturating_sub(1));
+                    (encoded[..copy_len].to_vec(), copy_len)
+                })
+            };
+            if let Some((bytes, len)) = title_info {
+                USER32::write_ansi_bytes(uc, buf_addr as u64, &bytes);
+                len as i32
+            } else {
+                0
+            }
+        }
+        0x000F => {
+            // WM_PAINT
+            uc.get_data().win_event.lock().unwrap().validate_window(hwnd);
+            0
+        }
+        0x0010 => {
+            // WM_CLOSE
+            let ctx = uc.get_data();
+            let mut win_event = ctx.win_event.lock().unwrap();
+            USER32::cleanup_window_runtime_state(ctx, hwnd);
+            win_event.destroy_window(hwnd);
+            0
+        }
+        0x0011 => 1, // WM_QUERYENDSESSION
+        0x0014 => {
+            // WM_ERASEBKGND
+            // 기본 회색(COLOR_BTNFACE 대용)으로 배경 채우기
+            let surface_bitmap = {
+                let ctx = uc.get_data();
+                let win_event = ctx.win_event.lock().unwrap();
+                win_event.windows.get(&hwnd).map(|w| w.surface_bitmap)
+            };
+
+            if let Some(hbmp) = surface_bitmap {
+                let ctx = uc.get_data();
+                let gdi_objects = ctx.gdi_objects.lock().unwrap();
+                if let Some(crate::dll::win32::GdiObject::Bitmap {
+                    pixels,
+                    width,
+                    height,
+                    ..
+                }) = gdi_objects.get(&hbmp)
+                {
+                    let mut p = pixels.lock().unwrap();
+                    // 0xD4D0C8 = Classic Windows gray
+                    for pix in p.iter_mut() {
+                        *pix = 0xFFD4D0C8;
+                    }
+                }
+            }
+            1
+        }
+        0x0024 => 0, // WM_GETMINMAXINFO
+        0x0080 => 0, // WM_SETICON
         0x0081 => 1, // WM_NCCREATE
         0x00A1 => {
             // WM_NCLBUTTONDOWN
@@ -776,14 +879,56 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                 0
             }
         }
+        0x0083 => {
+            // WM_NCCALCSIZE
+            if _w_param != 0 {
+                let rect_ptr = _l_param as u64;
+                let (bw, bh, caption) = {
+                    let ctx = uc.get_data();
+                    let win_event = ctx.win_event.lock().unwrap();
+                    if let Some(win) = win_event.windows.get(&hwnd) {
+                        if !win.use_native_frame {
+                            USER32::get_window_frame_size(win.style, win.ex_style)
+                        } else {
+                            (0, 0, 0)
+                        }
+                    } else {
+                        (0, 0, 0)
+                    }
+                };
+
+                if bw > 0 || bh > 0 || caption > 0 {
+                    let left = uc.read_u32(rect_ptr) as i32;
+                    let top = uc.read_u32(rect_ptr + 4) as i32;
+                    let right = uc.read_u32(rect_ptr + 8) as i32;
+                    let bottom = uc.read_u32(rect_ptr + 12) as i32;
+
+                    uc.write_u32(rect_ptr, (left + bw) as u32);
+                    uc.write_u32(rect_ptr + 4, (top + bh + caption) as u32);
+                    uc.write_u32(rect_ptr + 8, (right - bw) as u32);
+                    uc.write_u32(rect_ptr + 12, (bottom - bh) as u32);
+                }
+            }
+            0
+        }
+        0x0085 => {
+            // WM_NCPAINT
+            super::nc_paint::draw_window_frame(uc, hwnd);
+            0
+        }
+        0x0086 => {
+            // WM_NCACTIVATE
+            super::nc_paint::draw_window_frame(uc, hwnd);
+            1
+        }
         _ => 0,
     };
     // crate::emu_log!(
     //     "[USER32] DefWindowProcA({:#x}, {:#x}, {:#x}, {:#x}) -> LRESULT {}",
     //     hwnd,
     //     msg,
-    //     w_param,
-    //     l_param,
+    //     _w_param,
+    //     _l_param,
     //     default_ret
     // );
     Some(ApiHookResult::callee(4, Some(default_ret)))
@@ -796,7 +941,17 @@ pub(super) fn def_mdi_child_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<Api
     let msg = uc.read_arg(1);
     let w_param = uc.read_arg(2);
     let l_param = uc.read_arg(3);
-    let default_ret = if msg == 0x0081 { 1 } else { 0 };
+
+    let default_ret = match msg {
+        0x0081 => 1, // WM_NCCREATE
+        _ => {
+            if matches!(msg, 0x0083 | 0x0085 | 0x0086 | 0x00A1 | 0x00A2 | 0x0112) {
+                return def_window_proc_a(uc);
+            }
+            0
+        }
+    };
+
     crate::emu_log!(
         "[USER32] DefMDIChildProcA({:#x}, {:#x}, {:#x}, {:#x}) -> LRESULT {}",
         hwnd,
