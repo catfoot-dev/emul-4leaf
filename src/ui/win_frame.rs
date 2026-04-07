@@ -126,6 +126,8 @@ pub struct WinFrame {
 
     /// 현재 활성화된 커서 애니메이션 상태 (None이면 정적 커서)
     cursor_anim: Option<CursorAnimState>,
+    /// 현재 적용된 커서 핸들과 윈도우 ID (중복 적용 방지용)
+    current_cursor: Option<(WindowId, u32)>,
     /// 마지막으로 마우스 이벤트가 처리된 시간 (스로틀링용)
     last_cursor_moved: Option<std::time::Instant>,
 }
@@ -147,12 +149,31 @@ impl WinFrame {
             emu_context: context,
             initial_painters,
             cursor_anim: None,
+            current_cursor: None,
             last_cursor_moved: None,
         }
     }
 
     fn get_window(&self, id: &WindowId) -> Option<&Window> {
         self.surfaces.get(id).map(|s| s.window())
+    }
+
+    /// 창을 제거하고 관련 상태(커서 애니메이션 포함)를 정리합니다.
+    fn remove_window(&mut self, id: WindowId) {
+        self.surfaces.remove(&id);
+        self.painters.remove(&id);
+        if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
+            self.hwnd_to_id.remove(&hwnd);
+            self.hwnd_native_frame.remove(&hwnd);
+        }
+
+        // 창이 파괴되면 해당 창과 연결된 커서 상태도 정리합니다.
+        if self.current_cursor.as_ref().map(|(cid, _)| *cid) == Some(id) {
+            self.current_cursor = None;
+        }
+        if self.cursor_anim.as_ref().map(|a| a.window_id) == Some(id) {
+            self.cursor_anim = None;
+        }
     }
 
     pub fn get_painter_mut<T: Painter + 'static>(
@@ -327,11 +348,8 @@ impl WinFrame {
                 }
 
                 UiCommand::DestroyWindow { hwnd } => {
-                    if let Some(id) = self.hwnd_to_id.remove(&hwnd) {
-                        self.id_to_hwnd.remove(&id);
-                        self.hwnd_native_frame.remove(&hwnd);
-                        self.painters.remove(&id);
-                        self.surfaces.remove(&id);
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd).copied() {
+                        self.remove_window(id);
                     }
                 }
 
@@ -495,6 +513,13 @@ impl WinFrame {
                 UiCommand::SetCursor { hwnd, hcursor } => {
                     let window_id = self.hwnd_to_id.get(&hwnd).copied();
                     if let Some(id) = window_id {
+                        // 이미 같은 커서가 같은 윈도우에 적용되어 있다면 무시합니다.
+                        // 이를 통해 마우스 이동 시 발생하는 수많은 WM_SETCURSOR가 애니메이션을 리셋하는 것을 방지합니다.
+                        if self.current_cursor == Some((id, hcursor)) {
+                            continue;
+                        }
+                        self.current_cursor = Some((id, hcursor));
+
                         // GDI 오브젝트에서 커서 정보를 먼저 추출 (어떤 커서를 적용할지 결정)
                         enum CursorAction {
                             Animated {
@@ -756,12 +781,7 @@ impl ApplicationHandler<()> for WinFrame {
         }
 
         for id in windows_to_remove {
-            self.surfaces.remove(&id);
-            self.painters.remove(&id);
-            if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
-                self.hwnd_to_id.remove(&hwnd);
-                self.hwnd_native_frame.remove(&hwnd);
-            }
+            self.remove_window(id);
         }
 
         if needs_redraw {
@@ -836,19 +856,12 @@ impl ApplicationHandler<()> for WinFrame {
                 if quit_on_close {
                     event_loop.exit();
                 } else {
-                    self.surfaces.remove(&id);
-                    self.painters.remove(&id);
-                    if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
-                        self.hwnd_to_id.remove(&hwnd);
-                        self.hwnd_native_frame.remove(&hwnd);
+                    let hwnd = self.id_to_hwnd.get(&id).copied();
+                    self.remove_window(id);
 
+                    if let Some(hwnd) = hwnd {
                         let mut q = self.emu_context.message_queue.lock().unwrap();
                         q.push_back([hwnd, 0x0002, 0, 0, 0, 0, 0]); // WM_DESTROY
-
-                        // 메인 윈도우라면 WM_QUIT 전송
-                        if quit_on_close {
-                            q.push_back([0, 0x0012, 0, 0, 0, 0, 0]); // WM_QUIT
-                        }
                     }
                     self.wake_emulator();
                 }
