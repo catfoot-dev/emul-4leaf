@@ -338,11 +338,24 @@ impl WinFrame {
                     {
                         let use_native_frame =
                             self.hwnd_native_frame.get(&hwnd).copied().unwrap_or(true);
-                        
-                        let parent = self.emu_context.win_event.lock().unwrap()
-                                         .windows.get(&hwnd).map(|s| s.parent).unwrap_or(0);
 
-                        Self::apply_guest_window_style(window, style, ex_style, use_native_frame, parent);
+                        let parent = self
+                            .emu_context
+                            .win_event
+                            .lock()
+                            .unwrap()
+                            .windows
+                            .get(&hwnd)
+                            .map(|s| s.parent)
+                            .unwrap_or(0);
+
+                        Self::apply_guest_window_style(
+                            window,
+                            style,
+                            ex_style,
+                            use_native_frame,
+                            parent,
+                        );
                         window.request_redraw();
                     }
                 }
@@ -546,7 +559,7 @@ impl WinFrame {
                                     if let Some(custom) = Self::create_custom_cursor_from_frame(
                                         &frames[0], event_loop,
                                     ) {
-                                        let rate = (*display_rate_jiffies).max(1);
+                                        let rate = (*display_rate_jiffies / 2u32).max(1);
                                         let ms = (rate as u64) * 1000 / 60;
                                         CursorAction::Animated {
                                             cursor: custom,
@@ -1110,7 +1123,8 @@ impl DefaultEmulatorPainter {
         let mut children = windows
             .iter()
             .filter_map(|(hwnd, state)| {
-                (state.parent == parent && (state.style & WS_CHILD) != 0).then_some((*hwnd, state.z_order))
+                (state.parent == parent && (state.style & WS_CHILD) != 0)
+                    .then_some((*hwnd, state.z_order))
             })
             .collect::<Vec<_>>();
         children.sort_unstable_by_key(|&(hwnd, z_order)| (z_order, hwnd));

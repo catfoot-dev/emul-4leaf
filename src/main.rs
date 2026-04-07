@@ -1,8 +1,9 @@
 //! # 4Leaf Emulator Main Entry Point
 //!
 //! 이 모듈은 에뮬레이터의 생명주기를 관리하며, UI 스레드, 에뮬레이션 스레드,
-//! 그리고 서버 스레드 간의 조율을 담당합니다. 전역 로그 버퍼와 실행 흐름 제어를 포함합니다.
+//! 그리고 서버 스레드 간의 조율을 담당합니다.
 
+mod boot;
 mod debug;
 mod dll;
 mod server;
@@ -10,257 +11,28 @@ mod server;
 mod helper;
 mod ui;
 
-use dll::win32::LoadedDll;
+// 전역 로깅 인프라 재수출 — 매크로 및 외부 모듈이 `$crate::` / `crate::` 경로로 접근합니다.
+pub use debug::logging::{
+    INDEX, LOG_BUFFER, LOG_COUNT, SOCKET_LOG_BUFFER, SOCKET_LOG_COUNT,
+    init_logger, push_log, push_socket_log,
+};
+pub(crate) use debug::logging::{append_capture_line, should_write_capture_files};
+
+// 리소스 디렉토리 재수출
+pub use boot::resource_dir;
+
+use dll::win32::{LoadedDll, Win32Context};
 use helper::{SHARED_MEM_BASE, UnicornHelper};
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock, atomic::AtomicUsize};
-use std::{
-    any::Any,
-    env,
-    fs::{self, OpenOptions},
-    io::Write,
-    path::Path,
-    sync::mpsc::{Receiver, Sender, channel},
-    thread,
+use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::{any::Any, env, thread};
+use unicorn_engine::{
+    Unicorn,
+    unicorn_const::{Arch, Mode},
 };
 
-/// 실행 시 결정된 리소스 디렉토리 경로를 전역 캐시합니다.
-static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-/// 리소스 디렉토리로 인정하기 위해 반드시 존재해야 하는 파일 목록입니다.
-const REQUIRED_RESOURCE_FILES: &[&str] = &[
-    "4Leaf.exe",
-    "4Leaf.dll",
-    "Core.dll",
-    "WinCore.dll",
-    "DNet.dll",
-    "Lime.dll",
-];
-
-/// 리소스 디렉토리를 동적으로 탐색하여 확정합니다.
-///
-/// 후보 디렉토리에 필수 파일이 모두 존재하는지 검증합니다.
-///
-/// 탐색 순서:
-/// - 실행 파일이 위치한 디렉토리
-/// - 실행 파일 기준 디렉토리
-/// - 현재 작업 디렉토리
-/// - ./Resources, ../4Leaf
-fn detect_resource_dir() {
-    let candidates: Vec<PathBuf> = {
-        let mut v = Vec::new();
-
-        // 실행 파일 위치 기준 후보
-        if let Ok(exe) = env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                v.push(exe_dir.to_path_buf());
-                v.push(exe_dir.join("Resources"));
-                v.push(exe_dir.join("../4Leaf"));
-            }
-        }
-
-        // 현재 작업 디렉토리 기준 후보
-        if let Ok(cwd) = env::current_dir() {
-            v.push(cwd.clone());
-            v.push(cwd.join("Resources"));
-            v.push(cwd.join("../4Leaf"));
-        } else {
-            v.push(PathBuf::from("./Resources"));
-            v.push(PathBuf::from("../4Leaf"));
-        }
-
-        v
-    };
-
-    for candidate in &candidates {
-        if !candidate.is_dir() {
-            continue;
-        }
-        let all_present = REQUIRED_RESOURCE_FILES
-            .iter()
-            .all(|f| candidate.join(f).is_file());
-        if all_present {
-            let resolved = candidate
-                .canonicalize()
-                .unwrap_or_else(|_| candidate.clone());
-            eprintln!("[BOOT] Resource directory: {}", resolved.display());
-            let _ = RESOURCE_DIR.set(resolved);
-            return;
-        }
-    }
-
-    // fallback — 필수 파일이 없더라도 기존 동작을 유지
-    let fallback = PathBuf::from("./Resources");
-    let missing: Vec<&str> = REQUIRED_RESOURCE_FILES
-        .iter()
-        .filter(|f| !fallback.join(f).is_file())
-        .copied()
-        .collect();
-    if missing.is_empty() {
-        eprintln!("[BOOT] Resource directory (fallback): ./Resources");
-    } else {
-        eprintln!(
-            "[BOOT] Resource directory not found! Missing files: {}",
-            missing.join(", ")
-        );
-    }
-    let _ = RESOURCE_DIR.set(fallback);
-}
-
-/// 확정된 리소스 디렉토리 경로를 반환합니다.
-pub fn resource_dir() -> &'static Path {
-    RESOURCE_DIR
-        .get()
-        .map(|p| p.as_path())
-        .unwrap_or(Path::new("./Resources"))
-}
-
-const CAPTURE_DIR: &str = "./docs/Capture";
-
-/// 로그를 stderr에도 그대로 복제할지 여부를 반환합니다.
-///
-/// 디버그 창과 캡처 파일이 이미 있는 상태에서 stderr까지 동기 출력하면
-/// 핫패스 I/O 비용이 커지므로, 명시적으로 요청한 경우에만 활성화합니다.
-fn should_mirror_logs_to_stderr() -> bool {
-    static STDERR_LOG_ENABLED: OnceLock<bool> = OnceLock::new();
-    *STDERR_LOG_ENABLED.get_or_init(|| env::var("EMUL_STDERR_LOG").ok().as_deref() == Some("1"))
-}
-
-/// UI 스레드와 로그 출력 스레드 간 동기화를 위한 전역 로그 큐 형태의 버퍼입니다.
-pub static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-/// 새로운 로그가 들어올 때 마다 증가하여 UI 리프레시 타이밍을 결정하는 카운터입니다.
-pub static LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// 소켓/패킷 관련 로그 전용 버퍼입니다. 디버그 UI의 소켓 로그 패널에 표시됩니다.
-pub static SOCKET_LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-/// 소켓 로그 업데이트 여부를 알리는 카운터입니다.
-pub static SOCKET_LOG_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// 로그 메시지 식별을 위한 전역 시퀀스 인덱스입니다.
-pub static INDEX: AtomicUsize = AtomicUsize::new(0);
-
-/// 전역 버퍼에 새로운 로그 메시지를 추가합니다.
-/// 메시지 줄 수 제한(LOG_SCROLL_MAX)을 초과하면 가장 오래된 항목부터 삭제됩니다.
-///
-/// # 인자
-/// * `msg`: 추가할 로그 텍스트
-pub fn push_log(msg: String) {
-    if !msg.is_empty() {
-        append_capture_line("emu.log", &format!("[EMU] {}", msg));
-    }
-
-    if !crate::debug::should_send_debug_messages() {
-        return;
-    }
-    if should_mirror_logs_to_stderr() {
-        eprintln!("[EMU] {}", msg);
-    }
-    if let Some(buf) = LOG_BUFFER.get() {
-        if let Ok(mut b) = buf.lock() {
-            for line in msg.lines() {
-                b.push_back(line.to_string());
-                if b.len() > LOG_SCROLL_MAX {
-                    b.pop_front();
-                }
-            }
-            LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-}
-
-/// 에뮬레이터 구동을 위한 전역 로거 및 버퍼들을 초기화합니다.
-pub fn init_logger() {
-    reset_capture_file("emu.log");
-    reset_capture_file("socket.log");
-    reset_capture_file("packets.log");
-    reset_capture_file("frames.log");
-    reset_capture_file("protocol_analysis.log");
-
-    if crate::debug::should_send_debug_messages() {
-        let _ = LOG_BUFFER.set(Mutex::new(VecDeque::new()));
-        let _ = SOCKET_LOG_BUFFER.set(Mutex::new(VecDeque::new()));
-    }
-}
-
-/// 현재 실행에서 캡처 파일을 기록할지 여부를 결정합니다.
-pub(crate) fn should_write_capture_files() -> bool {
-    if cfg!(test) {
-        return false;
-    }
-    crate::debug::should_send_debug_messages()
-        || env::var("EMUL_CAPTURE").ok().as_deref() == Some("1")
-}
-
-/// 캡처 파일 하나를 비우고 새 세션용으로 초기화합니다.
-pub(crate) fn reset_capture_file(file_name: &str) {
-    if !should_write_capture_files() {
-        return;
-    }
-
-    let _ = fs::create_dir_all(CAPTURE_DIR);
-    let path = Path::new(CAPTURE_DIR).join(file_name);
-    let _ = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path);
-}
-
-/// 캡처 파일의 버퍼드 핸들을 캐시하여 매번 open/close를 반복하지 않습니다.
-static CAPTURE_FILES: OnceLock<Mutex<HashMap<String, std::io::BufWriter<fs::File>>>> =
-    OnceLock::new();
-
-/// 캡처 디렉터리의 지정된 파일 끝에 한 줄을 추가합니다.
-pub(crate) fn append_capture_line(file_name: &str, line: &str) {
-    if !should_write_capture_files() {
-        return;
-    }
-
-    let map = CAPTURE_FILES.get_or_init(|| {
-        let _ = fs::create_dir_all(CAPTURE_DIR);
-        Mutex::new(HashMap::new())
-    });
-    if let Ok(mut files) = map.lock() {
-        let writer = files.entry(file_name.to_string()).or_insert_with(|| {
-            let path = Path::new(CAPTURE_DIR).join(file_name);
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .expect("Failed to open capture file");
-            std::io::BufWriter::new(file)
-        });
-        let _ = writeln!(writer, "{}", line);
-    }
-}
-
-/// 소켓 전용 로그 버퍼에 메시지를 추가합니다. 최대 200줄까지 유지됩니다.
-///
-/// # 인자
-/// * `msg`: 추가할 소켓 로그 텍스트
-pub fn push_socket_log(msg: String) {
-    if !msg.is_empty() {
-        append_capture_line("socket.log", &msg);
-    }
-
-    if !crate::debug::should_send_debug_messages() {
-        return;
-    }
-    // eprintln!("[SOCK] {}", msg);
-    if let Some(buf) = SOCKET_LOG_BUFFER.get() {
-        if let Ok(mut b) = buf.lock() {
-            for line in msg.lines() {
-                b.push_back(line.to_string());
-                if b.len() > 200 {
-                    b.pop_front();
-                }
-            }
-            SOCKET_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-}
+use crate::debug::common::{CpuContext, DebugCommand};
+use crate::ui::UiCommand;
 
 /// 에뮬레이션 로그 출력을 위한 매크로입니다.
 /// 호출 시 전역 인덱스를 부여하고 특수 문자(\r, \n)를 이스케이프 처리하여 기록합니다.
@@ -297,20 +69,10 @@ macro_rules! emu_socket_log {
     }};
 }
 
-use dll::win32::Win32Context;
-use unicorn_engine::{
-    Unicorn,
-    unicorn_const::{Arch, Mode},
-};
-
-use crate::debug::LOG_SCROLL_MAX;
-use crate::debug::common::{CpuContext, DebugCommand};
-use crate::ui::UiCommand;
-
 /// 어플리케이션 메인 진입점입니다.
 /// 하위 시스템(로그, 에뮬레이션, 서버, UI)들을 초기화하고 실행합니다.
 fn main() {
-    detect_resource_dir();
+    boot::detect_resource_dir();
     init_logger();
     append_capture_line(
         "emu.log",

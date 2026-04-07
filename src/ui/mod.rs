@@ -3,6 +3,9 @@ pub mod splash;
 pub mod win_event;
 pub mod win_frame;
 
+/// 내장 폰트 데이터 (gulim.ttf)
+pub const GULIM_FONT_DATA: &[u8] = include_bytes!("../../gulim.ttf");
+
 /// 에뮬레이터 코어(Win32 API)가 UI 스레드에 요청하는 창 조작 커맨드
 pub enum UiCommand {
     /// 새로운 윈도우 창 생성 요청

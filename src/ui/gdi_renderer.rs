@@ -1,14 +1,13 @@
 use rusttype::{Font as TtfFont, Scale, point};
 use std::sync::OnceLock;
 
-static GDI_FONT_DATA: OnceLock<Vec<u8>> = OnceLock::new();
 static GDI_FONT: OnceLock<TtfFont<'static>> = OnceLock::new();
 
 /// 글로벌 TTF 폰트를 초기화하고 반환합니다.
 fn get_ttf_font() -> Option<&'static TtfFont<'static>> {
     GDI_FONT.get_or_init(|| {
-        let data = GDI_FONT_DATA.get_or_init(|| std::fs::read("gulim.ttf").unwrap_or_default());
-        TtfFont::try_from_bytes(data).expect("Failed to load gulim.ttf for GDI rendering")
+        TtfFont::try_from_bytes(crate::ui::GULIM_FONT_DATA)
+            .expect("Failed to load gulim.ttf for GDI rendering")
     });
     GDI_FONT.get()
 }

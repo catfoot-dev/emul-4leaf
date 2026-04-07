@@ -1,0 +1,243 @@
+use crate::{
+    dll::win32::{ApiHookResult, GdiObject, Win32Context},
+    helper::UnicornHelper,
+};
+use unicorn_engine::Unicorn;
+
+// API: HDC CreateCompatibleDC(HDC hdc)
+// 역할: 지정된 디바이스와 호환되는 메모리 디바이스 컨텍스트(DC)를 만듦
+pub(super) fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let hdc = uc.read_arg(0);
+    let ctx = uc.get_data();
+    let new_hdc = ctx.alloc_handle();
+
+    // 참조 DC가 있으면 해당 크기를 상속, 없으면 기본값 사용
+    let (width, height) = {
+        let gdi_objects = ctx.gdi_objects.lock().unwrap();
+        if let Some(GdiObject::Dc { width, height, .. }) = gdi_objects.get(&hdc) {
+            (*width, *height)
+        } else {
+            (640, 480)
+        }
+    };
+
+    ctx.gdi_objects.lock().unwrap().insert(
+        new_hdc,
+        GdiObject::Dc {
+            associated_window: 0,
+            width,
+            height,
+            selected_bitmap: 0,
+            selected_font: 0,
+            selected_brush: 0,
+            selected_pen: 0,
+            selected_region: 0,
+            selected_palette: 0,
+            bk_mode: 1, // TRANSPARENT(1) or OPAQUE(2)
+            bk_color: 0x00FFFFFF,
+            text_color: 0x00000000,
+            rop2_mode: 13, // R2_COPYPEN
+            current_x: 0,
+            current_y: 0,
+        },
+    );
+    crate::emu_log!(
+        "[GDI32] CreateCompatibleDC({:#x}) -> HDC {:#x}",
+        hdc,
+        new_hdc
+    );
+    Some(ApiHookResult::callee(1, Some(new_hdc as i32)))
+}
+
+// API: BOOL DeleteDC(HDC hdc)
+// 역할: 지정된 디바이스 컨텍스트(DC)를 삭제
+pub(super) fn delete_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let hdc = uc.read_arg(0);
+    uc.get_data().gdi_objects.lock().unwrap().remove(&hdc);
+    crate::emu_log!("[GDI32] DeleteDC({:#x}) -> BOOL 1", hdc);
+    Some(ApiHookResult::callee(1, Some(1)))
+}
+
+// API: HGDIOBJ SelectObject(HDC hdc, HGDIOBJ h)
+// 역할: 지정된 DC로 객체를 선택하여 기존의 동일한 유형의 객체를 바꿈
+pub(super) fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let hdc = uc.read_arg(0);
+    let hobj = uc.read_arg(1);
+    let ctx = uc.get_data();
+    let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
+    let obj_clone = gdi_objects.get(&hobj).cloned();
+    let mut old_hobj = 0;
+    if let Some(GdiObject::Dc {
+        selected_bitmap,
+        selected_font,
+        selected_brush,
+        selected_pen,
+        selected_region,
+        selected_palette,
+        ..
+    }) = gdi_objects.get_mut(&hdc)
+    {
+        match obj_clone {
+            Some(GdiObject::Bitmap { .. }) => {
+                old_hobj = *selected_bitmap;
+                *selected_bitmap = hobj;
+            }
+            Some(GdiObject::Font { .. }) => {
+                old_hobj = *selected_font;
+                *selected_font = hobj;
+            }
+            Some(GdiObject::Brush { .. }) => {
+                old_hobj = *selected_brush;
+                *selected_brush = hobj;
+            }
+            Some(GdiObject::Pen { .. }) => {
+                old_hobj = *selected_pen;
+                *selected_pen = hobj;
+            }
+            Some(GdiObject::Region { .. }) => {
+                old_hobj = *selected_region;
+                *selected_region = hobj;
+            }
+            Some(GdiObject::Palette { .. }) => {
+                old_hobj = *selected_palette;
+                *selected_palette = hobj;
+            }
+            Some(GdiObject::StockObject(id)) => {
+                if id < 5 || id == 18 {
+                    old_hobj = *selected_brush;
+                    *selected_brush = hobj;
+                } else if id >= 5 && id <= 8 {
+                    old_hobj = *selected_pen;
+                    *selected_pen = hobj;
+                } else if id >= 10 && id <= 17 {
+                    old_hobj = *selected_font;
+                    *selected_font = hobj;
+                }
+            }
+            None => { /* 알 수 없는 객체이거나 이미 삭제된 경우 */ }
+            _ => { /* Dc 객체는 선택할 수 없음 */ }
+        }
+    }
+    crate::emu_log!(
+        "[GDI32] SelectObject({:#x}, {:#x}) -> HGDIOBJ {:#x}",
+        hdc,
+        hobj,
+        old_hobj
+    );
+    Some(ApiHookResult::callee(2, Some(old_hobj as i32)))
+}
+
+// API: BOOL DeleteObject(HGDIOBJ ho)
+// 역할: 논리적 펜, 브러시, 폰트, 비트맵, 영역, 또는 팔레트를 삭제하여 시스템 리소스를 확보
+pub(super) fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let hobj = uc.read_arg(0);
+    uc.get_data().gdi_objects.lock().unwrap().remove(&hobj);
+    crate::emu_log!("[GDI32] DeleteObject({:#x}) -> BOOL 1", hobj);
+    Some(ApiHookResult::callee(1, Some(1)))
+}
+
+// API: HGDIOBJ GetStockObject(int i)
+// 역할: 미리 정의된 펜, 브러시, 폰트 또는 팔레트 중 하나의 핸들을 가져옴
+pub(super) fn get_stock_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let index = uc.read_arg(0);
+    let ctx = uc.get_data();
+    let handle = ctx.alloc_handle();
+    ctx.gdi_objects
+        .lock()
+        .unwrap()
+        .insert(handle, GdiObject::StockObject(index));
+    crate::emu_log!("[GDI32] GetStockObject({}) -> HGDIOBJ {:#x}", index, handle);
+    Some(ApiHookResult::callee(1, Some(handle as i32)))
+}
+
+// API: int GetDeviceCaps(HDC hdc, int index)
+// 역할: 지정된 디바이스에 대한 특정 장치 구성 정보를 가져옴
+pub(super) fn get_device_caps(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let hdc = uc.read_arg(0);
+    let index = uc.read_arg(1);
+    let ctx = uc.get_data();
+    let gdi_objects = ctx.gdi_objects.lock().unwrap();
+    let mut result = 0;
+    if let Some(GdiObject::Dc { width, height, .. }) = gdi_objects.get(&hdc) {
+        match index {
+            1 => result = *width,  // HORZRES
+            2 => result = *height, // VERTRES
+            3 => result = *width,  // HORZSIZE
+            4 => result = *height, // VERTSIZE
+            5 => result = 96,      // LOGPIXELSX
+            6 => result = 96,      // LOGPIXELSY
+            10 => result = 1,      // BITSPIXEL
+            11 => result = 1,      // PLANES
+            14 => result = 1,      // SHADEBLENDCAPS
+            16 => result = 1,      // BITSYPIXELS
+            17 => result = 1,      // NUMRESERVED
+            18 => result = 1,      // CURVECAPS
+            19 => result = 1,      // FONTTYPE
+            20 => result = 1,      // HORZRES
+            21 => result = 1,      // VERTRES
+            22 => result = 1,      // LOGPIXELSX
+            23 => result = 1,      // LOGPIXELSY
+            24 => result = 1,      // BITSYPIXELS
+            25 => result = 1,      // NUMRESERVED
+            26 => result = 1,      // CURVECAPS
+            27 => result = 1,      // FONTTYPE
+            _ => {}                // 알 수 없는 인덱스
+        }
+    }
+    crate::emu_log!(
+        "[GDI32] GetDeviceCaps({:#x}, {}) -> int {}",
+        hdc,
+        index,
+        result
+    );
+    Some(ApiHookResult::callee(2, Some(result)))
+}
+
+// API: int GetObject(HANDLE h, int c, LPVOID pv)
+// 역할: GDI 오브젝트의 정보를 BITMAP 구조체 등으로 반환
+pub(super) fn get_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let h = uc.read_arg(0);
+    let _c = uc.read_arg(1);
+    let pv = uc.read_arg(2);
+
+    // 락을 먼저 해제하고 write (borrow 충돌 방지)
+    let bitmap_info = {
+        let gdi = uc.get_data().gdi_objects.lock().unwrap();
+        match gdi.get(&h) {
+            Some(GdiObject::Bitmap {
+                width,
+                height,
+                bpp,
+                bits_addr,
+                ..
+            }) => {
+                let bytes_per_pixel = (*bpp / 8).max(1);
+                let width_bytes = (width * bytes_per_pixel + 3) & !3;
+                Some((*width, *height, width_bytes, *bpp, bits_addr.unwrap_or(0)))
+            }
+            Some(GdiObject::Font { .. }) => None,
+            _ => None,
+        }
+    };
+
+    let result = if let Some((width, height, width_bytes, bpp, bits)) = bitmap_info {
+        if pv != 0 {
+            uc.write_u32(pv as u64, 0); // bmType
+            uc.write_u32(pv as u64 + 4, width); // bmWidth
+            uc.write_u32(pv as u64 + 8, height); // bmHeight
+            uc.write_u32(pv as u64 + 12, width_bytes); // bmWidthBytes
+            uc.write_u32(pv as u64 + 16, 1); // bmPlanes
+            uc.write_u32(pv as u64 + 20, bpp); // bmBitsPixel
+            uc.write_u32(pv as u64 + 24, bits); // bmBits
+        }
+        28
+    } else {
+        let gdi = uc.get_data().gdi_objects.lock().unwrap();
+        match gdi.get(&h) {
+            Some(GdiObject::Font { .. }) => 60,
+            _ => 0,
+        }
+    };
+    crate::emu_log!("[GDI32] GetObject({:#x}) -> {}", h, result);
+    Some(ApiHookResult::callee(3, Some(result)))
+}

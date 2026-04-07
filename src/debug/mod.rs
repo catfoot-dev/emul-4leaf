@@ -1,4 +1,5 @@
 pub mod common;
+pub mod logging;
 
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -7,7 +8,6 @@ use embedded_graphics::{pixelcolor::Rgb888, prelude::*, text::Text};
 use embedded_ttf::FontTextStyleBuilder;
 use rusttype::Font as TtfFont;
 
-static FONT_DATA: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
 static TTF_FONT: std::sync::OnceLock<TtfFont<'static>> = std::sync::OnceLock::new();
 
 pub const LOG_SCROLL_MAX: usize = 5000;
@@ -310,11 +310,7 @@ impl Painter for Debug {
 
         // TTF 폰트 초기화 (한글 지원)
         let ttf_font = TTF_FONT.get_or_init(|| {
-            let data = FONT_DATA.get_or_init(|| {
-                let path = "gulim.ttf";
-                std::fs::read(path).unwrap_or_else(|_| Vec::new()).leak()
-            });
-            TtfFont::try_from_bytes(data).expect("Failed to load font")
+            TtfFont::try_from_bytes(crate::ui::GULIM_FONT_DATA).expect("Failed to load font")
         });
 
         let style_w = FontTextStyleBuilder::new(ttf_font.clone())
