@@ -76,6 +76,14 @@ pub enum UiCommand {
     SetCursor { hwnd: u32, hcursor: u32 },
     /// 윈도우 드래그 시작 요청
     DragWindow { hwnd: u32 },
+    /// 윈도우 투명 모드 변경 요청 (SetWindowRgn 등에서 사용)
+    SetWindowTransparent { hwnd: u32, transparent: bool },
+    /// 윈도우 최소화 요청
+    MinimizeWindow { hwnd: u32 },
+    /// 윈도우 최대화 요청
+    MaximizeWindow { hwnd: u32 },
+    /// 윈도우 기본 상태 복구 요청
+    RestoreWindow { hwnd: u32 },
 }
 
 /// 윈도우 콘텐츠를 그리는 인터페이스

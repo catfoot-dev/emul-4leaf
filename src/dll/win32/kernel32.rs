@@ -24,12 +24,12 @@ const CREATE_SUSPENDED: u32 = 0x0000_0004;
 /// `STACK_SIZE_PARAM_IS_A_RESERVATION` 스택 예약 크기 플래그입니다.
 const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
 /// 명시적인 타임아웃이 있는 대기 API를 다시 확인할 기본 폴링 간격입니다.
-const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// 무한 대기 계열을 다시 확인할 기본 폴링 간격입니다.
 ///
-/// 외부 이벤트를 직접 깨울 수 없는 구조라 주기적 확인은 필요하지만,
-/// 10ms로 계속 폴링하면 idle CPU 사용량이 커져 조금 더 완만하게 확인합니다.
-const WAIT_POLL_INTERVAL_IDLE: Duration = Duration::from_millis(25);
+/// UI 스레드가 메시지를 넣으면 wake_emulator()가 main_resume_time을 즉시 클리어하므로
+/// 이 값은 외부 이벤트 없이 폴백으로만 쓰입니다.
+const WAIT_POLL_INTERVAL_IDLE: Duration = Duration::from_millis(5);
 
 /// `KERNEL32.dll` 프록시 구현 모듈
 ///

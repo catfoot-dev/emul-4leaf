@@ -365,6 +365,12 @@ pub struct WindowState {
     pub window_rgn: u32,
     /// 윈도우가 다시 그려져야 하는지 여부 (WM_PAINT 생성용)
     pub needs_paint: bool,
+    /// WM_NCHITTEST 캐시: 마지막 테스트 좌표 (LPARAM 형식)
+    pub last_hittest_lparam: u32,
+    /// WM_NCHITTEST 캐시: 마지막 결과 값
+    pub last_hittest_result: u32,
+    /// 윈도우 Z 순서를 결정합니다. 값이 높을수록 전면에 표시됩니다.
+    pub z_order: u32,
 }
 
 /// Unicorn 엔진의 `User Data`에 적재되어, 모든 Win32 가상 OS 환경의 전역 상태를
@@ -462,6 +468,8 @@ pub struct Win32Context {
     pub main_wait_deadline: Arc<Mutex<Option<Instant>>>,
     /// 중첩 emu_start 호출 깊이 (코드 훅 내 재귀 제한용)
     pub emu_depth: Arc<AtomicU32>,
+    /// 에뮬레이터 스레드 핸들 (park/unpark 기반 즉시 깨우기용)
+    pub emu_thread: Arc<Mutex<Option<std::thread::Thread>>>,
     /// Rare.dll 프록시가 보유한 CPAL 오디오 엔진 상태
     pub(crate) rare_audio: Arc<Mutex<Option<RareAudioEngine>>>,
     /// Rare.dll 프록시가 생성한 컨텍스트 객체 맵
@@ -527,6 +535,7 @@ impl Win32Context {
             main_resume_time: Arc::new(Mutex::new(None)),
             main_wait_deadline: Arc::new(Mutex::new(None)),
             emu_depth: Arc::new(AtomicU32::new(0)),
+            emu_thread: Arc::new(Mutex::new(None)),
             rare_audio: Arc::new(Mutex::new(None)),
             rare_contexts: Arc::new(Mutex::new(HashMap::new())),
             rare_sounds: Arc::new(Mutex::new(HashMap::new())),
@@ -715,6 +724,7 @@ impl Clone for Win32Context {
             main_resume_time: self.main_resume_time.clone(),
             main_wait_deadline: self.main_wait_deadline.clone(),
             emu_depth: self.emu_depth.clone(),
+            emu_thread: self.emu_thread.clone(),
             rare_audio: self.rare_audio.clone(),
             rare_contexts: self.rare_contexts.clone(),
             rare_sounds: self.rare_sounds.clone(),

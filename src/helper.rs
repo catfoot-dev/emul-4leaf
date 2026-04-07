@@ -38,7 +38,7 @@ const SIZE_4KB: u64 = 4 * 1024;
 const DEBUG_AUTO_QUANTUM: usize = 200_000;
 const DEBUG_STEP_QUANTUM: usize = 1;
 const DEBUG_STATE_SEND_INTERVAL: Duration = Duration::from_millis(250);
-const EMULATOR_IDLE_SLEEP_SLICE: Duration = Duration::from_millis(25);
+const EMULATOR_IDLE_SLEEP_SLICE: Duration = Duration::from_millis(5);
 
 /// 함수 호출 규약에 따른 스택 정리(Cleanup) 시 이동해야 할 ESP의 상대적 위치를 계산합니다.
 ///
@@ -973,6 +973,9 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
         let mut debug_auto_run = true;
         let mut debug_last_state_sent = Instant::now();
 
+        // 에뮬레이터 스레드 핸들을 저장하여 UI 스레드에서 unpark로 즉시 깨울 수 있도록 합니다.
+        *self.get_data().emu_thread.lock().unwrap() = Some(std::thread::current());
+
         if let Some(state_tx) = state_tx.as_ref() {
             if state_tx.send(capture_cpu_context(self)).is_ok() {
                 debug_last_state_sent = Instant::now();
@@ -1027,17 +1030,27 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 }
             }
 
-            // 메인 스레드(tid=0) 실행
-            let quantum = if cmd_rx.is_some() {
-                if debug_auto_run {
-                    DEBUG_AUTO_QUANTUM
-                } else {
-                    DEBUG_STEP_QUANTUM
-                }
-            } else {
-                200_000
+            // 메인 스레드(tid=0) 실행 — resume_time이 아직 도래하지 않았으면 건너뜁니다.
+            // GetMessage 등이 retry()를 반환할 때 설정한 대기 시간을 존중하여
+            // 메시지가 없을 때 불필요한 spin을 방지합니다.
+            let should_run_main = {
+                let ctx = self.get_data();
+                let resume = *ctx.main_resume_time.lock().unwrap();
+                resume.map_or(true, |t| Instant::now() >= t)
             };
-            let _ = self.emu_start(eip, EXIT_ADDRESS as u64, 0, quantum);
+
+            if should_run_main {
+                let quantum = if cmd_rx.is_some() {
+                    if debug_auto_run {
+                        DEBUG_AUTO_QUANTUM
+                    } else {
+                        DEBUG_STEP_QUANTUM
+                    }
+                } else {
+                    200_000
+                };
+                let _ = self.emu_start(eip, EXIT_ADDRESS as u64, 0, quantum);
+            }
 
             // 백그라운드 스레드 스케줄링
             KERNEL32::schedule_threads(self);
@@ -1080,7 +1093,7 @@ impl UnicornHelper for Unicorn<'_, Win32Context> {
                 let now = Instant::now();
                 if res_time > now {
                     let diff = res_time.duration_since(now);
-                    std::thread::sleep(diff.min(EMULATOR_IDLE_SLEEP_SLICE));
+                    std::thread::park_timeout(diff.min(EMULATOR_IDLE_SLEEP_SLICE));
                 }
             }
         }

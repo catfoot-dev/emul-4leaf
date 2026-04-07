@@ -522,6 +522,7 @@ pub fn run_dnet_handler(
                             handle_main_frame(&pkt, channel_id, &mut game_state)
                         }
                         0x64 => handle_system(&pkt, channel_id, &mut game_state),
+                        0x68 => handle_ping(&pkt, channel_id),
                         0x0A => handle_world_map(&pkt, channel_id),
                         0x0B => handle_chat_town_main(&pkt, channel_id),
                         0x0C => handle_chat_town_sub(&pkt, channel_id),
@@ -757,6 +758,28 @@ fn build_provisional_worldmap_stage_payload() -> Vec<u8> {
 /// 채널 2에 보내는 임시 WorldMap stage bootstrap raw `msg=0`입니다.
 fn build_provisional_worldmap_stage_bootstrap_response(ch: u16) -> Vec<u8> {
     build_main_frame_raw_message(ch, 0, &build_provisional_worldmap_stage_payload())
+}
+
+/// MainType 0x68 — 핑(Ping) / KeepAlive 메시지를 처리합니다.
+fn handle_ping(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
+    crate::emu_socket_log!("[PING] 핑 요청 수신 (sub=0x{:02x}, len={}) → 에코 응답", pkt.sub_type, pkt.payload.len());
+    
+    // 수신한 서브타입과 페이로드를 그대로 에코 응답합니다.
+    HandlerOutcome {
+        responses: vec![protocol::create_app_packet(
+            ch,
+            pkt.main_type,
+            pkt.sub_type,
+            &pkt.payload,
+        )],
+        phase_update: None,
+        analysis_note: Some(format!(
+            "ping echoed main=0x{:02x} sub=0x{:02x} payload={}B",
+            pkt.main_type,
+            pkt.sub_type,
+            pkt.payload.len()
+        )),
+    }
 }
 
 /// MainType 0x64 — 공통 시스템 메시지 (버전 핸드셰이크, 로그인 등)를 처리합니다.

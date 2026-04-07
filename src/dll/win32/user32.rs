@@ -451,6 +451,9 @@ impl USER32 {
             surface_bitmap,
             window_rgn: 0,
             needs_paint: true,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order: 0,
         };
 
         {
@@ -891,7 +894,6 @@ impl USER32 {
 
     // API: BOOL GetMenuItemInfoA(HMENU hMenu, UINT item, BOOL fByPos, LPMENUITEMINFOA lpmii)
     // 역할: 메뉴 항목에 대한 정보를 가져옴
-    // 구현 생략 사유: 메뉴 아이템 속성 조회. 에뮬레이터에서는 렌더링 가능한 시스템 메뉴 바를 그리지 않으므로 무시함.
     pub fn get_menu_item_info_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let hmenu = uc.read_arg(0);
         let item = uc.read_arg(1);
@@ -1028,11 +1030,14 @@ impl USER32 {
         let width = uc.read_arg(3);
         let height = uc.read_arg(4);
         let repaint = uc.read_arg(5);
-        uc.get_data()
-            .win_event
-            .lock()
-            .unwrap()
-            .move_window(hwnd, x, y, width, height);
+        {
+            let ctx = uc.get_data();
+            let mut win_event = ctx.win_event.lock().unwrap();
+            win_event.move_window(hwnd, x, y, width, height);
+            if let Some(w) = win_event.windows.get_mut(&hwnd) {
+                w.last_hittest_lparam = u32::MAX;
+            }
+        }
         uc.get_data().sync_window_surface_bitmap(hwnd);
         crate::emu_log!(
             "[USER32] MoveWindow({:#x}, {}, {}, {}, {}, {}) -> BOOL 1",
@@ -1056,15 +1061,14 @@ impl USER32 {
         let cx = uc.read_arg(4);
         let cy = uc.read_arg(5);
         let flags = uc.read_arg(6);
-        uc.get_data().win_event.lock().unwrap().set_window_pos(
-            hwnd,
-            insert_after,
-            x,
-            y,
-            cx,
-            cy,
-            flags,
-        );
+        {
+            let ctx = uc.get_data();
+            let mut win_event = ctx.win_event.lock().unwrap();
+            win_event.set_window_pos(hwnd, insert_after, x, y, cx, cy, flags);
+            if let Some(w) = win_event.windows.get_mut(&hwnd) {
+                w.last_hittest_lparam = u32::MAX;
+            }
+        }
         uc.get_data().sync_window_surface_bitmap(hwnd);
         crate::emu_log!(
             "[USER32] SetWindowPos({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
@@ -1126,9 +1130,11 @@ impl USER32 {
         uc.write_u32(rect_addr as u64 + 8, w as u32);
         uc.write_u32(rect_addr as u64 + 12, h as u32);
         crate::emu_log!(
-            "[USER32] GetClientRect({:#x}, {:#x}) -> BOOL 1",
+            "[USER32] GetClientRect({:#x}, {:#x}) -> BOOL 1 ({}x{})",
             hwnd,
-            rect_addr
+            rect_addr,
+            w,
+            h
         );
         Some(ApiHookResult::callee(2, Some(1)))
     }
@@ -1141,41 +1147,10 @@ impl USER32 {
         let menu = uc.read_arg(2);
         let ex_style = uc.read_arg(3);
 
-        let mut left = uc.read_u32(rect_addr as u64) as i32;
-        let mut top = uc.read_u32(rect_addr as u64 + 4) as i32;
-        let mut right = uc.read_u32(rect_addr as u64 + 8) as i32;
-        let mut bottom = uc.read_u32(rect_addr as u64 + 12) as i32;
-
-        // WS_CAPTION = 0x00C00000
-        if style & 0x00C00000 == 0x00C00000 {
-            top -= 23; // SM_CYCAPTION (Standard)
-        }
-
-        // WS_THICKFRAME = 0x00040000
-        if style & 0x00040000 != 0 {
-            left -= 4; // SM_CXFRAME
-            top -= 4; // SM_CYFRAME
-            right += 4;
-            bottom += 4;
-        } else if style & 0x00800000 != 0 {
-            // WS_BORDER
-            left -= 1; // SM_CXBORDER
-            top -= 1; // SM_CYBORDER
-            right += 1;
-            bottom += 1;
-        }
-
-        if menu != 0 {
-            top -= 19; // SM_CYMENU
-        }
-
-        // WS_EX_CLIENTEDGE = 0x00000200
-        if ex_style & 0x00000200 != 0 {
-            left -= 2; // SM_CXEDGE
-            top -= 2;
-            right += 2;
-            bottom += 2;
-        }
+        let left = uc.read_u32(rect_addr as u64) as i32;
+        let top = uc.read_u32(rect_addr as u64 + 4) as i32;
+        let right = uc.read_u32(rect_addr as u64 + 8) as i32;
+        let bottom = uc.read_u32(rect_addr as u64 + 12) as i32;
 
         uc.write_u32(rect_addr as u64, left as u32);
         uc.write_u32(rect_addr as u64 + 4, top as u32);
@@ -1698,7 +1673,10 @@ impl USER32 {
         let filename = uc.read_string(lpfilename as u64);
         let ctx = uc.get_data();
 
-        let filename = crate::resource_dir().join(&filename).to_string_lossy().to_string();
+        let filename = crate::resource_dir()
+            .join(&filename)
+            .to_string_lossy()
+            .to_string();
         let mut frames = Vec::new();
         let mut is_animated = false;
         let mut display_rate_jiffies: u32 = 10; // ANI 기본값 (≈167ms)
@@ -1718,9 +1696,7 @@ impl USER32 {
                     // anih 구조: cbSize(4), nFrames(4), nSteps(4), cx(4), cy(4),
                     //            cBitCount(4), cPlanes(4), iDispRate(4), ...
                     if chunk_id == b"anih" && chunk_size >= 32 && pos + 32 <= data.len() {
-                        let rate = u32::from_le_bytes(
-                            data[pos + 28..pos + 32].try_into().unwrap(),
-                        );
+                        let rate = u32::from_le_bytes(data[pos + 28..pos + 32].try_into().unwrap());
                         if rate > 0 {
                             display_rate_jiffies = rate;
                         }
@@ -2827,7 +2803,16 @@ impl USER32 {
         let mut win_event = ctx.win_event.lock().unwrap();
 
         let ret = if let Some(win) = win_event.get_window_mut(hwnd) {
+            let had_rgn = win.window_rgn != 0;
+            let has_rgn = h_rgn != 0;
             win.window_rgn = h_rgn;
+            win_event.bump_generation();
+            if had_rgn != has_rgn {
+                win_event.send_ui_command(crate::ui::UiCommand::SetWindowTransparent {
+                    hwnd,
+                    transparent: has_rgn,
+                });
+            }
             if b_redraw != 0 {
                 win_event.update_window(hwnd);
             }
@@ -3103,9 +3088,66 @@ impl USER32 {
         let _l_param = uc.read_arg(3);
         let default_ret = match msg {
             0x0081 => 1, // WM_NCCREATE
-            0x00A1 => {  // WM_NCLBUTTONDOWN
-                if _w_param == 2 { // HTCAPTION
+            0x00A1 => {
+                // WM_NCLBUTTONDOWN
+                if _w_param == 2 {
+                    // HTCAPTION
                     uc.get_data().win_event.lock().unwrap().drag_window(hwnd);
+                }
+                0
+            }
+            0x00A2 => {
+                // WM_NCLBUTTONUP
+                match _w_param {
+                    20 => { // HTCLOSE
+                        let ctx = uc.get_data();
+                        let time = ctx.start_time.elapsed().as_millis() as u32;
+                        let mut q = ctx.message_queue.lock().unwrap();
+                        q.push_back([hwnd, 0x0112, 0xF060, _l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_CLOSE
+                    }
+                    8 => { // HTMINBUTTON
+                        let ctx = uc.get_data();
+                        let time = ctx.start_time.elapsed().as_millis() as u32;
+                        let mut q = ctx.message_queue.lock().unwrap();
+                        q.push_back([hwnd, 0x0112, 0xF020, _l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_MINIMIZE
+                    }
+                    9 => { // HTMAXBUTTON
+                        let ctx = uc.get_data();
+                        let time = ctx.start_time.elapsed().as_millis() as u32;
+                        let mut q = ctx.message_queue.lock().unwrap();
+                        q.push_back([hwnd, 0x0112, 0xF030, _l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_MAXIMIZE
+                    }
+                    _ => {}
+                }
+                0
+            }
+            0x0112 => {
+                // WM_SYSCOMMAND
+                let cmd = _w_param & 0xFFF0;
+                match cmd {
+                    0xF060 => { // SC_CLOSE
+                        let ctx = uc.get_data();
+                        let time = ctx.start_time.elapsed().as_millis() as u32;
+                        let mut q = ctx.message_queue.lock().unwrap();
+                        q.push_back([hwnd, 0x0010, 0, 0, time, 0, 0]); // WM_CLOSE
+                    }
+                    0xF020 => { // SC_MINIMIZE
+                        uc.get_data().win_event.lock().unwrap().minimize_window(hwnd);
+                    }
+                    0xF030 => { // SC_MAXIMIZE
+                        let ctx = uc.get_data();
+                        let mut win_event = ctx.win_event.lock().unwrap();
+                        let is_zoomed = win_event.windows.get(&hwnd).map(|w| w.zoomed).unwrap_or(false);
+                        if is_zoomed {
+                            win_event.restore_window(hwnd);
+                        } else {
+                            win_event.maximize_window(hwnd);
+                        }
+                    }
+                    0xF120 => { // SC_RESTORE
+                        uc.get_data().win_event.lock().unwrap().restore_window(hwnd);
+                    }
+                    _ => {}
                 }
                 0
             }
@@ -3615,19 +3657,38 @@ impl USER32 {
                 let wnd_proc = {
                     let ctx = uc.get_data();
                     let win_event = ctx.win_event.lock().unwrap();
-                    win_event.windows.get(&hwnd).map(|w| w.wnd_proc).unwrap_or(0)
+                    win_event
+                        .windows
+                        .get(&hwnd)
+                        .map(|w| w.wnd_proc)
+                        .unwrap_or(0)
                 };
                 if wnd_proc != 0 {
-                    let (win_x, win_y) = {
+                    let (win_x, win_y, cached_lparam, cached_result) = {
                         let ctx = uc.get_data();
                         let win_event = ctx.win_event.lock().unwrap();
-                        win_event.windows.get(&hwnd).map(|w| (w.x, w.y)).unwrap_or((0, 0))
+                        win_event
+                            .windows
+                            .get(&hwnd)
+                            .map(|w| (w.x, w.y, w.last_hittest_lparam, w.last_hittest_result))
+                            .unwrap_or((0, 0, u32::MAX, 0))
                     };
                     let screen_x = (m[5] as i32) + win_x;
                     let screen_y = (m[6] as i32) + win_y;
                     let screen_lparam = ((screen_y as u32) << 16) | ((screen_x as u32) & 0xFFFF);
-                    
-                    let hit_test = Self::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0084, 0, screen_lparam);
+
+                    let hit_test = if screen_lparam == cached_lparam {
+                        cached_result as i32
+                    } else {
+                        let result = Self::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0084, 0, screen_lparam);
+                        let ctx = uc.get_data();
+                        let mut win_event = ctx.win_event.lock().unwrap();
+                        if let Some(w) = win_event.windows.get_mut(&hwnd) {
+                            w.last_hittest_lparam = screen_lparam;
+                            w.last_hittest_result = result as u32;
+                        }
+                        result
+                    };
                     if hit_test != 1 && hit_test != 0 {
                         m[1] = m[1] - 0x0200 + 0x00A0;
                         m[2] = hit_test as u32;
@@ -3703,7 +3764,7 @@ impl USER32 {
         if msg.is_none() {
             // 메인 스레드가 idle 상태임을 표시하여 메인 루프의 idle sleep이 작동하도록 합니다.
             let ctx = uc.get_data();
-            let resume = Instant::now() + std::time::Duration::from_millis(10);
+            let resume = Instant::now() + std::time::Duration::from_millis(1);
             *ctx.main_resume_time.lock().unwrap() = Some(resume);
             return Some(ApiHookResult::retry());
         }
@@ -3714,19 +3775,38 @@ impl USER32 {
                 let wnd_proc = {
                     let ctx = uc.get_data();
                     let win_event = ctx.win_event.lock().unwrap();
-                    win_event.windows.get(&hwnd).map(|w| w.wnd_proc).unwrap_or(0)
+                    win_event
+                        .windows
+                        .get(&hwnd)
+                        .map(|w| w.wnd_proc)
+                        .unwrap_or(0)
                 };
                 if wnd_proc != 0 {
-                    let (win_x, win_y) = {
+                    let (win_x, win_y, cached_lparam, cached_result) = {
                         let ctx = uc.get_data();
                         let win_event = ctx.win_event.lock().unwrap();
-                        win_event.windows.get(&hwnd).map(|w| (w.x, w.y)).unwrap_or((0, 0))
+                        win_event
+                            .windows
+                            .get(&hwnd)
+                            .map(|w| (w.x, w.y, w.last_hittest_lparam, w.last_hittest_result))
+                            .unwrap_or((0, 0, u32::MAX, 0))
                     };
                     let screen_x = (m[5] as i32) + win_x;
                     let screen_y = (m[6] as i32) + win_y;
                     let screen_lparam = ((screen_y as u32) << 16) | ((screen_x as u32) & 0xFFFF);
-                    
-                    let hit_test = Self::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0084, 0, screen_lparam);
+
+                    let hit_test = if screen_lparam == cached_lparam {
+                        cached_result as i32
+                    } else {
+                        let result = Self::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0084, 0, screen_lparam);
+                        let ctx = uc.get_data();
+                        let mut win_event = ctx.win_event.lock().unwrap();
+                        if let Some(w) = win_event.windows.get_mut(&hwnd) {
+                            w.last_hittest_lparam = screen_lparam;
+                            w.last_hittest_result = result as u32;
+                        }
+                        result
+                    };
                     if hit_test != 1 && hit_test != 0 {
                         m[1] = m[1] - 0x0200 + 0x00A0;
                         m[2] = hit_test as u32;

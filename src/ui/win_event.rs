@@ -163,6 +163,7 @@ impl WinEvent {
         if let Some(state) = self.windows.get_mut(&hwnd) {
             state.width = width as i32;
             state.height = height as i32;
+            state.last_hittest_lparam = u32::MAX;
             self.bump_generation();
         }
     }
@@ -188,6 +189,33 @@ impl WinEvent {
         } else {
             self.send_ui_command(UiCommand::ShowWindow { hwnd, visible });
         }
+    }
+
+    /// 윈도우 최소화 상태 변경 및 UI 알림
+    pub fn minimize_window(&mut self, hwnd: u32) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.iconic = true;
+            state.zoomed = false;
+        }
+        self.send_ui_command(UiCommand::MinimizeWindow { hwnd });
+    }
+
+    /// 윈도우 최대화 상태 변경 및 UI 알림
+    pub fn maximize_window(&mut self, hwnd: u32) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.iconic = false;
+            state.zoomed = true;
+        }
+        self.send_ui_command(UiCommand::MaximizeWindow { hwnd });
+    }
+
+    /// 윈도우 일반 상태 변경 및 UI 알림
+    pub fn restore_window(&mut self, hwnd: u32) {
+        if let Some(state) = self.windows.get_mut(&hwnd) {
+            state.iconic = false;
+            state.zoomed = false;
+        }
+        self.send_ui_command(UiCommand::RestoreWindow { hwnd });
     }
 
     /// 윈도우 위치 및 크기 변경, UI 알림
@@ -221,40 +249,79 @@ impl WinEvent {
     pub fn set_window_pos(
         &mut self,
         hwnd: u32,
-        _insert_after: u32,
+        insert_after: u32,
         x: u32,
         y: u32,
         cx: u32,
         cy: u32,
-        _flags: u32,
+        flags: u32,
     ) {
         let is_child = self
             .windows
             .get(&hwnd)
             .map(|state| (state.style & WS_CHILD) != 0)
             .unwrap_or(false);
-        // SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001
-        if let Some(state) = self.windows.get_mut(&hwnd) {
-            if _flags & 0x0002 == 0 {
-                state.x = x as i32;
-                state.y = y as i32;
+
+        let parent = self.windows.get(&hwnd).map(|s| s.parent).unwrap_or(0);
+
+        // SWP_NOZORDER = 0x0004
+        if flags & 0x0004 == 0 {
+            let mut new_z_order = None;
+
+            if insert_after == 0 {
+                // HWND_TOP
+                let max_z = self
+                    .windows
+                    .iter()
+                    .filter(|(k, w)| w.parent == parent && **k != hwnd)
+                    .map(|(_, w)| w.z_order)
+                    .max()
+                    .unwrap_or(0);
+                new_z_order = Some(max_z + 1);
+            } else if insert_after == 1 {
+                // HWND_BOTTOM
+                let min_z = self
+                    .windows
+                    .iter()
+                    .filter(|(k, w)| w.parent == parent && **k != hwnd)
+                    .map(|(_, w)| w.z_order)
+                    .min()
+                    .unwrap_or(0);
+                new_z_order = Some(min_z.saturating_sub(1));
             }
-            if _flags & 0x0001 == 0 {
-                state.width = cx as i32;
-                state.height = cy as i32;
+
+            if let Some(z) = new_z_order {
+                if let Some(state) = self.windows.get_mut(&hwnd) {
+                    state.z_order = z;
+                }
             }
-            self.bump_generation();
         }
+
+        // SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001
+        let Some(state) = self.windows.get_mut(&hwnd) else {
+            return;
+        };
+        if flags & 0x0002 == 0 {
+            state.x = x as i32;
+            state.y = y as i32;
+        }
+        if flags & 0x0001 == 0 {
+            state.width = cx as i32;
+            state.height = cy as i32;
+        }
+        let (final_x, final_y, final_w, final_h) =
+            (state.x, state.y, state.width as u32, state.height as u32);
+        self.bump_generation();
         // 자식 창은 부모 표면 합성으로 그리므로 호스트 창만 다시 그리면 됩니다.
         if is_child {
             self.request_visual_refresh(hwnd);
         } else {
             self.send_ui_command(UiCommand::MoveWindow {
                 hwnd,
-                x: x as i32,
-                y: y as i32,
-                width: cx,
-                height: cy,
+                x: final_x,
+                y: final_y,
+                width: final_w,
+                height: final_h,
             });
         }
     }

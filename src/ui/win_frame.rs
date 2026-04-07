@@ -45,11 +45,11 @@ struct HostWindowStyle {
 }
 
 impl HostWindowStyle {
-    fn from_guest(style: u32, ex_style: u32, use_native_frame: bool) -> Self {
+    fn from_guest(style: u32, ex_style: u32, use_native_frame: bool, parent: u32) -> Self {
         let decorations = use_native_frame && (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
         let resizable = use_native_frame && (style & WS_THICKFRAME) != 0;
         let transparent = (ex_style & WS_EX_LAYERED) != 0;
-        let topmost = (ex_style & WS_EX_TOPMOST) != 0;
+        let topmost = (ex_style & WS_EX_TOPMOST) != 0 || parent != 0;
         #[cfg(target_os = "windows")]
         let skip_taskbar = (ex_style & WS_EX_TOOLWINDOW) != 0 && (ex_style & WS_EX_APPWINDOW) == 0;
 
@@ -126,6 +126,8 @@ pub struct WinFrame {
 
     /// 현재 활성화된 커서 애니메이션 상태 (None이면 정적 커서)
     cursor_anim: Option<CursorAnimState>,
+    /// 마지막으로 마우스 이벤트가 처리된 시간 (스로틀링용)
+    last_cursor_moved: Option<std::time::Instant>,
 }
 
 impl WinFrame {
@@ -145,6 +147,7 @@ impl WinFrame {
             emu_context: context,
             initial_painters,
             cursor_anim: None,
+            last_cursor_moved: None,
         }
     }
 
@@ -161,13 +164,28 @@ impl WinFrame {
             .and_then(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// 에뮬레이터 스레드를 즉시 깨워 새 메시지를 처리하도록 합니다.
+    /// main_resume_time을 클리어하여 메인 스레드가 즉시 실행되게 합니다.
+    fn wake_emulator(&self) {
+        // 메인 스레드의 대기 시간을 해제하여 다음 루프에서 즉시 실행되도록 합니다.
+        if let Ok(mut guard) = self.emu_context.main_resume_time.try_lock() {
+            *guard = None;
+        }
+        if let Ok(guard) = self.emu_context.emu_thread.try_lock() {
+            if let Some(thread) = guard.as_ref() {
+                thread.unpark();
+            }
+        }
+    }
+
     fn apply_guest_window_attributes(
         mut attributes: WindowAttributes,
         style: u32,
         ex_style: u32,
         use_native_frame: bool,
+        parent: u32,
     ) -> WindowAttributes {
-        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
+        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame, parent);
 
         attributes = attributes
             .with_decorations(host_style.decorations)
@@ -192,8 +210,9 @@ impl WinFrame {
         style: u32,
         ex_style: u32,
         use_native_frame: bool,
+        parent: u32,
     ) {
-        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
+        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame, parent);
 
         window.set_decorations(host_style.decorations);
         window.set_resizable(host_style.resizable);
@@ -252,6 +271,7 @@ impl WinFrame {
                         style,
                         ex_style,
                         use_native_frame,
+                        parent,
                     );
 
                     let window = event_loop.create_window(attributes).unwrap();
@@ -297,7 +317,11 @@ impl WinFrame {
                     {
                         let use_native_frame =
                             self.hwnd_native_frame.get(&hwnd).copied().unwrap_or(true);
-                        Self::apply_guest_window_style(window, style, ex_style, use_native_frame);
+                        
+                        let parent = self.emu_context.win_event.lock().unwrap()
+                                         .windows.get(&hwnd).map(|s| s.parent).unwrap_or(0);
+
+                        Self::apply_guest_window_style(window, style, ex_style, use_native_frame, parent);
                         window.request_redraw();
                     }
                 }
@@ -434,6 +458,40 @@ impl WinFrame {
                     }
                 }
 
+                UiCommand::SetWindowTransparent { hwnd, transparent } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_transparent(transparent);
+                        window.request_redraw();
+                    }
+                }
+
+                UiCommand::MinimizeWindow { hwnd } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_minimized(true);
+                    }
+                }
+
+                UiCommand::MaximizeWindow { hwnd } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_maximized(true);
+                    }
+                }
+
+                UiCommand::RestoreWindow { hwnd } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_minimized(false);
+                        window.set_maximized(false);
+                    }
+                }
+
                 UiCommand::SetCursor { hwnd, hcursor } => {
                     let window_id = self.hwnd_to_id.get(&hwnd).copied();
                     if let Some(id) = window_id {
@@ -460,9 +518,9 @@ impl WinFrame {
                             }) = gdi_objects.get(&hcursor)
                             {
                                 if *is_animated && frames.len() > 1 {
-                                    if let Some(custom) =
-                                        Self::create_custom_cursor_from_frame(&frames[0], event_loop)
-                                    {
+                                    if let Some(custom) = Self::create_custom_cursor_from_frame(
+                                        &frames[0], event_loop,
+                                    ) {
                                         let rate = (*display_rate_jiffies).max(1);
                                         let ms = (rate as u64) * 1000 / 60;
                                         CursorAction::Animated {
@@ -773,6 +831,7 @@ impl ApplicationHandler<()> for WinFrame {
                     let mut q = self.emu_context.message_queue.lock().unwrap();
                     q.push_back([hwnd, 0x0010, 0, 0, 0, 0, 0]); // WM_CLOSE
                 }
+                self.wake_emulator();
 
                 if quit_on_close {
                     event_loop.exit();
@@ -791,6 +850,7 @@ impl ApplicationHandler<()> for WinFrame {
                             q.push_back([0, 0x0012, 0, 0, 0, 0, 0]); // WM_QUIT
                         }
                     }
+                    self.wake_emulator();
                 }
             }
 
@@ -805,6 +865,14 @@ impl ApplicationHandler<()> for WinFrame {
                     self.emu_context
                         .mouse_y
                         .store(y, std::sync::atomic::Ordering::SeqCst);
+
+                    let now = std::time::Instant::now();
+                    if let Some(last) = self.last_cursor_moved {
+                        if now.duration_since(last).as_millis() < 16 {
+                            return; // 16ms 이내 스로틀링, 메시지를 큐에 누적하지 않음
+                        }
+                    }
+                    self.last_cursor_moved = Some(now);
 
                     let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                     let lparam = (y << 16) | (x & 0xFFFF);
@@ -874,6 +942,7 @@ impl ApplicationHandler<()> for WinFrame {
                             *track_opt = None;
                         }
                     }
+                    self.wake_emulator();
                 }
             }
 
@@ -886,6 +955,7 @@ impl ApplicationHandler<()> for WinFrame {
                             let mut q = self.emu_context.message_queue.lock().unwrap();
                             q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
                             *track_opt = None;
+                            self.wake_emulator();
                         }
                     }
                 }
@@ -914,6 +984,8 @@ impl ApplicationHandler<()> for WinFrame {
                     if msg != 0 {
                         let mut q = self.emu_context.message_queue.lock().unwrap();
                         q.push_back([hwnd, msg, 0, lparam, 0, x, y]);
+                        drop(q);
+                        self.wake_emulator();
                     }
                 }
             }
@@ -957,6 +1029,8 @@ impl ApplicationHandler<()> for WinFrame {
                         };
                         let mut q = self.emu_context.message_queue.lock().unwrap();
                         q.push_back([hwnd, msg, vk, 0, 0, 0, 0]);
+                        drop(q);
+                        self.wake_emulator();
                     }
                 }
             }
@@ -975,6 +1049,7 @@ impl ApplicationHandler<()> for WinFrame {
                             .active_hwnd
                             .store(hwnd, std::sync::atomic::Ordering::SeqCst);
                     }
+                    self.wake_emulator();
                 }
             }
 
@@ -993,6 +1068,8 @@ impl ApplicationHandler<()> for WinFrame {
 
                     let mut q = self.emu_context.message_queue.lock().unwrap();
                     q.push_back([hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
+                    drop(q);
+                    self.wake_emulator();
                 }
             }
 
@@ -1019,10 +1096,12 @@ impl DefaultEmulatorPainter {
     ) -> Vec<u32> {
         let mut children = windows
             .iter()
-            .filter_map(|(hwnd, state)| (state.parent == parent).then_some(*hwnd))
+            .filter_map(|(hwnd, state)| {
+                (state.parent == parent && (state.style & WS_CHILD) != 0).then_some((*hwnd, state.z_order))
+            })
             .collect::<Vec<_>>();
-        children.sort_unstable();
-        children
+        children.sort_unstable_by_key(|&(hwnd, z_order)| (z_order, hwnd));
+        children.into_iter().map(|(hwnd, _)| hwnd).collect()
     }
 
     /// 비트맵 하나를 대상 버퍼에 잘라서 복사합니다.
@@ -1035,6 +1114,7 @@ impl DefaultEmulatorPainter {
         pixels: &[u32],
         src_width: u32,
         src_height: u32,
+        clip_region: Option<(i32, i32, i32, i32)>,
     ) {
         for src_y in 0..src_height as i32 {
             let dst_y = dest_y + src_y;
@@ -1048,8 +1128,17 @@ impl DefaultEmulatorPainter {
                     continue;
                 }
 
-                let src_idx = (src_y as u32 * src_width + src_x as u32) as usize;
                 let dst_idx = (dst_y as u32 * buffer_width + dst_x as u32) as usize;
+                if let Some((left, top, right, bottom)) = clip_region {
+                    if src_x < left || src_x >= right || src_y < top || src_y >= bottom {
+                        if dst_idx < buffer.len() {
+                            buffer[dst_idx] = 0x00000000;
+                        }
+                        continue;
+                    }
+                }
+
+                let src_idx = (src_y as u32 * src_width + src_x as u32) as usize;
                 if src_idx < pixels.len() && dst_idx < buffer.len() {
                     buffer[dst_idx] = pixels[src_idx];
                 }
@@ -1093,6 +1182,24 @@ impl DefaultEmulatorPainter {
             }
         });
 
+        let clip_region = if state.window_rgn != 0 {
+            gdi_objects.get(&state.window_rgn).and_then(|obj| {
+                if let GdiObject::Region {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                } = obj
+                {
+                    Some((*left, *top, *right, *bottom))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
         if let Some((pixels, src_width, src_height)) = bitmap {
             let pixels = pixels.lock().unwrap();
             Self::blit_bitmap(
@@ -1104,6 +1211,7 @@ impl DefaultEmulatorPainter {
                 &pixels,
                 src_width,
                 src_height,
+                clip_region,
             );
         }
 
@@ -1169,7 +1277,17 @@ impl Painter for DefaultEmulatorPainter {
         };
 
         if self.cached_windows.contains_key(&self.hwnd) {
-            self.composite_window_tree(buffer, width, height, &self.cached_windows, &gdi_objects, self.hwnd, 0, 0, true);
+            self.composite_window_tree(
+                buffer,
+                width,
+                height,
+                &self.cached_windows,
+                &gdi_objects,
+                self.hwnd,
+                0,
+                0,
+                true,
+            );
             return true;
         }
 
@@ -1181,7 +1299,7 @@ impl Painter for DefaultEmulatorPainter {
         }) = gdi_objects.get(&self.surface_bitmap)
         {
             let p = p.lock().unwrap();
-            Self::blit_bitmap(buffer, width, height, 0, 0, &p, *sw, *sh);
+            Self::blit_bitmap(buffer, width, height, 0, 0, &p, *sw, *sh, None);
         }
 
         true
