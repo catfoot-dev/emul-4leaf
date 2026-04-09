@@ -20,6 +20,7 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_BAD_FORMAT: u32 = 11;
 const ERROR_NOT_READY: u32 = 21;
+const RARE_VOLUME_SCALE: f32 = 0.05;
 
 const RARE_CONTEXT_SIZE: usize = 8;
 const RARE_SOUND_SIZE: usize = 8;
@@ -131,15 +132,15 @@ impl RareSoundState {
 
     fn volume_gain(&self) -> f32 {
         if (1..=100).contains(&self.volume) {
-            return self.volume as f32 / 100.0;
+            return (self.volume as f32 / 100.0) * RARE_VOLUME_SCALE;
         }
         if (-10_000..=0).contains(&self.volume) {
-            return 10f32.powf(self.volume as f32 / 2000.0);
+            return 10f32.powf(self.volume as f32 / 2000.0) * RARE_VOLUME_SCALE;
         }
         if self.volume == 0 {
-            return 1.0;
+            return RARE_VOLUME_SCALE;
         }
-        (self.volume as f32 / 100.0).clamp(0.0, 4.0)
+        ((self.volume as f32 / 100.0).clamp(0.0, 4.0)) * RARE_VOLUME_SCALE
     }
 
     fn channel_gains(&self) -> (f32, f32) {
@@ -1474,7 +1475,9 @@ fn decode_samples(
 
 #[cfg(test)]
 mod tests {
-    use super::decode_wave_bytes;
+    use std::sync::Arc;
+
+    use super::{RareSoundState, RareWaveData, decode_wave_bytes};
 
     #[test]
     fn decode_pcm16_wave() {
@@ -1489,5 +1492,26 @@ mod tests {
         assert_eq!(decoded.samples.len(), 2);
         assert!(decoded.samples[0].abs() < 0.0001);
         assert!(decoded.samples[1] > 0.99);
+    }
+
+    #[test]
+    fn volume_gain_is_scaled_to_eighty_percent() {
+        let sound = RareSoundState {
+            context_ptr: 0,
+            wave: Arc::new(RareWaveData {
+                channels: 1,
+                sample_rate: 44_100,
+                samples: vec![0.0],
+            }),
+            volume: 100,
+            pan: 0,
+            frequency: 44_100,
+            repeat: false,
+            playing: false,
+            paused: false,
+            position_frames: 0.0,
+        };
+
+        assert!((sound.volume_gain() - 0.8).abs() < 0.0001);
     }
 }
