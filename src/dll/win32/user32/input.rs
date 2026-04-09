@@ -72,10 +72,7 @@ pub(super) fn load_cursor_from_file_a(uc: &mut Unicorn<Win32Context>) -> Option<
                     }
                 }
 
-                if chunk_id == b"LIST"
-                    && pos + 4 <= data.len()
-                    && &data[pos..pos + 4] == b"fram"
-                {
+                if chunk_id == b"LIST" && pos + 4 <= data.len() && &data[pos..pos + 4] == b"fram" {
                     let mut list_pos = pos + 4;
                     let list_end = pos + chunk_size;
                     while list_pos + 8 <= list_end && list_pos + 8 <= data.len() {
@@ -96,8 +93,7 @@ pub(super) fn load_cursor_from_file_a(uc: &mut Unicorn<Win32Context>) -> Option<
                 }
                 pos += (chunk_size + 1) & !1;
             }
-        } else if data.len() > 6 && data[0] == 0 && data[1] == 0 && data[2] == 2 && data[3] == 0
-        {
+        } else if data.len() > 6 && data[0] == 0 && data[1] == 0 && data[2] == 2 && data[3] == 0 {
             // .cur file
             if let Some(frame) = parse_cur_data(&data) {
                 frames.push(frame);
@@ -188,8 +184,8 @@ pub(super) fn parse_cur_data(data: &[u8]) -> Option<CursorFrame> {
         u16::from_le_bytes(data[entry_offset + 6..entry_offset + 8].try_into().ok()?) as i32;
     let size =
         u32::from_le_bytes(data[entry_offset + 8..entry_offset + 12].try_into().ok()?) as usize;
-    let offset = u32::from_le_bytes(data[entry_offset + 12..entry_offset + 16].try_into().ok()?)
-        as usize;
+    let offset =
+        u32::from_le_bytes(data[entry_offset + 12..entry_offset + 16].try_into().ok()?) as usize;
 
     if offset + size > data.len() {
         return None;
@@ -402,22 +398,14 @@ pub(super) fn map_window_points(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
         (0, 0)
     } else {
         let win_event = uc.get_data().win_event.lock().unwrap();
-        win_event
-            .windows
-            .get(&hwnd_from)
-            .map(|w| (w.x, w.y))
-            .unwrap_or((0, 0))
+        win_event.window_screen_origin(hwnd_from).unwrap_or((0, 0))
     };
 
     let (to_x, to_y) = if hwnd_to == 0 {
         (0, 0)
     } else {
         let win_event = uc.get_data().win_event.lock().unwrap();
-        win_event
-            .windows
-            .get(&hwnd_to)
-            .map(|w| (w.x, w.y))
-            .unwrap_or((0, 0))
+        win_event.window_screen_origin(hwnd_to).unwrap_or((0, 0))
     };
 
     let dx = from_x - to_x;
@@ -760,11 +748,7 @@ pub(super) fn screen_to_client(uc: &mut Unicorn<Win32Context>) -> Option<ApiHook
     let (win_x, win_y) = {
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
-        win_event
-            .windows
-            .get(&hwnd)
-            .map(|w| (w.x, w.y))
-            .unwrap_or((0, 0))
+        win_event.window_screen_origin(hwnd).unwrap_or((0, 0))
     };
     let x = uc.read_u32(pt_addr as u64) as i32;
     let y = uc.read_u32(pt_addr as u64 + 4) as i32;
@@ -785,11 +769,7 @@ pub(super) fn client_to_screen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHook
     let (win_x, win_y) = {
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
-        win_event
-            .windows
-            .get(&hwnd)
-            .map(|w| (w.x, w.y))
-            .unwrap_or((0, 0))
+        win_event.window_screen_origin(hwnd).unwrap_or((0, 0))
     };
     let x = uc.read_u32(pt_addr as u64) as i32;
     let y = uc.read_u32(pt_addr as u64 + 4) as i32;

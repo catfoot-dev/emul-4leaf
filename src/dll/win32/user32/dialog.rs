@@ -42,11 +42,7 @@ pub(super) fn end_dialog(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
     let n_result = uc.read_arg(1);
 
     // 간단한 구현: 다이얼로그 윈도우를 파괴함
-    uc.get_data()
-        .win_event
-        .lock()
-        .unwrap()
-        .destroy_window(h_dlg);
+    super::USER32::destroy_window_tree(uc.get_data(), h_dlg);
 
     crate::emu_log!(
         "[USER32] EndDialog({:#x}, {}) -> BOOL 1",

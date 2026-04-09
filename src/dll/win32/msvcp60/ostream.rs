@@ -4,9 +4,7 @@ use crate::{
 };
 use unicorn_engine::Unicorn;
 
-use super::{
-    MSVCP60, BASIC_OSTREAM_VTABLE, IOS_FLAGS_OFFSET, IOS_STREAMBUF_OFFSET,
-};
+use super::{BASIC_OSTREAM_VTABLE, IOS_FLAGS_OFFSET, IOS_STREAMBUF_OFFSET, MSVCP60};
 
 pub(super) fn basic_ostream_copy_ctor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);

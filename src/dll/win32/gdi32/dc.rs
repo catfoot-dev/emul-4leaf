@@ -21,13 +21,27 @@ pub(super) fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<Api
         }
     };
 
+    // Win32 memory DC는 기본적으로 1x1 monochrome bitmap이 선택된 상태로 시작합니다.
+    let default_bitmap = ctx.alloc_handle();
+    ctx.gdi_objects.lock().unwrap().insert(
+        default_bitmap,
+        GdiObject::Bitmap {
+            width: 1,
+            height: 1,
+            pixels: std::sync::Arc::new(std::sync::Mutex::new(vec![0u32; 1])),
+            bits_addr: None,
+            bpp: 24,
+            top_down: false,
+        },
+    );
+
     ctx.gdi_objects.lock().unwrap().insert(
         new_hdc,
         GdiObject::Dc {
             associated_window: 0,
             width,
             height,
-            selected_bitmap: 0,
+            selected_bitmap: default_bitmap,
             selected_font: 0,
             selected_brush: 0,
             selected_pen: 0,
@@ -131,9 +145,36 @@ pub(super) fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
 // 역할: 논리적 펜, 브러시, 폰트, 비트맵, 영역, 또는 팔레트를 삭제하여 시스템 리소스를 확보
 pub(super) fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hobj = uc.read_arg(0);
-    uc.get_data().gdi_objects.lock().unwrap().remove(&hobj);
-    crate::emu_log!("[GDI32] DeleteObject({:#x}) -> BOOL 1", hobj);
-    Some(ApiHookResult::callee(1, Some(1)))
+    let ctx = uc.get_data();
+    let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
+    let selected_somewhere = gdi_objects.values().any(|obj| {
+        matches!(
+            obj,
+            GdiObject::Dc {
+                selected_bitmap,
+                selected_font,
+                selected_brush,
+                selected_pen,
+                selected_region,
+                selected_palette,
+                ..
+            } if *selected_bitmap == hobj
+                || *selected_font == hobj
+                || *selected_brush == hobj
+                || *selected_pen == hobj
+                || *selected_region == hobj
+                || *selected_palette == hobj
+        )
+    });
+
+    let ret = if selected_somewhere {
+        0
+    } else {
+        gdi_objects.remove(&hobj);
+        1
+    };
+    crate::emu_log!("[GDI32] DeleteObject({:#x}) -> BOOL {}", hobj, ret);
+    Some(ApiHookResult::callee(1, Some(ret)))
 }
 
 // API: HGDIOBJ GetStockObject(int i)
@@ -160,28 +201,29 @@ pub(super) fn get_device_caps(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     let mut result = 0;
     if let Some(GdiObject::Dc { width, height, .. }) = gdi_objects.get(&hdc) {
         match index {
-            1 => result = *width,  // HORZRES
-            2 => result = *height, // VERTRES
-            3 => result = *width,  // HORZSIZE
-            4 => result = *height, // VERTSIZE
-            5 => result = 96,      // LOGPIXELSX
-            6 => result = 96,      // LOGPIXELSY
-            10 => result = 1,      // BITSPIXEL
-            11 => result = 1,      // PLANES
-            14 => result = 1,      // SHADEBLENDCAPS
-            16 => result = 1,      // BITSYPIXELS
-            17 => result = 1,      // NUMRESERVED
-            18 => result = 1,      // CURVECAPS
-            19 => result = 1,      // FONTTYPE
-            20 => result = 1,      // HORZRES
-            21 => result = 1,      // VERTRES
-            22 => result = 1,      // LOGPIXELSX
-            23 => result = 1,      // LOGPIXELSY
-            24 => result = 1,      // BITSYPIXELS
-            25 => result = 1,      // NUMRESERVED
-            26 => result = 1,      // CURVECAPS
-            27 => result = 1,      // FONTTYPE
-            _ => {}                // 알 수 없는 인덱스
+            1 => result = *width,                      // HORZRES
+            2 => result = *height,                     // VERTRES
+            3 => result = (*width).max(1) * 254 / 96,  // HORZSIZE (mm, 96 DPI 가정)
+            4 => result = (*height).max(1) * 254 / 96, // VERTSIZE (mm, 96 DPI 가정)
+            5 => result = 96,                          // LOGPIXELSX
+            6 => result = 96,                          // LOGPIXELSY
+            10 => result = 32,                         // BITSPIXEL
+            11 => result = 1,                          // PLANES
+            12 => result = 32, // NUMBRUSHES 대용이 아니라 일부 앱이 COLORRES처럼 조회하는 경우 대응
+            14 => result = 0,  // SHADEBLENDCAPS
+            16 => result = 1 << 24, // NUMCOLORS/COLORRES 계열 조회에 대해 24-bit color depth
+            17 => result = 0,  // NUMRESERVED
+            18 => result = 0,  // CURVECAPS
+            19 => result = 0,  // LINECAPS/FONTTYPE 등 미지원은 0
+            20 => result = *width, // HORZRES
+            21 => result = *height, // VERTRES
+            22 => result = 96, // LOGPIXELSX
+            23 => result = 96, // LOGPIXELSY
+            24 => result = 32, // BITSPIXEL 계열 fallback
+            25 => result = 0,  // NUMRESERVED
+            26 => result = 0,  // CURVECAPS
+            27 => result = 0,  // FONTTYPE
+            _ => {}            // 알 수 없는 인덱스
         }
     }
     crate::emu_log!(
@@ -211,8 +253,7 @@ pub(super) fn get_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
                 bits_addr,
                 ..
             }) => {
-                let bytes_per_pixel = (*bpp / 8).max(1);
-                let width_bytes = (width * bytes_per_pixel + 3) & !3;
+                let width_bytes = ((*width * *bpp).div_ceil(16) * 2).max(1);
                 Some((*width, *height, width_bytes, *bpp, bits_addr.unwrap_or(0)))
             }
             Some(GdiObject::Font { .. }) => None,

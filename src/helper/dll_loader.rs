@@ -3,8 +3,8 @@ use goblin::pe::PE;
 use std::{collections::HashMap, fs, sync::atomic::Ordering};
 use unicorn_engine::{Prot, RegisterX86, Unicorn};
 
-use super::memory::{EXIT_ADDRESS, SIZE_4KB};
 use super::UnicornHelper;
+use super::memory::{EXIT_ADDRESS, SIZE_4KB};
 
 /// 지정된 경로의 DLL 파일을 메모리에 로드하고 재배치(Relocation)를 수행합니다.
 ///
@@ -120,9 +120,8 @@ pub(crate) fn load_dll_with_reloc_impl(
                     .is_ok()
                 {
                     for i in 0..entries_count {
-                        let entry = u16::from_le_bytes(
-                            entries_buf[i * 2..(i + 1) * 2].try_into().unwrap(),
-                        );
+                        let entry =
+                            u16::from_le_bytes(entries_buf[i * 2..(i + 1) * 2].try_into().unwrap());
                         let reloc_type = entry >> 12; // 상위 4비트: 재배치 타입
                         let offset = entry & 0x0FFF; // 하위 12비트: 페이지 내 오프셋
 

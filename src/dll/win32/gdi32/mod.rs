@@ -12,6 +12,61 @@ use unicorn_engine::Unicorn;
 pub struct GDI32;
 
 impl GDI32 {
+    /// 지정된 DC에 선택된 클리핑 영역 사각형 목록을 반환합니다.
+    pub(crate) fn clip_rects_for_hdc(
+        uc: &Unicorn<Win32Context>,
+        hdc: u32,
+    ) -> Option<Vec<(i32, i32, i32, i32)>> {
+        let gdi = uc.get_data().gdi_objects.lock().unwrap();
+        let selected_region = match gdi.get(&hdc) {
+            Some(GdiObject::Dc {
+                selected_region, ..
+            }) if *selected_region != 0 => *selected_region,
+            _ => return None,
+        };
+
+        match gdi.get(&selected_region) {
+            Some(GdiObject::Region { rects }) if !rects.is_empty() => Some(rects.clone()),
+            _ => None,
+        }
+    }
+
+    /// 대상 좌표가 클리핑 영역 안에 있는지 검사합니다.
+    pub(crate) fn point_in_clip_rects(
+        clip_rects: &Option<Vec<(i32, i32, i32, i32)>>,
+        x: i32,
+        y: i32,
+    ) -> bool {
+        clip_rects.as_ref().is_none_or(|rects| {
+            rects
+                .iter()
+                .any(|&(left, top, right, bottom)| x >= left && x < right && y >= top && y < bottom)
+        })
+    }
+
+    /// 사각형을 클리핑 영역과 교차한 결과를 반환합니다.
+    pub(crate) fn intersect_rect_with_clip_rects(
+        clip_rects: &Option<Vec<(i32, i32, i32, i32)>>,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    ) -> Vec<(i32, i32, i32, i32)> {
+        match clip_rects {
+            Some(rects) => rects
+                .iter()
+                .filter_map(|&(cl, ct, cr, cb)| {
+                    let il = left.max(cl);
+                    let it = top.max(ct);
+                    let ir = right.min(cr);
+                    let ib = bottom.min(cb);
+                    (il < ir && it < ib).then_some((il, it, ir, ib))
+                })
+                .collect(),
+            None => vec![(left, top, right, bottom)],
+        }
+    }
+
     /// DIBSection 픽셀 버퍼를 게스트가 받은 `bits` 메모리로 역동기화합니다.
     pub(crate) fn flush_dib_pixels_to_memory(uc: &mut Unicorn<Win32Context>, hbmp: u32) {
         let bmp_info = {
@@ -52,10 +107,6 @@ impl GDI32 {
                 let b = (color & 0xFF) as u8;
 
                 match bpp {
-                    8 => {
-                        let gray = ((r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100) as u8;
-                        raw[row_offset + col] = gray;
-                    }
                     24 => {
                         let idx = row_offset + col * 3;
                         if idx + 2 < raw.len() {
@@ -101,6 +152,7 @@ impl GDI32 {
             Some(v) => v,
             None => return,
         };
+        println!("sync_dib_pixels bpp: {}", bpp);
         let stride = ((width * bpp + 31) / 32) * 4;
         let total_bytes = (stride * height) as usize;
         let raw = uc
@@ -109,7 +161,7 @@ impl GDI32 {
         if raw.is_empty() {
             return;
         }
-        let converted = raw_dib_to_pixels(&raw, width, height, bpp, top_down, &[]);
+        let converted = raw_dib_to_pixels(&raw, width, height, bpp, top_down);
         let mut pixels = pixels_arc.lock().unwrap();
         if pixels.len() == converted.len() {
             pixels.copy_from_slice(&converted);
@@ -161,6 +213,7 @@ impl GDI32 {
             "RealizePalette" => drawing::realize_palette(uc),
             "SelectPalette" => drawing::select_palette(uc),
             "CreatePalette" => drawing::create_palette(uc),
+            "PatBlt" => drawing::pat_blt(uc),
             "GetPixel" => drawing::get_pixel(uc),
             "SetPixel" => drawing::set_pixel(uc),
             _ => {
@@ -172,14 +225,7 @@ impl GDI32 {
 }
 
 // Helper: 원시 DIB 바이트 배열을 0x00RRGGBB Vec<u32>으로 변환 (BGR/BGRA, bottom-up 지원)
-fn raw_dib_to_pixels(
-    raw: &[u8],
-    width: u32,
-    height: u32,
-    bpp: u32,
-    top_down: bool,
-    palette: &[[u8; 4]], // 8bpp 팔레트 (RGBQUAD 배열)
-) -> Vec<u32> {
+fn raw_dib_to_pixels(raw: &[u8], width: u32, height: u32, bpp: u32, top_down: bool) -> Vec<u32> {
     let stride = ((width * bpp + 31) / 32) * 4;
     let mut pixels = vec![0u32; (width * height) as usize];
     for row in 0..height as usize {
@@ -192,22 +238,6 @@ fn raw_dib_to_pixels(
         for col in 0..width as usize {
             let dst_idx = row * width as usize + col;
             let color = match bpp {
-                8 => {
-                    let idx = row_offset + col;
-                    if idx < raw.len() {
-                        let p = raw[idx] as usize;
-                        if p < palette.len() {
-                            let b = palette[p][0] as u32;
-                            let g = palette[p][1] as u32;
-                            let r = palette[p][2] as u32;
-                            (r << 16) | (g << 8) | b
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    }
-                }
                 24 => {
                     let idx = row_offset + col * 3;
                     if idx + 2 < raw.len() {

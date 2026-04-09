@@ -207,12 +207,8 @@ pub(super) fn mktime(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let year = uc.read_u32(timeptr_addr as u64 + 20);
 
     // Very crude conversion
-    let t = sec
-        + min * 60
-        + hour * 3600
-        + (day - 1) * 86400
-        + mon * 2592000
-        + (year - 70) * 31536000;
+    let t =
+        sec + min * 60 + hour * 3600 + (day - 1) * 86400 + mon * 2592000 + (year - 70) * 31536000;
 
     crate::emu_log!("[MSVCRT] mktime({:#x}) -> time_t {:#x}", timeptr_addr, t);
     Some(ApiHookResult::callee(1, Some(t as i32)))

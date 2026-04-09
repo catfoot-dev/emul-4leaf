@@ -6,7 +6,7 @@ mod ostream;
 mod streambuf;
 
 use crate::{
-    dll::win32::{ApiHookResult, StackCleanup, Win32Context},
+    dll::win32::{ApiHookResult, FileState, StackCleanup, Win32Context},
     helper::UnicornHelper,
 };
 use std::{
@@ -53,6 +53,199 @@ const BASIC_ISTREAM_VTABLE: &str = "??_7?$basic_istream@DU?$char_traits@D@std@@@
 const BASIC_IOSTREAM_VTABLE: &str = "??_7?$basic_iostream@DU?$char_traits@D@std@@@std@@6B@";
 const BASIC_IOS_VTABLE: &str = "??_7?$basic_ios@DU?$char_traits@D@std@@@std@@6B@";
 const IOS_BASE_VTABLE: &str = "??_7ios_base@std@@6B@";
+
+const SYMBOL_BASIC_STRING_NPOS: &str =
+    "?npos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@2IB";
+const SYMBOL_BASIC_STRING_NULLSTR_DATA: &str =
+    "?_C@?1??_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ@4DB";
+const SYMBOL_BASIC_STRING_ASSIGN_PTR_LEN: &str =
+    "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z";
+const SYMBOL_BASIC_STRING_NULLSTR_FN: &str =
+    "?_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ";
+const SYMBOL_STD_FPZ: &str = "?_Fpz@std@@3_JB";
+const SYMBOL_STD_CIN: &str = "?cin@std@@3V?$basic_istream@DU?$char_traits@D@std@@@1@A";
+const SYMBOL_STD_COUT: &str = "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
+const SYMBOL_STD_CERR: &str = "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
+const SYMBOL_STD_CLOG: &str = "?clog@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
+const SYMBOL_LOCALE_GLOBAL_PTR: &str = "?_Global@_Locimp@locale@std@@0PAV123@A";
+const SYMBOL_LOCALE_CLOCPTR: &str = "?_Clocptr@_Locimp@locale@std@@0PAV123@A";
+const SYMBOL_LOCALE_FACET_ID_CNT: &str = "?_Id_cnt@facet@locale@std@@0HA";
+const SYMBOL_LOCALE_ID_ID_CNT: &str = "?_Id_cnt@id@locale@std@@0HA";
+const SYMBOL_BASIC_FILEBUF_STATIC_INIT_FLAG: &str =
+    "?_Stinit@?1??_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@23@@Z@4HA";
+const SYMBOL_STD_FLUSH: &str =
+    "?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z";
+
+const GLOBAL_STREAM_OBJECT_SYMBOLS: [&str; 4] = [
+    SYMBOL_STD_CIN,
+    SYMBOL_STD_COUT,
+    SYMBOL_STD_CERR,
+    SYMBOL_STD_CLOG,
+];
+
+const FN_BASIC_STRING_CTOR_DEFAULT: &str =
+    "??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@ABV?$allocator@D@1@@Z";
+const FN_BASIC_STRING_CTOR_CSTR: &str =
+    "??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@PBDABV?$allocator@D@1@@Z";
+const FN_BASIC_STRING_DTOR: &str =
+    "??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@XZ";
+const FN_BASIC_STRING_TIDY: &str =
+    "?_Tidy@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEX_N@Z";
+const FN_BASIC_STRING_GROW: &str =
+    "?_Grow@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAE_NI_N@Z";
+const FN_BASIC_STRING_COPY: &str =
+    "?_Copy@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXI@Z";
+const FN_BASIC_STRING_EOS: &str =
+    "?_Eos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXI@Z";
+const FN_BASIC_STRING_FREEZE: &str =
+    "?_Freeze@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXXZ";
+const FN_BASIC_STRING_SPLIT: &str =
+    "?_Split@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXXZ";
+const FN_BASIC_STRING_ASSIGN_PTR: &str =
+    "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBD@Z";
+const FN_BASIC_STRING_ASSIGN_SUBSTR: &str =
+    "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z";
+const FN_BASIC_STRING_APPEND_SUBSTR: &str =
+    "?append@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z";
+const FN_BASIC_STRING_COMPARE_OTHER: &str =
+    "?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEHABV12@@Z";
+const FN_BASIC_STRING_COMPARE_PTR: &str =
+    "?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEHIIPBDI@Z";
+const FN_BASIC_STRING_ERASE: &str =
+    "?erase@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@II@Z";
+const FN_BASIC_STRING_REPLACE_REPEAT: &str =
+    "?replace@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@IIID@Z";
+const FN_BASIC_STRING_REPLACE_RANGE_PTRS: &str =
+    "?replace@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PAD0PBD1@Z";
+const FN_BASIC_STRING_RESIZE: &str =
+    "?resize@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXI@Z";
+const FN_BASIC_STRING_SWAP: &str =
+    "?swap@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXAAV12@@Z";
+const FN_BASIC_STRING_SUBSTR: &str =
+    "?substr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV12@II@Z";
+const FN_BASIC_STRING_C_STR: &str =
+    "?c_str@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEPBDXZ";
+const FN_BASIC_STRING_END: &str =
+    "?end@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEPADXZ";
+const FN_BASIC_STRING_SIZE: &str =
+    "?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEIXZ";
+const FN_BASIC_STRING_MAX_SIZE: &str =
+    "?max_size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEIXZ";
+
+const FN_BASIC_STREAMBUF_COPY_CTOR: &str =
+    "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z";
+const FN_BASIC_STREAMBUF_INIT: &str =
+    "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXXZ";
+const FN_BASIC_STREAMBUF_INIT_RANGES: &str =
+    "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAPAD0PAH001@Z";
+const FN_BASIC_STREAMBUF_DTOR: &str = "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UAE@XZ";
+const FN_BASIC_STREAMBUF_ASSIGN: &str =
+    "??4?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z";
+const FN_BASIC_STREAMBUF_SETG: &str =
+    "?setg@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAD00@Z";
+const FN_BASIC_STREAMBUF_SETP: &str =
+    "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAD0@Z";
+const FN_BASIC_STREAMBUF_IMBUE: &str =
+    "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEXABVlocale@2@@Z";
+const FN_BASIC_STREAMBUF_SETBUF: &str =
+    "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEPAV12@PADH@Z";
+const FN_BASIC_STREAMBUF_SEEKOFF: &str =
+    "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z";
+const FN_BASIC_STREAMBUF_SEEKPOS: &str =
+    "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@V32@H@Z";
+const FN_BASIC_STREAMBUF_XSPUTN: &str =
+    "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPBDH@Z";
+const FN_BASIC_STREAMBUF_XSGETN: &str =
+    "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPADH@Z";
+const FN_BASIC_STREAMBUF_UNDERFLOW: &str =
+    "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ";
+const FN_BASIC_STREAMBUF_UFLOW: &str =
+    "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ";
+const FN_BASIC_STREAMBUF_SHOWMANYC: &str =
+    "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ";
+const FN_BASIC_STREAMBUF_PBACKFAIL: &str =
+    "?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHH@Z";
+const FN_BASIC_STREAMBUF_SYNC: &str = "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ";
+
+const FN_BASIC_OSTREAM_COPY_CTOR: &str =
+    "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z";
+const FN_BASIC_OSTREAM_CTOR3: &str =
+    "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N1@Z";
+const FN_BASIC_OSTREAM_CTOR2: &str =
+    "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z";
+const FN_BASIC_OSTREAM_DTOR: &str = "??1?$basic_ostream@DU?$char_traits@D@std@@@std@@UAE@XZ";
+const FN_OSTREAM_INSERT_INT: &str = "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z";
+const FN_BASIC_OSTREAM_WRITE: &str =
+    "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z";
+
+const FN_BASIC_ISTREAM_CTOR: &str =
+    "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z";
+const FN_BASIC_ISTREAM_DTOR: &str = "??1?$basic_istream@DU?$char_traits@D@std@@@std@@UAE@XZ";
+const FN_BASIC_ISTREAM_SEEKG: &str =
+    "?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@V?$fpos@H@2@@Z";
+const FN_BASIC_ISTREAM_GETLINE: &str =
+    "?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADHD@Z";
+const FN_BASIC_IOSTREAM_CTOR: &str =
+    "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z";
+const FN_BASIC_IOSTREAM_DTOR: &str = "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UAE@XZ";
+const FN_BASIC_IFSTREAM_VBASE_DTOR: &str =
+    "??_D?$basic_ifstream@DU?$char_traits@D@std@@@std@@QAEXXZ";
+const FN_BASIC_ISTREAM_EXTRACT_UNSIGNED_SHORT: &str =
+    "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV01@AAG@Z";
+
+const FN_BASIC_FILEBUF_CTOR: &str =
+    "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z";
+const FN_BASIC_FILEBUF_INIT: &str =
+    "?_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@12@@Z";
+const FN_BASIC_FILEBUF_OPEN: &str =
+    "?open@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAEPAV12@PBDH@Z";
+const FN_BASIC_FILEBUF_INITCVT: &str =
+    "?_Initcvt@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXXZ";
+const FN_BASIC_FILEBUF_DTOR: &str = "??1?$basic_filebuf@DU?$char_traits@D@std@@@std@@UAE@XZ";
+
+const FN_BASIC_IOS_CTOR: &str = "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IAE@XZ";
+const FN_BASIC_IOS_CLEAR: &str = "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z";
+const FN_BASIC_IOS_SETSTATE: &str = "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z";
+const FN_BASIC_IOS_INIT: &str =
+    "?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IAEXPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z";
+const FN_BASIC_IOS_WIDEN: &str = "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEDD@Z";
+const FN_BASIC_IOS_DTOR: &str = "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UAE@XZ";
+const FN_BASIC_IOS_ASSIGN: &str = "??4?$basic_ios@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z";
+
+const FN_IOS_BASE_CTOR: &str = "??0ios_base@std@@IAE@XZ";
+const FN_IOS_BASE_DTOR: &str = "??1ios_base@std@@UAE@XZ";
+const FN_IOS_BASE_ASSIGN: &str = "??4ios_base@std@@QAEAAV01@ABV01@@Z";
+const FN_IOS_BASE_CLEAR: &str = "?clear@ios_base@std@@QAEXH_N@Z";
+const FN_IOS_BASE_COPYFMT: &str = "?copyfmt@ios_base@std@@QAEAAV12@ABV12@@Z";
+const FN_IOS_BASE_GETLOC: &str = "?getloc@ios_base@std@@QBE?AVlocale@2@XZ";
+const FN_IOS_BASE_INIT: &str = "?_Init@ios_base@std@@IAEXXZ";
+const FN_IOS_BASE_INIT_CTOR: &str = "??0Init@ios_base@std@@QAE@XZ";
+const FN_IOS_BASE_INIT_DTOR: &str = "??1Init@ios_base@std@@QAE@XZ";
+
+const FN_LOCALE_INIT: &str = "?_Init@locale@std@@CAPAV_Locimp@12@XZ";
+const FN_LOCALE_CTOR: &str = "??0locale@std@@QAE@XZ";
+const FN_LOCALE_DTOR: &str = "??1locale@std@@QAE@XZ";
+const FN_LOCALE_ASSIGN: &str = "??4locale@std@@QAEAAV01@ABV01@@Z";
+const FN_LOCALE_FACET_INCREF: &str = "?_Incref@facet@locale@std@@QAEXXZ";
+const FN_LOCALE_FACET_DECREF: &str = "?_Decref@facet@locale@std@@QAEPAV123@XZ";
+
+const FN_STRSTREAMBUF_INIT: &str = "?_Init@strstreambuf@std@@IAEXHPAD0H@Z";
+const FN_WINIT_CTOR: &str = "??0_Winit@std@@QAE@XZ";
+const FN_WINIT_DTOR: &str = "??1_Winit@std@@QAE@XZ";
+const FN_LOCKIT_CTOR: &str = "??0_Lockit@std@@QAE@XZ";
+const FN_LOCKIT_DTOR: &str = "??1_Lockit@std@@QAE@XZ";
+const FN_STD_OSTREAM_INSERT_CSTR: &str =
+    "??6std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@PBD@Z";
+const FN_STD_OSTREAM_INSERT_CHAR: &str =
+    "??6std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@D@Z";
+const FN_STD_ENDL: &str = "?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z";
+const FN_STD_XLEN: &str = "?_Xlen@std@@YAXXZ";
+const FN_STD_XRAN: &str = "?_Xran@std@@YAXXZ";
+const FN_STD_XOFF: &str = "?_Xoff@std@@YAXXZ";
+const FN_STD_FIOPEN: &str = "?__Fiopen@std@@YAPAU_iobuf@@PBDH@Z";
+const FN_BASIC_OFSTREAM_CTOR: &str = "??0?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAE@XZ";
+const FN_BASIC_OFSTREAM_DTOR: &str = "??_D?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAEXXZ";
+const FN_BASIC_FSTREAM_DTOR: &str = "??_D?$basic_fstream@DU?$char_traits@D@std@@@std@@QAEXXZ";
 
 /// `MSVCP60.dll` 프록시 구현 모듈
 ///
@@ -264,7 +457,7 @@ impl MSVCP60 {
             Self::init_streambuf_layout(uc, buffer_addr, BASIC_STREAMBUF_VTABLE);
 
             let vtable = match func_name {
-                "?cin@std@@3V?$basic_istream@DU?$char_traits@D@std@@@1@A" => BASIC_ISTREAM_VTABLE,
+                SYMBOL_STD_CIN => BASIC_ISTREAM_VTABLE,
                 _ => BASIC_OSTREAM_VTABLE,
             };
             Self::init_basic_ios_layout(uc, stream_addr, vtable, buffer_addr);
@@ -455,7 +648,13 @@ impl MSVCP60 {
 
         let mut candidates = vec![raw_filename.to_string()];
         if !raw_filename.contains('/') && !raw_filename.contains('\\') {
-            candidates.insert(0, crate::resource_dir().join(raw_filename).to_string_lossy().to_string());
+            candidates.insert(
+                0,
+                crate::resource_dir()
+                    .join(raw_filename)
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
 
         let want_read = mode == 0 || (mode & 0x01) != 0;
@@ -488,7 +687,15 @@ impl MSVCP60 {
             let handle = {
                 let context = uc.get_data();
                 let handle = context.alloc_handle();
-                context.files.lock().unwrap().insert(handle, file);
+                context.files.lock().unwrap().insert(
+                    handle,
+                    FileState {
+                        file,
+                        path: candidate.clone(),
+                        eof: false,
+                        error: false,
+                    },
+                );
                 handle
             };
             return Some(handle);
@@ -561,8 +768,20 @@ impl MSVCP60 {
         let bytes_read = {
             let context = uc.get_data();
             let mut files = context.files.lock().unwrap();
-            if let Some(file) = files.get_mut(&file_handle) {
-                file.read(&mut data).unwrap_or(0)
+            if let Some(state) = files.get_mut(&file_handle) {
+                match state.file.read(&mut data) {
+                    Ok(bytes_read) => {
+                        state.eof = bytes_read < capacity;
+                        if bytes_read > 0 {
+                            state.error = false;
+                        }
+                        bytes_read
+                    }
+                    Err(_) => {
+                        state.error = true;
+                        0
+                    }
+                }
             } else {
                 0
             }
@@ -614,8 +833,18 @@ impl MSVCP60 {
         if file_handle != 0 {
             let context = uc.get_data();
             let mut files = context.files.lock().unwrap();
-            if let Some(file) = files.get_mut(&file_handle) {
-                return file.write(bytes).unwrap_or(0);
+            if let Some(state) = files.get_mut(&file_handle) {
+                return match state.file.write(bytes) {
+                    Ok(bytes_written) => {
+                        state.error = false;
+                        state.eof = false;
+                        bytes_written
+                    }
+                    Err(_) => {
+                        state.error = true;
+                        0
+                    }
+                };
             }
             return 0;
         }
@@ -656,8 +885,11 @@ impl MSVCP60 {
         let next = {
             let context = uc.get_data();
             let mut files = context.files.lock().unwrap();
-            let file = files.get_mut(&file_handle)?;
-            file.seek(position).ok()? as u32
+            let state = files.get_mut(&file_handle)?;
+            let next = state.file.seek(position).ok()? as u32;
+            state.error = false;
+            state.eof = false;
+            next
         };
 
         Self::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, 0);
@@ -720,6 +952,21 @@ impl MSVCP60 {
         write_pos.saturating_sub(read_pos)
     }
 
+    fn streambuf_file_eof(uc: &Unicorn<Win32Context>, this_ptr: u32) -> bool {
+        let file_handle = Self::streambuf_file_handle(uc, this_ptr);
+        if file_handle == 0 {
+            return false;
+        }
+
+        uc.get_data()
+            .files
+            .lock()
+            .unwrap()
+            .get(&file_handle)
+            .map(|state| state.eof)
+            .unwrap_or(false)
+    }
+
     fn streambuf_return_fpos(
         uc: &mut Unicorn<Win32Context>,
         pos: u32,
@@ -741,16 +988,13 @@ impl MSVCP60 {
     /// 함수 호출이 아닌 전역 객체, vtable, 정적 데이터 심볼만 처리합니다.
     pub fn resolve_export(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<u32> {
         match func_name {
-            "?npos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@2IB" => {
-                Some(Self::cached_proxy_export(uc, func_name, |uc| {
-                    let addr = Self::alloc_zeroed(uc, 4);
-                    uc.write_u32(addr as u64, u32::MAX);
-                    crate::emu_log!("[MSVCP60] basic_string::npos resolved to {:#x}", addr);
-                    addr
-                }))
-            }
-            "?_C@?1??_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ@4DB" =>
-            {
+            SYMBOL_BASIC_STRING_NPOS => Some(Self::cached_proxy_export(uc, func_name, |uc| {
+                let addr = Self::alloc_zeroed(uc, 4);
+                uc.write_u32(addr as u64, u32::MAX);
+                crate::emu_log!("[MSVCP60] basic_string::npos resolved to {:#x}", addr);
+                addr
+            })),
+            SYMBOL_BASIC_STRING_NULLSTR_DATA => {
                 let addr = Self::empty_c_string_addr(uc);
                 crate::emu_log!(
                     "[MSVCP60] basic_string::_Nullstr data resolved to {:#x}",
@@ -758,7 +1002,7 @@ impl MSVCP60 {
                 );
                 Some(addr)
             }
-            "?_Fpz@std@@3_JB" => Some(Self::cached_proxy_export(uc, func_name, |uc| {
+            SYMBOL_STD_FPZ => Some(Self::cached_proxy_export(uc, func_name, |uc| {
                 let addr = Self::alloc_zeroed(uc, 8);
                 crate::emu_log!("[MSVCP60] std::_Fpz resolved to {:#x}", addr);
                 addr
@@ -768,10 +1012,7 @@ impl MSVCP60 {
                 crate::emu_log!("[MSVCP60] vtable/vbtable {} resolved to {:#x}", name, addr);
                 Some(addr)
             }
-            "?cin@std@@3V?$basic_istream@DU?$char_traits@D@std@@@1@A"
-            | "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A"
-            | "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A"
-            | "?clog@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => {
+            name if GLOBAL_STREAM_OBJECT_SYMBOLS.contains(&name) => {
                 let addr = Self::init_global_stream_object(uc, func_name);
                 crate::emu_log!(
                     "[MSVCP60] Global object {} resolved to {:#x}",
@@ -780,8 +1021,7 @@ impl MSVCP60 {
                 );
                 Some(addr)
             }
-            "?_Global@_Locimp@locale@std@@0PAV123@A"
-            | "?_Clocptr@_Locimp@locale@std@@0PAV123@A" => {
+            SYMBOL_LOCALE_GLOBAL_PTR | SYMBOL_LOCALE_CLOCPTR => {
                 Some(Self::cached_proxy_export(uc, func_name, |uc| {
                     let addr = Self::alloc_zeroed(uc, 4);
                     let locimp_addr = Self::locale_impl_addr(uc);
@@ -794,7 +1034,7 @@ impl MSVCP60 {
                     addr
                 }))
             }
-            "?_Id_cnt@facet@locale@std@@0HA" | "?_Id_cnt@id@locale@std@@0HA" => {
+            SYMBOL_LOCALE_FACET_ID_CNT | SYMBOL_LOCALE_ID_ID_CNT => {
                 Some(Self::cached_proxy_export(uc, func_name, |uc| {
                     let addr = Self::alloc_zeroed(uc, 4);
                     crate::emu_log!(
@@ -805,7 +1045,7 @@ impl MSVCP60 {
                     addr
                 }))
             }
-            "?_Stinit@?1??_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@23@@Z@4HA" => {
+            SYMBOL_BASIC_FILEBUF_STATIC_INIT_FLAG => {
                 Some(Self::cached_proxy_export(uc, func_name, |uc| {
                     let addr = Self::alloc_zeroed(uc, 4);
                     crate::emu_log!("[MSVCP60] Static init flag resolved to {:#x}", addr);
@@ -822,265 +1062,119 @@ impl MSVCP60 {
     pub fn handle(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<ApiHookResult> {
         let is_cdecl = Self::is_cdecl_symbol(func_name);
         let result = match func_name {
-            "??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@ABV?$allocator@D@1@@Z" => {
-                basic_string::basic_string_ctor_default(uc)
-            }
-            "??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@PBDABV?$allocator@D@1@@Z" => {
-                basic_string::basic_string_ctor_cstr(uc)
-            }
-            "??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@XZ" => {
-                basic_string::basic_string_destructor(uc)
-            }
-            "?_Tidy@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEX_N@Z" => {
-                basic_string::basic_string_tidy(uc)
-            }
-            "?_Grow@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAE_NI_N@Z" => {
-                basic_string::basic_string_grow(uc)
-            }
-            "?_Copy@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXI@Z" => {
-                basic_string::basic_string_copy(uc)
-            }
-            "?_Eos@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXI@Z" => {
-                basic_string::basic_string_eos(uc)
-            }
-            "?_Freeze@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXXZ" => {
-                basic_string::basic_string_freeze(uc)
-            }
-            "?_Split@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AAEXXZ" => {
-                basic_string::basic_string_split(uc)
-            }
-            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z" => {
-                basic_string::basic_string_assign_ptr_len(uc)
-            }
-            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBD@Z" => {
-                basic_string::basic_string_assign_ptr(uc)
-            }
-            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z" => {
-                basic_string::basic_string_assign_substr(uc)
-            }
-            "?append@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z" => {
-                basic_string::basic_string_append_substr(uc)
-            }
-            "?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEHABV12@@Z" => {
-                basic_string::basic_string_compare_other(uc)
-            }
-            "?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEHIIPBDI@Z" => {
-                basic_string::basic_string_compare_ptr(uc)
-            }
-            "?erase@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@II@Z" => {
-                basic_string::basic_string_erase(uc)
-            }
-            "?replace@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@IIID@Z" => {
-                basic_string::basic_string_replace_repeat(uc)
-            }
-            "?replace@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PAD0PBD1@Z" => {
-                basic_string::basic_string_replace_range_ptrs(uc)
-            }
-            "?resize@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXI@Z" => {
-                basic_string::basic_string_resize(uc)
-            }
-            "?swap@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEXAAV12@@Z" => {
-                basic_string::basic_string_swap(uc)
-            }
-            "?substr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV12@II@Z" => {
-                basic_string::basic_string_substr(uc)
-            }
-            "?c_str@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEPBDXZ" => {
-                basic_string::basic_string_c_str(uc)
-            }
-            "?end@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEPADXZ" => {
-                basic_string::basic_string_end(uc)
-            }
-            "?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEIXZ" => {
-                basic_string::basic_string_size(uc)
-            }
-            "?max_size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEIXZ" => {
-                basic_string::basic_string_max_size(uc)
-            }
-            "?_Nullstr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@CAPBDXZ" => {
-                basic_string::nullstr(uc)
-            }
+            FN_BASIC_STRING_CTOR_DEFAULT => basic_string::basic_string_ctor_default(uc),
+            FN_BASIC_STRING_CTOR_CSTR => basic_string::basic_string_ctor_cstr(uc),
+            FN_BASIC_STRING_DTOR => basic_string::basic_string_destructor(uc),
+            FN_BASIC_STRING_TIDY => basic_string::basic_string_tidy(uc),
+            FN_BASIC_STRING_GROW => basic_string::basic_string_grow(uc),
+            FN_BASIC_STRING_COPY => basic_string::basic_string_copy(uc),
+            FN_BASIC_STRING_EOS => basic_string::basic_string_eos(uc),
+            FN_BASIC_STRING_FREEZE => basic_string::basic_string_freeze(uc),
+            FN_BASIC_STRING_SPLIT => basic_string::basic_string_split(uc),
+            SYMBOL_BASIC_STRING_ASSIGN_PTR_LEN => basic_string::basic_string_assign_ptr_len(uc),
+            FN_BASIC_STRING_ASSIGN_PTR => basic_string::basic_string_assign_ptr(uc),
+            FN_BASIC_STRING_ASSIGN_SUBSTR => basic_string::basic_string_assign_substr(uc),
+            FN_BASIC_STRING_APPEND_SUBSTR => basic_string::basic_string_append_substr(uc),
+            FN_BASIC_STRING_COMPARE_OTHER => basic_string::basic_string_compare_other(uc),
+            FN_BASIC_STRING_COMPARE_PTR => basic_string::basic_string_compare_ptr(uc),
+            FN_BASIC_STRING_ERASE => basic_string::basic_string_erase(uc),
+            FN_BASIC_STRING_REPLACE_REPEAT => basic_string::basic_string_replace_repeat(uc),
+            FN_BASIC_STRING_REPLACE_RANGE_PTRS => basic_string::basic_string_replace_range_ptrs(uc),
+            FN_BASIC_STRING_RESIZE => basic_string::basic_string_resize(uc),
+            FN_BASIC_STRING_SWAP => basic_string::basic_string_swap(uc),
+            FN_BASIC_STRING_SUBSTR => basic_string::basic_string_substr(uc),
+            FN_BASIC_STRING_C_STR => basic_string::basic_string_c_str(uc),
+            FN_BASIC_STRING_END => basic_string::basic_string_end(uc),
+            FN_BASIC_STRING_SIZE => basic_string::basic_string_size(uc),
+            FN_BASIC_STRING_MAX_SIZE => basic_string::basic_string_max_size(uc),
+            SYMBOL_BASIC_STRING_NULLSTR_FN => basic_string::nullstr(uc),
 
-            "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z" => {
-                streambuf::basic_streambuf_copy_ctor(uc)
-            }
-            "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXXZ" => {
-                streambuf::basic_streambuf_init(uc)
-            }
-            "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAPAD0PAH001@Z" => {
-                streambuf::basic_streambuf_init_ranges(uc)
-            }
-            "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                streambuf::basic_streambuf_destructor(uc)
-            }
-            "??4?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z" => {
-                streambuf::basic_streambuf_assign(uc)
-            }
-            "?setg@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAD00@Z" => {
-                streambuf::basic_streambuf_setg(uc)
-            }
-            "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXPAD0@Z" => {
-                streambuf::basic_streambuf_setp(uc)
-            }
-            "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEXABVlocale@2@@Z" => {
-                streambuf::streambuf_imbue(uc)
-            }
-            "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEPAV12@PADH@Z" => {
-                streambuf::basic_streambuf_setbuf(uc)
-            }
-            "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z" => {
-                streambuf::basic_streambuf_seekoff(uc)
-            }
-            "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@V32@H@Z" => {
-                streambuf::basic_streambuf_seekpos(uc)
-            }
-            "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPBDH@Z" => {
-                streambuf::basic_streambuf_xsputn(uc)
-            }
-            "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHPADH@Z" => {
-                streambuf::basic_streambuf_xsgetn(uc)
-            }
-            "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ" => {
-                streambuf::basic_streambuf_underflow(uc)
-            }
-            "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ" => {
-                streambuf::basic_streambuf_uflow(uc)
-            }
-            "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ" => {
-                streambuf::basic_streambuf_showmanyc(uc)
-            }
-            "?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHH@Z" => {
-                streambuf::basic_streambuf_pbackfail(uc)
-            }
-            "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEHXZ" => {
-                streambuf::basic_streambuf_sync(uc)
-            }
+            FN_BASIC_STREAMBUF_COPY_CTOR => streambuf::basic_streambuf_copy_ctor(uc),
+            FN_BASIC_STREAMBUF_INIT => streambuf::basic_streambuf_init(uc),
+            FN_BASIC_STREAMBUF_INIT_RANGES => streambuf::basic_streambuf_init_ranges(uc),
+            FN_BASIC_STREAMBUF_DTOR => streambuf::basic_streambuf_destructor(uc),
+            FN_BASIC_STREAMBUF_ASSIGN => streambuf::basic_streambuf_assign(uc),
+            FN_BASIC_STREAMBUF_SETG => streambuf::basic_streambuf_setg(uc),
+            FN_BASIC_STREAMBUF_SETP => streambuf::basic_streambuf_setp(uc),
+            FN_BASIC_STREAMBUF_IMBUE => streambuf::streambuf_imbue(uc),
+            FN_BASIC_STREAMBUF_SETBUF => streambuf::basic_streambuf_setbuf(uc),
+            FN_BASIC_STREAMBUF_SEEKOFF => streambuf::basic_streambuf_seekoff(uc),
+            FN_BASIC_STREAMBUF_SEEKPOS => streambuf::basic_streambuf_seekpos(uc),
+            FN_BASIC_STREAMBUF_XSPUTN => streambuf::basic_streambuf_xsputn(uc),
+            FN_BASIC_STREAMBUF_XSGETN => streambuf::basic_streambuf_xsgetn(uc),
+            FN_BASIC_STREAMBUF_UNDERFLOW => streambuf::basic_streambuf_underflow(uc),
+            FN_BASIC_STREAMBUF_UFLOW => streambuf::basic_streambuf_uflow(uc),
+            FN_BASIC_STREAMBUF_SHOWMANYC => streambuf::basic_streambuf_showmanyc(uc),
+            FN_BASIC_STREAMBUF_PBACKFAIL => streambuf::basic_streambuf_pbackfail(uc),
+            FN_BASIC_STREAMBUF_SYNC => streambuf::basic_streambuf_sync(uc),
 
-            "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z" => {
-                ostream::basic_ostream_copy_ctor(uc)
-            }
-            "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N1@Z" => {
-                ostream::basic_ostream_ctor3(uc)
-            }
-            "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z" => {
-                ostream::basic_ostream_ctor2(uc)
-            }
-            "??1?$basic_ostream@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                ostream::basic_ostream_destructor(uc)
-            }
-            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z" => {
-                ostream::ostream_insert_int(uc)
-            }
-            "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z" => {
-                ostream::basic_ostream_write(uc)
-            }
+            FN_BASIC_OSTREAM_COPY_CTOR => ostream::basic_ostream_copy_ctor(uc),
+            FN_BASIC_OSTREAM_CTOR3 => ostream::basic_ostream_ctor3(uc),
+            FN_BASIC_OSTREAM_CTOR2 => ostream::basic_ostream_ctor2(uc),
+            FN_BASIC_OSTREAM_DTOR => ostream::basic_ostream_destructor(uc),
+            FN_OSTREAM_INSERT_INT => ostream::ostream_insert_int(uc),
+            FN_BASIC_OSTREAM_WRITE => ostream::basic_ostream_write(uc),
 
-            "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z" => {
-                istream::basic_istream_ctor(uc)
-            }
-            "??1?$basic_istream@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                istream::basic_istream_destructor(uc)
-            }
-            "?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@V?$fpos@H@2@@Z" => {
-                istream::basic_istream_seekg(uc)
-            }
-            "?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADHD@Z" => {
-                istream::basic_istream_getline(uc)
-            }
+            FN_BASIC_ISTREAM_CTOR => istream::basic_istream_ctor(uc),
+            FN_BASIC_ISTREAM_DTOR => istream::basic_istream_destructor(uc),
+            FN_BASIC_ISTREAM_SEEKG => istream::basic_istream_seekg(uc),
+            FN_BASIC_ISTREAM_GETLINE => istream::basic_istream_getline(uc),
 
-            "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z" => {
-                istream::basic_iostream_ctor(uc)
-            }
-            "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                istream::basic_iostream_destructor(uc)
-            }
+            FN_BASIC_IOSTREAM_CTOR => istream::basic_iostream_ctor(uc),
+            FN_BASIC_IOSTREAM_DTOR => istream::basic_iostream_destructor(uc),
 
-            "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z" => {
-                filebuf::basic_filebuf_ctor(uc)
-            }
-            "?_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@12@@Z" => {
-                filebuf::basic_filebuf_init(uc)
-            }
-            "?open@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAEPAV12@PBDH@Z" => {
-                filebuf::basic_filebuf_open(uc)
-            }
-            "?_Initcvt@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXXZ" => {
-                filebuf::basic_filebuf_initcvt(uc)
-            }
-            "??1?$basic_filebuf@DU?$char_traits@D@std@@@std@@UAE@XZ" => {
-                filebuf::basic_filebuf_destructor(uc)
-            }
-            "??_D?$basic_ifstream@DU?$char_traits@D@std@@@std@@QAEXXZ" => {
-                istream::basic_ifstream_vbase_dtor(uc)
-            }
+            FN_BASIC_FILEBUF_CTOR => filebuf::basic_filebuf_ctor(uc),
+            FN_BASIC_FILEBUF_INIT => filebuf::basic_filebuf_init(uc),
+            FN_BASIC_FILEBUF_OPEN => filebuf::basic_filebuf_open(uc),
+            FN_BASIC_FILEBUF_INITCVT => filebuf::basic_filebuf_initcvt(uc),
+            FN_BASIC_FILEBUF_DTOR => filebuf::basic_filebuf_destructor(uc),
+            FN_BASIC_IFSTREAM_VBASE_DTOR => istream::basic_ifstream_vbase_dtor(uc),
 
-            "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IAE@XZ" => ios::basic_ios_ctor(uc),
-            "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z" => {
-                ios::basic_ios_clear(uc)
-            }
-            "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z" => {
-                ios::basic_ios_setstate(uc)
-            }
-            "?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IAEXPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z" => {
-                ios::basic_ios_init(uc)
-            }
-            "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEDD@Z" => ios::basic_ios_widen(uc),
-            "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UAE@XZ" => ios::basic_ios_destructor(uc),
-            "??4?$basic_ios@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z" => {
-                ios::basic_ios_assign(uc)
-            }
+            FN_BASIC_IOS_CTOR => ios::basic_ios_ctor(uc),
+            FN_BASIC_IOS_CLEAR => ios::basic_ios_clear(uc),
+            FN_BASIC_IOS_SETSTATE => ios::basic_ios_setstate(uc),
+            FN_BASIC_IOS_INIT => ios::basic_ios_init(uc),
+            FN_BASIC_IOS_WIDEN => ios::basic_ios_widen(uc),
+            FN_BASIC_IOS_DTOR => ios::basic_ios_destructor(uc),
+            FN_BASIC_IOS_ASSIGN => ios::basic_ios_assign(uc),
 
-            "??0ios_base@std@@IAE@XZ" => ios::ios_base_ctor(uc),
-            "??1ios_base@std@@UAE@XZ" => ios::ios_base_dtor(uc),
-            "??4ios_base@std@@QAEAAV01@ABV01@@Z" => ios::ios_base_assign(uc),
-            "?clear@ios_base@std@@QAEXH_N@Z" => ios::ios_base_clear(uc),
-            "?copyfmt@ios_base@std@@QAEAAV12@ABV12@@Z" => ios::ios_base_copyfmt(uc),
-            "?getloc@ios_base@std@@QBE?AVlocale@2@XZ" => ios::ios_base_getloc(uc),
-            "?_Init@ios_base@std@@IAEXXZ" => ios::ios_base_init(uc),
-            "??0Init@ios_base@std@@QAE@XZ" => ios::ios_base_init_ctor(uc),
-            "??1Init@ios_base@std@@QAE@XZ" => ios::ios_base_init_dtor(uc),
+            FN_IOS_BASE_CTOR => ios::ios_base_ctor(uc),
+            FN_IOS_BASE_DTOR => ios::ios_base_dtor(uc),
+            FN_IOS_BASE_ASSIGN => ios::ios_base_assign(uc),
+            FN_IOS_BASE_CLEAR => ios::ios_base_clear(uc),
+            FN_IOS_BASE_COPYFMT => ios::ios_base_copyfmt(uc),
+            FN_IOS_BASE_GETLOC => ios::ios_base_getloc(uc),
+            FN_IOS_BASE_INIT => ios::ios_base_init(uc),
+            FN_IOS_BASE_INIT_CTOR => ios::ios_base_init_ctor(uc),
+            FN_IOS_BASE_INIT_DTOR => ios::ios_base_init_dtor(uc),
 
-            "?_Init@locale@std@@CAPAV_Locimp@12@XZ" => ios::locale_init(uc),
-            "??0locale@std@@QAE@XZ" => ios::locale_ctor(uc),
-            "??1locale@std@@QAE@XZ" => ios::locale_destructor(uc),
-            "??4locale@std@@QAEAAV01@ABV01@@Z" => ios::locale_assign(uc),
-            "?_Incref@facet@locale@std@@QAEXXZ" => ios::locale_facet_incref(uc),
-            "?_Decref@facet@locale@std@@QAEPAV123@XZ" => ios::locale_facet_decref(uc),
+            FN_LOCALE_INIT => ios::locale_init(uc),
+            FN_LOCALE_CTOR => ios::locale_ctor(uc),
+            FN_LOCALE_DTOR => ios::locale_destructor(uc),
+            FN_LOCALE_ASSIGN => ios::locale_assign(uc),
+            FN_LOCALE_FACET_INCREF => ios::locale_facet_incref(uc),
+            FN_LOCALE_FACET_DECREF => ios::locale_facet_decref(uc),
 
-            "?_Init@strstreambuf@std@@IAEXHPAD0H@Z" => streambuf::streambuf_init_strstream(uc),
+            FN_STRSTREAMBUF_INIT => streambuf::streambuf_init_strstream(uc),
 
-            "??0_Winit@std@@QAE@XZ" => ios::winit_ctor(uc),
-            "??1_Winit@std@@QAE@XZ" => ios::winit_dtor(uc),
-            "??0_Lockit@std@@QAE@XZ" => ios::lockit_ctor(uc),
-            "??1_Lockit@std@@QAE@XZ" => ios::lockit_dtor(uc),
+            FN_WINIT_CTOR => ios::winit_ctor(uc),
+            FN_WINIT_DTOR => ios::winit_dtor(uc),
+            FN_LOCKIT_CTOR => ios::lockit_ctor(uc),
+            FN_LOCKIT_DTOR => ios::lockit_dtor(uc),
 
-            "??6std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@PBD@Z" => {
-                ostream::ostream_insert_cstr(uc)
-            }
-            "??6std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@0@AAV10@D@Z" => {
-                ostream::ostream_insert_char(uc)
-            }
-            "?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z" => {
-                ostream::ostream_flush(uc)
-            }
-            "?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z" => {
-                ostream::ostream_endl(uc)
-            }
-            "?_Xlen@std@@YAXXZ" => ios::xlen(uc),
-            "?_Xran@std@@YAXXZ" => ios::xran(uc),
-            "?_Xoff@std@@YAXXZ" => ios::xoff(uc),
-            "?__Fiopen@std@@YAPAU_iobuf@@PBDH@Z" => filebuf::fiopen(uc),
+            FN_STD_OSTREAM_INSERT_CSTR => ostream::ostream_insert_cstr(uc),
+            FN_STD_OSTREAM_INSERT_CHAR => ostream::ostream_insert_char(uc),
+            SYMBOL_STD_FLUSH => ostream::ostream_flush(uc),
+            FN_STD_ENDL => ostream::ostream_endl(uc),
+            FN_STD_XLEN => ios::xlen(uc),
+            FN_STD_XRAN => ios::xran(uc),
+            FN_STD_XOFF => ios::xoff(uc),
+            FN_STD_FIOPEN => filebuf::fiopen(uc),
 
-            "??0?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAE@XZ" => {
-                ostream::basic_ofstream_ctor(uc)
-            }
-            "??_D?$basic_ofstream@DU?$char_traits@D@std@@@std@@QAEXXZ" => {
-                ostream::basic_ofstream_dtor(uc)
-            }
-            "??_D?$basic_fstream@DU?$char_traits@D@std@@@std@@QAEXXZ" => {
-                ostream::basic_fstream_dtor(uc)
-            }
-            "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV01@AAG@Z" => {
+            FN_BASIC_OFSTREAM_CTOR => ostream::basic_ofstream_ctor(uc),
+            FN_BASIC_OFSTREAM_DTOR => ostream::basic_ofstream_dtor(uc),
+            FN_BASIC_FSTREAM_DTOR => ostream::basic_fstream_dtor(uc),
+            FN_BASIC_ISTREAM_EXTRACT_UNSIGNED_SHORT => {
                 istream::basic_istream_extract_unsigned_short(uc)
             }
 
@@ -1127,18 +1221,16 @@ mod tests {
     #[test]
     fn proxy_cache_key_prefixes_dll_name() {
         assert_eq!(
-            MSVCP60::proxy_cache_key("?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A"),
-            "MSVCP60.dll!?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A"
+            MSVCP60::proxy_cache_key(SYMBOL_STD_COUT),
+            format!("MSVCP60.dll!{}", SYMBOL_STD_COUT)
         );
     }
 
     #[test]
     fn cdecl_detection_matches_msvc_mangling() {
-        assert!(MSVCP60::is_cdecl_symbol(
-            "?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z"
-        ));
+        assert!(MSVCP60::is_cdecl_symbol(SYMBOL_STD_FLUSH));
         assert!(!MSVCP60::is_cdecl_symbol(
-            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z"
+            SYMBOL_BASIC_STRING_ASSIGN_PTR_LEN
         ));
     }
 
@@ -1154,10 +1246,8 @@ mod tests {
         let vtable_b = MSVCP60::resolve_export(&mut uc, BASIC_OSTREAM_VTABLE).unwrap();
         assert_eq!(vtable_a, vtable_b);
 
-        let global_a =
-            MSVCP60::resolve_export(&mut uc, "?_Global@_Locimp@locale@std@@0PAV123@A").unwrap();
-        let global_b =
-            MSVCP60::resolve_export(&mut uc, "?_Global@_Locimp@locale@std@@0PAV123@A").unwrap();
+        let global_a = MSVCP60::resolve_export(&mut uc, SYMBOL_LOCALE_GLOBAL_PTR).unwrap();
+        let global_b = MSVCP60::resolve_export(&mut uc, SYMBOL_LOCALE_GLOBAL_PTR).unwrap();
         assert_eq!(global_a, global_b);
         assert_ne!(uc.read_u32(global_a as u64), 0);
     }
@@ -1177,75 +1267,43 @@ mod tests {
 
         uc.reg_write(RegisterX86::ECX, string_a as u64).unwrap();
         write_call_frame(&mut uc, &[0]);
-        MSVCP60::handle(
-            &mut uc,
-            "??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@ABV?$allocator@D@1@@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_STRING_CTOR_DEFAULT).unwrap();
 
         uc.reg_write(RegisterX86::ECX, string_a as u64).unwrap();
         write_call_frame(&mut uc, &[hello, 4]);
-        MSVCP60::handle(
-            &mut uc,
-            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, SYMBOL_BASIC_STRING_ASSIGN_PTR_LEN).unwrap();
         assert_eq!(MSVCP60::basic_string_bytes(&uc, string_a), b"abcd");
 
         uc.reg_write(RegisterX86::ECX, string_b as u64).unwrap();
         write_call_frame(&mut uc, &[other, 0]);
-        MSVCP60::handle(
-            &mut uc,
-            "??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAE@PBDABV?$allocator@D@1@@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_STRING_CTOR_CSTR).unwrap();
 
         uc.reg_write(RegisterX86::ECX, string_a as u64).unwrap();
         write_call_frame(&mut uc, &[string_b, 1, 2]);
-        MSVCP60::handle(
-            &mut uc,
-            "?append@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@ABV12@II@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_STRING_APPEND_SUBSTR).unwrap();
         assert_eq!(MSVCP60::basic_string_bytes(&uc, string_a), b"abcdyz");
 
         uc.reg_write(RegisterX86::ECX, string_a as u64).unwrap();
         write_call_frame(&mut uc, &[1, 2, 3, b'Q' as u32]);
-        MSVCP60::handle(
-            &mut uc,
-            "?replace@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@IIID@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_STRING_REPLACE_REPEAT).unwrap();
         assert_eq!(MSVCP60::basic_string_bytes(&uc, string_a), b"aQQQdyz");
 
         uc.reg_write(RegisterX86::ECX, string_a as u64).unwrap();
         write_call_frame(&mut uc, &[string_sub, 2, 3]);
-        let substr_result = MSVCP60::handle(
-            &mut uc,
-            "?substr@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBE?AV12@II@Z",
-        )
-        .unwrap();
+        let substr_result = MSVCP60::handle(&mut uc, FN_BASIC_STRING_SUBSTR).unwrap();
         assert_eq!(substr_result.cleanup, StackCleanup::Callee(3));
         assert_eq!(substr_result.return_value, Some(string_sub as i32));
         assert_eq!(MSVCP60::basic_string_bytes(&uc, string_sub), b"QQd");
 
         uc.reg_write(RegisterX86::ECX, string_a as u64).unwrap();
         write_call_frame(&mut uc, &[]);
-        let c_str_result = MSVCP60::handle(
-            &mut uc,
-            "?c_str@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEPBDXZ",
-        )
-        .unwrap();
+        let c_str_result = MSVCP60::handle(&mut uc, FN_BASIC_STRING_C_STR).unwrap();
         let c_str_ptr = c_str_result.return_value.unwrap() as u32;
         assert_eq!(uc.read_string(c_str_ptr as u64), "aQQQdyz");
 
         uc.reg_write(RegisterX86::ECX, string_a as u64).unwrap();
         write_call_frame(&mut uc, &[]);
-        let size_result = MSVCP60::handle(
-            &mut uc,
-            "?size@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QBEIXZ",
-        )
-        .unwrap();
+        let size_result = MSVCP60::handle(&mut uc, FN_BASIC_STRING_SIZE).unwrap();
         assert_eq!(size_result.return_value, Some(7));
     }
 
@@ -1260,19 +1318,11 @@ mod tests {
 
         uc.reg_write(RegisterX86::ECX, string_ptr as u64).unwrap();
         write_call_frame(&mut uc, &[0, 0]);
-        let assign_result = MSVCP60::handle(
-            &mut uc,
-            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z",
-        )
-        .unwrap();
+        let assign_result = MSVCP60::handle(&mut uc, SYMBOL_BASIC_STRING_ASSIGN_PTR_LEN).unwrap();
         assert_eq!(assign_result.cleanup, StackCleanup::Callee(2));
 
         write_call_frame(&mut uc, &[0x1234]);
-        let flush_result = MSVCP60::handle(
-            &mut uc,
-            "?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z",
-        )
-        .unwrap();
+        let flush_result = MSVCP60::handle(&mut uc, SYMBOL_STD_FLUSH).unwrap();
         assert_eq!(flush_result.cleanup, StackCleanup::Caller);
     }
 
@@ -1283,13 +1333,11 @@ mod tests {
     )]
     fn locale_singletons_stay_stable_across_init_and_refcounting() {
         let mut uc = new_test_uc();
-        let global_ptr =
-            MSVCP60::resolve_export(&mut uc, "?_Global@_Locimp@locale@std@@0PAV123@A").unwrap();
+        let global_ptr = MSVCP60::resolve_export(&mut uc, SYMBOL_LOCALE_GLOBAL_PTR).unwrap();
         let initial_locimp = uc.read_u32(global_ptr as u64);
 
         write_call_frame(&mut uc, &[]);
-        let init_result =
-            MSVCP60::handle(&mut uc, "?_Init@locale@std@@CAPAV_Locimp@12@XZ").unwrap();
+        let init_result = MSVCP60::handle(&mut uc, FN_LOCALE_INIT).unwrap();
         assert_eq!(init_result.cleanup, StackCleanup::Caller);
         assert_eq!(init_result.return_value, Some(initial_locimp as i32));
 
@@ -1297,18 +1345,16 @@ mod tests {
         uc.write_u32(facet as u64 + FACET_REFCOUNT_OFFSET, 1);
         uc.reg_write(RegisterX86::ECX, facet as u64).unwrap();
         write_call_frame(&mut uc, &[]);
-        MSVCP60::handle(&mut uc, "?_Incref@facet@locale@std@@QAEXXZ").unwrap();
+        MSVCP60::handle(&mut uc, FN_LOCALE_FACET_INCREF).unwrap();
         assert_eq!(uc.read_u32(facet as u64 + FACET_REFCOUNT_OFFSET), 2);
 
         uc.reg_write(RegisterX86::ECX, facet as u64).unwrap();
         write_call_frame(&mut uc, &[]);
-        let decref_result =
-            MSVCP60::handle(&mut uc, "?_Decref@facet@locale@std@@QAEPAV123@XZ").unwrap();
+        let decref_result = MSVCP60::handle(&mut uc, FN_LOCALE_FACET_DECREF).unwrap();
         assert_eq!(uc.read_u32(facet as u64 + FACET_REFCOUNT_OFFSET), 1);
         assert_eq!(decref_result.return_value, Some(facet as i32));
 
-        let global_again =
-            MSVCP60::resolve_export(&mut uc, "?_Global@_Locimp@locale@std@@0PAV123@A").unwrap();
+        let global_again = MSVCP60::resolve_export(&mut uc, SYMBOL_LOCALE_GLOBAL_PTR).unwrap();
         assert_eq!(global_ptr, global_again);
         assert_eq!(uc.read_u32(global_again as u64), initial_locimp);
     }
@@ -1325,7 +1371,7 @@ mod tests {
 
         uc.reg_write(RegisterX86::ECX, locale_obj as u64).unwrap();
         write_call_frame(&mut uc, &[]);
-        let ctor_result = MSVCP60::handle(&mut uc, "??0locale@std@@QAE@XZ").unwrap();
+        let ctor_result = MSVCP60::handle(&mut uc, FN_LOCALE_CTOR).unwrap();
         assert_eq!(ctor_result.cleanup, StackCleanup::Callee(0));
         assert_eq!(ctor_result.return_value, Some(locale_obj as i32));
         assert_ne!(MSVCP60::read_locale_impl(&uc, locale_obj), 0);
@@ -1334,11 +1380,7 @@ mod tests {
         uc.reg_write(RegisterX86::ECX, streambuf_obj as u64)
             .unwrap();
         write_call_frame(&mut uc, &[]);
-        let init_result = MSVCP60::handle(
-            &mut uc,
-            "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IAEXXZ",
-        )
-        .unwrap();
+        let init_result = MSVCP60::handle(&mut uc, FN_BASIC_STREAMBUF_INIT).unwrap();
         assert_eq!(init_result.cleanup, StackCleanup::Callee(0));
         assert_eq!(
             uc.read_u32(streambuf_obj as u64),
@@ -1367,36 +1409,21 @@ mod tests {
 
         uc.reg_write(RegisterX86::ECX, filebuf as u64).unwrap();
         write_call_frame(&mut uc, &[0]);
-        MSVCP60::handle(
-            &mut uc,
-            "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_FILEBUF_CTOR).unwrap();
 
         uc.reg_write(RegisterX86::ECX, filebuf as u64).unwrap();
         write_call_frame(&mut uc, &[path_ptr, 1]);
-        let open_result = MSVCP60::handle(
-            &mut uc,
-            "?open@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAEPAV12@PBDH@Z",
-        )
-        .unwrap();
+        let open_result = MSVCP60::handle(&mut uc, FN_BASIC_FILEBUF_OPEN).unwrap();
         assert_eq!(open_result.return_value, Some(filebuf as i32));
 
         uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
         write_call_frame(&mut uc, &[filebuf, 0]);
-        MSVCP60::handle(
-            &mut uc,
-            "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_ISTREAM_CTOR).unwrap();
 
         uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
         write_call_frame(&mut uc, &[out_value]);
-        let extract_result = MSVCP60::handle(
-            &mut uc,
-            "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV01@AAG@Z",
-        )
-        .unwrap();
+        let extract_result =
+            MSVCP60::handle(&mut uc, FN_BASIC_ISTREAM_EXTRACT_UNSIGNED_SHORT).unwrap();
         assert_eq!(extract_result.return_value, Some(istream as i32));
         assert_eq!(uc.read_u16(out_value as u64), 4321);
         assert_eq!(uc.read_u32(istream as u64 + IOS_STATE_OFFSET) & 0x6, 0);
@@ -1415,27 +1442,16 @@ mod tests {
 
         uc.reg_write(RegisterX86::ECX, filebuf as u64).unwrap();
         write_call_frame(&mut uc, &[0]);
-        MSVCP60::handle(
-            &mut uc,
-            "??0?$basic_filebuf@DU?$char_traits@D@std@@@std@@QAE@PAU_iobuf@@@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_FILEBUF_CTOR).unwrap();
 
         uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
         write_call_frame(&mut uc, &[filebuf, 0]);
-        MSVCP60::handle(
-            &mut uc,
-            "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z",
-        )
-        .unwrap();
+        MSVCP60::handle(&mut uc, FN_BASIC_ISTREAM_CTOR).unwrap();
 
         uc.reg_write(RegisterX86::ECX, istream as u64).unwrap();
         write_call_frame(&mut uc, &[out_value]);
-        let extract_result = MSVCP60::handle(
-            &mut uc,
-            "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV01@AAG@Z",
-        )
-        .unwrap();
+        let extract_result =
+            MSVCP60::handle(&mut uc, FN_BASIC_ISTREAM_EXTRACT_UNSIGNED_SHORT).unwrap();
         assert_eq!(extract_result.return_value, Some(istream as i32));
         assert_eq!(uc.read_u16(out_value as u64), 54);
         assert_eq!(uc.read_u32(istream as u64 + IOS_STATE_OFFSET) & 0x6, 0);

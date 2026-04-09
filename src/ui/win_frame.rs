@@ -20,7 +20,6 @@ use winit::{
 const WS_BORDER: u32 = 0x00800000;
 const WS_CAPTION: u32 = 0x00C00000;
 const WS_CHILD: u32 = 0x40000000;
-const WS_CLIPCHILDREN: u32 = 0x02000000;
 const WS_CLIPSIBLINGS: u32 = 0x04000000;
 const WS_DLGFRAME: u32 = 0x00400000;
 const WS_GROUP: u32 = 0x00020000;
@@ -33,6 +32,7 @@ const WS_MINIMIZEBOX: u32 = 0x00020000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
 const WS_EX_TOPMOST: u32 = 0x00000008;
 const WS_EX_LAYERED: u32 = 0x00080000;
+const CW_USEDEFAULT: i32 = i32::MIN;
 #[cfg(target_os = "windows")]
 const WS_EX_TOOLWINDOW: u32 = 0x00000080;
 #[cfg(target_os = "windows")]
@@ -52,11 +52,11 @@ struct HostWindowStyle {
 }
 
 impl HostWindowStyle {
-    fn from_guest(style: u32, ex_style: u32, use_native_frame: bool, parent: u32) -> Self {
+    fn from_guest(style: u32, ex_style: u32, use_native_frame: bool) -> Self {
         let decorations = use_native_frame && (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
         let resizable = use_native_frame && (style & WS_THICKFRAME) != 0;
         let transparent = (ex_style & WS_EX_LAYERED) != 0;
-        let topmost = (ex_style & WS_EX_TOPMOST) != 0 || parent != 0;
+        let topmost = (ex_style & WS_EX_TOPMOST) != 0;
         #[cfg(target_os = "windows")]
         let skip_taskbar = (ex_style & WS_EX_TOOLWINDOW) != 0 && (ex_style & WS_EX_APPWINDOW) == 0;
 
@@ -137,6 +137,8 @@ pub struct WinFrame {
     current_cursor: Option<(WindowId, u32)>,
     /// 마지막으로 마우스 이벤트가 처리된 시간 (스로틀링용)
     last_cursor_moved: Option<std::time::Instant>,
+    /// 마지막으로 게스트에게 전송된 마우스 좌표 (스로틀링 누락 감지용)
+    last_sent_mouse_pos: Option<(u32, u32)>,
 }
 
 impl WinFrame {
@@ -158,6 +160,7 @@ impl WinFrame {
             cursor_anim: None,
             current_cursor: None,
             last_cursor_moved: None,
+            last_sent_mouse_pos: None,
         }
     }
 
@@ -181,6 +184,22 @@ impl WinFrame {
         if self.cursor_anim.as_ref().map(|a| a.window_id) == Some(id) {
             self.cursor_anim = None;
         }
+    }
+
+    /// 지정된 HWND와 그 자손에 해당하는 호스트 창을 모두 제거합니다.
+    fn remove_window_tree_by_hwnd(&mut self, root_hwnd: u32) -> Vec<u32> {
+        let subtree = {
+            let win_event = self.emu_context.win_event.lock().unwrap();
+            win_event.window_subtree_postorder(root_hwnd)
+        };
+
+        for hwnd in &subtree {
+            if let Some(id) = self.hwnd_to_id.get(hwnd).copied() {
+                self.remove_window(id);
+            }
+        }
+
+        subtree
     }
 
     pub fn get_painter_mut<T: Painter + 'static>(
@@ -211,9 +230,8 @@ impl WinFrame {
         style: u32,
         ex_style: u32,
         use_native_frame: bool,
-        parent: u32,
     ) -> WindowAttributes {
-        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame, parent);
+        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
 
         attributes = attributes
             .with_decorations(host_style.decorations)
@@ -238,9 +256,8 @@ impl WinFrame {
         style: u32,
         ex_style: u32,
         use_native_frame: bool,
-        parent: u32,
     ) {
-        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame, parent);
+        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
 
         window.set_decorations(host_style.decorations);
         window.set_resizable(host_style.resizable);
@@ -263,6 +280,8 @@ impl WinFrame {
                 UiCommand::CreateWindow {
                     hwnd,
                     title,
+                    x,
+                    y,
                     width,
                     height,
                     style,
@@ -294,12 +313,16 @@ impl WinFrame {
                         .with_inner_size(winit::dpi::PhysicalSize::new(width, height))
                         .with_visible(visible);
 
+                    if x != CW_USEDEFAULT && y != CW_USEDEFAULT {
+                        attributes =
+                            attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
+                    }
+
                     attributes = Self::apply_guest_window_attributes(
                         attributes,
                         style,
                         ex_style,
                         use_native_frame,
-                        parent,
                     );
 
                     let window = event_loop.create_window(attributes).unwrap();
@@ -346,23 +369,7 @@ impl WinFrame {
                         let use_native_frame =
                             self.hwnd_native_frame.get(&hwnd).copied().unwrap_or(true);
 
-                        let parent = self
-                            .emu_context
-                            .win_event
-                            .lock()
-                            .unwrap()
-                            .windows
-                            .get(&hwnd)
-                            .map(|s| s.parent)
-                            .unwrap_or(0);
-
-                        Self::apply_guest_window_style(
-                            window,
-                            style,
-                            ex_style,
-                            use_native_frame,
-                            parent,
-                        );
+                        Self::apply_guest_window_style(window, style, ex_style, use_native_frame);
                         window.request_redraw();
                     }
                 }
@@ -873,15 +880,17 @@ impl ApplicationHandler<()> for WinFrame {
                 }
                 self.wake_emulator();
 
+                let hwnd = self.id_to_hwnd.get(&id).copied();
+
                 if quit_on_close {
                     event_loop.exit();
                 } else {
-                    let hwnd = self.id_to_hwnd.get(&id).copied();
-                    self.remove_window(id);
-
                     if let Some(hwnd) = hwnd {
+                        let subtree = self.remove_window_tree_by_hwnd(hwnd);
                         let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([hwnd, 0x0002, 0, 0, 0, 0, 0]); // WM_DESTROY
+                        for handle in subtree {
+                            q.push_back([handle, 0x0002, 0, 0, 0, 0, 0]); // WM_DESTROY
+                        }
                     }
                     self.wake_emulator();
                 }
@@ -891,7 +900,7 @@ impl ApplicationHandler<()> for WinFrame {
                 let x = position.x as u32;
                 let y = position.y as u32;
 
-                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                if let Some(&top_hwnd) = self.id_to_hwnd.get(&id) {
                     self.emu_context
                         .mouse_x
                         .store(x, std::sync::atomic::Ordering::SeqCst);
@@ -902,13 +911,36 @@ impl ApplicationHandler<()> for WinFrame {
                     let now = std::time::Instant::now();
                     if let Some(last) = self.last_cursor_moved {
                         if now.duration_since(last).as_millis() < 16 {
-                            return; // 16ms 이내 스로틀링, 메시지를 큐에 누적하지 않음
+                            return; // 16ms 이내 스로틀링
                         }
                     }
                     self.last_cursor_moved = Some(now);
 
+                    let (target_hwnd, target_x, target_y) = {
+                        let win_event = self.emu_context.win_event.lock().unwrap();
+                        let target =
+                            win_event.child_window_from_point(top_hwnd, x as i32, y as i32);
+                        if target != top_hwnd {
+                            if let Some((origin_x, origin_y)) =
+                                win_event.window_client_origin_in_host(target)
+                            {
+                                (
+                                    target,
+                                    (x as i32 - origin_x) as u32,
+                                    (y as i32 - origin_y) as u32,
+                                )
+                            } else {
+                                (top_hwnd, x, y)
+                            }
+                        } else {
+                            (top_hwnd, x, y)
+                        }
+                    };
+
+                    self.last_sent_mouse_pos = Some((x, y));
+
                     let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                    let lparam = (y << 16) | (x & 0xFFFF);
+                    let lparam = (target_y << 16) | (target_x & 0xFFFF);
                     let capture_hwnd = self
                         .emu_context
                         .capture_hwnd
@@ -919,7 +951,7 @@ impl ApplicationHandler<()> for WinFrame {
                     let mut setcursor_idx = None;
                     let mut mousemove_idx = None;
                     for (i, m) in q.iter().enumerate() {
-                        if m[0] == hwnd {
+                        if m[0] == target_hwnd {
                             if m[1] == 0x0020 && setcursor_idx.is_none() {
                                 setcursor_idx = Some(i);
                             } else if m[1] == 0x0200 && mousemove_idx.is_none() {
@@ -935,15 +967,23 @@ impl ApplicationHandler<()> for WinFrame {
                         let setcursor_lparam = (0x0200u32 << 16) | 0x0001; // WM_MOUSEMOVE | HTCLIENT
                         if let Some(idx) = setcursor_idx {
                             if let Some(message) = q.get_mut(idx) {
-                                message[2] = hwnd;
+                                message[0] = target_hwnd;
+                                message[2] = target_hwnd;
                                 message[3] = setcursor_lparam;
                                 message[4] = time;
-                                message[5] = x;
-                                message[6] = y;
+                                message[5] = target_x;
+                                message[6] = target_y;
                             }
                         } else {
-                            let setcursor_message =
-                                [hwnd, 0x0020, hwnd, setcursor_lparam, time, x, y];
+                            let setcursor_message = [
+                                target_hwnd,
+                                0x0020,
+                                target_hwnd,
+                                setcursor_lparam,
+                                time,
+                                target_x,
+                                target_y,
+                            ];
                             if let Some(idx) = mousemove_idx {
                                 q.insert(idx, setcursor_message);
                                 // insert가 mousemove_idx를 1칸 밀었으므로 보정
@@ -957,19 +997,20 @@ impl ApplicationHandler<()> for WinFrame {
                     // WM_MOUSEMOVE(0x0200) 중복 제거: 이미 큐에 있으면 위치만 업데이트
                     if let Some(idx) = mousemove_idx {
                         if let Some(message) = q.get_mut(idx) {
+                            message[0] = target_hwnd;
                             message[3] = lparam;
                             message[4] = time;
-                            message[5] = x;
-                            message[6] = y;
+                            message[5] = target_x;
+                            message[6] = target_y;
                         }
                     } else {
-                        q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
+                        q.push_back([target_hwnd, 0x0200, 0, lparam, time, target_x, target_y]);
                     }
 
                     // 마우스 트래킹 (TrackMouseEvent) 처리
                     let mut track_opt = self.emu_context.track_mouse_event.lock().unwrap();
                     if let Some(track) = track_opt.as_ref() {
-                        if track.hwnd != hwnd && (track.flags & 0x00000002 != 0) {
+                        if track.hwnd != top_hwnd && (track.flags & 0x00000002 != 0) {
                             let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                             q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
                             *track_opt = None;
@@ -995,7 +1036,7 @@ impl ApplicationHandler<()> for WinFrame {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                if let Some(&top_hwnd) = self.id_to_hwnd.get(&id) {
                     let x = self
                         .emu_context
                         .mouse_x
@@ -1004,7 +1045,51 @@ impl ApplicationHandler<()> for WinFrame {
                         .emu_context
                         .mouse_y
                         .load(std::sync::atomic::Ordering::SeqCst);
-                    let lparam = (y << 16) | (x & 0xFFFF);
+
+                    // 스로틀링으로 인해 WM_MOUSEMOVE가 생략되었을 수 있으므로,
+                    // 클릭 직전 현재 위치에 대한 이동 메시지 전송을 보장합니다.
+                    if self.last_sent_mouse_pos != Some((x, y)) {
+                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        let lparam = (y << 16) | (x & 0xFFFF);
+                        let mut q = self.emu_context.message_queue.lock().unwrap();
+                        q.push_back([top_hwnd, 0x0200, 0, lparam, time, x, y]);
+                        self.last_sent_mouse_pos = Some((x, y));
+                    }
+
+                    // 실제 클릭이 발생한 자식 창 찾기
+                    let (target_hwnd, target_x, target_y) = {
+                        let win_event = self.emu_context.win_event.lock().unwrap();
+                        let target =
+                            win_event.child_window_from_point(top_hwnd, x as i32, y as i32);
+                        if target != top_hwnd {
+                            if let Some((origin_x, origin_y)) =
+                                win_event.window_client_origin_in_host(target)
+                            {
+                                (
+                                    target,
+                                    (x as i32 - origin_x) as u32,
+                                    (y as i32 - origin_y) as u32,
+                                )
+                            } else {
+                                (top_hwnd, x, y)
+                            }
+                        } else {
+                            (top_hwnd, x, y)
+                        }
+                    };
+
+                    let lparam = (target_y << 16) | (target_x & 0xFFFF);
+                    let mut wparam = 0;
+
+                    // wparam에 버튼 상태 플래그 설정 (표준 Win32 behavior)
+                    if state == ElementState::Pressed {
+                        match button {
+                            MouseButton::Left => wparam |= 0x0001,   // MK_LBUTTON
+                            MouseButton::Right => wparam |= 0x0002,  // MK_RBUTTON
+                            MouseButton::Middle => wparam |= 0x0010, // MK_MBUTTON
+                            _ => {}
+                        }
+                    }
 
                     let msg = match (button, state) {
                         (MouseButton::Left, ElementState::Pressed) => 0x0201, // WM_LBUTTONDOWN
@@ -1015,8 +1100,9 @@ impl ApplicationHandler<()> for WinFrame {
                     };
 
                     if msg != 0 {
+                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                         let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([hwnd, msg, 0, lparam, 0, x, y]);
+                        q.push_back([target_hwnd, msg, wparam, lparam, time, target_x, target_y]);
                         drop(q);
                         self.wake_emulator();
                     }
@@ -1086,6 +1172,27 @@ impl ApplicationHandler<()> for WinFrame {
                 }
             }
 
+            WindowEvent::Moved(position) => {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let x = position.x;
+                    let y = position.y;
+                    let changed = self
+                        .emu_context
+                        .win_event
+                        .lock()
+                        .unwrap()
+                        .sync_host_window_position(hwnd, x, y);
+
+                    if changed {
+                        let lparam = (x as i16 as u16 as u32) | ((y as i16 as u16 as u32) << 16);
+                        let mut q = self.emu_context.message_queue.lock().unwrap();
+                        q.push_back([hwnd, 0x0003, 0, lparam, 0, 0, 0]); // WM_MOVE
+                        drop(q);
+                        self.wake_emulator();
+                    }
+                }
+            }
+
             WindowEvent::Resized(size) => {
                 if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
                     let width = size.width;
@@ -1148,8 +1255,8 @@ impl DefaultEmulatorPainter {
         pixels: &[u32],
         src_width: u32,
         src_height: u32,
-        clip_region: Option<(i32, i32, i32, i32)>,
-        exclusion_regions: &[(i32, i32, i32, i32)],
+        clip_rects: &[(i32, i32, i32, i32)],
+        exclusion_rects: &[(i32, i32, i32, i32)],
     ) {
         for src_y in 0..src_height as i32 {
             let dst_y = dest_y + src_y;
@@ -1157,27 +1264,29 @@ impl DefaultEmulatorPainter {
                 continue;
             }
 
+            let src_row_offset = (src_y as u32 * src_width) as usize;
+            let dst_row_offset = (dst_y as u32 * buffer_width) as usize;
+
             for src_x in 0..src_width as i32 {
                 let dst_x = dest_x + src_x;
                 if dst_x < 0 || dst_x >= buffer_width as i32 {
                     continue;
                 }
 
-                let dst_idx = (dst_y as u32 * buffer_width + dst_x as u32) as usize;
-
-                // Inclusion 클리핑 (region 내부에만 그림)
-                if let Some((left, top, right, bottom)) = clip_region {
-                    if src_x < left || src_x >= right || src_y < top || src_y >= bottom {
-                        if dst_idx < buffer.len() {
-                            buffer[dst_idx] = 0x00000000;
-                        }
-                        continue;
+                // Inclusion 클리핑 체크
+                let mut included = false;
+                for (cl, ct, cr, cb) in clip_rects {
+                    if src_x >= *cl && src_x < *cr && src_y >= *ct && src_y < *cb {
+                        included = true;
+                        break;
                     }
                 }
+                if !included {
+                    continue;
+                }
 
-                // Exclusion 클리핑 (WS_CLIPCHILDREN, WS_CLIPSIBLINGS 등)
                 let mut excluded = false;
-                for (ex_l, ex_t, ex_r, ex_b) in exclusion_regions {
+                for (ex_l, ex_t, ex_r, ex_b) in exclusion_rects {
                     if src_x >= *ex_l && src_x < *ex_r && src_y >= *ex_t && src_y < *ex_b {
                         excluded = true;
                         break;
@@ -1187,9 +1296,14 @@ impl DefaultEmulatorPainter {
                     continue;
                 }
 
-                let src_idx = (src_y as u32 * src_width + src_x as u32) as usize;
+                let dst_idx = dst_row_offset + dst_x as usize;
+                let src_idx = src_row_offset + src_x as usize;
                 if src_idx < pixels.len() && dst_idx < buffer.len() {
-                    buffer[dst_idx] = pixels[src_idx];
+                    let p = pixels[src_idx];
+                    // Lime Engine 투명도 키 (0x00FF00)는 이미 그려진 부모 배경을 유지해야 합니다.
+                    if (p & 0x00FFFFFF) != 0x0000FF00 {
+                        buffer[dst_idx] = p;
+                    }
                 }
             }
         }
@@ -1231,16 +1345,10 @@ impl DefaultEmulatorPainter {
             }
         });
 
-        let clip_region = if state.window_rgn != 0 {
+        let clip_rects = if state.window_rgn != 0 {
             gdi_objects.get(&state.window_rgn).and_then(|obj| {
-                if let GdiObject::Region {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                } = obj
-                {
-                    Some((*left, *top, *right, *bottom))
+                if let GdiObject::Region { rects } = obj {
+                    Some(rects.as_slice())
                 } else {
                     None
                 }
@@ -1249,41 +1357,42 @@ impl DefaultEmulatorPainter {
             None
         };
 
-        // 제외 영역 계산 (WS_CLIPCHILDREN, WS_CLIPSIBLINGS)
-        let mut exclusion_regions = Vec::new();
-
-        // WS_CLIPCHILDREN: 부모를 그릴 때 자식 영역을 제외
-        if (state.style & WS_CLIPCHILDREN) != 0 {
-            for child_hwnd in Self::child_windows(windows, hwnd) {
-                if let Some(child_state) = windows.get(&child_hwnd) {
-                    if child_state.visible {
-                        exclusion_regions.push((
-                            child_state.x,
-                            child_state.y,
-                            child_state.x + child_state.width,
-                            child_state.y + child_state.height,
-                        ));
-                    }
-                }
-            }
-        }
-
-        // WS_CLIPSIBLINGS: 자기보다 위에 있는 형제(Sibling) 영역을 제외
+        let mut sibling_exclusion_rects = Vec::new();
         if !is_root && (state.style & WS_CLIPSIBLINGS) != 0 {
             let siblings = Self::child_windows(windows, state.parent);
             let my_pos = siblings.iter().position(|&h| h == hwnd).unwrap_or(0);
-            // siblings는 Z-order 오름차순(뒤->앞)이므로, 자신보다 뒤에 있는(인덱스가 큰) 윈도우들이 위에 있음
+
+            // 부모 배경은 그대로 두되, 형제 창끼리는 위에 있는 창의 영역을 침범하지 않게 막습니다.
             for &sibling_hwnd in &siblings[my_pos + 1..] {
-                if let Some(sibling_state) = windows.get(&sibling_hwnd) {
-                    if sibling_state.visible {
-                        exclusion_regions.push((
-                            sibling_state.x - state.x,
-                            sibling_state.y - state.y,
-                            sibling_state.x - state.x + sibling_state.width,
-                            sibling_state.y - state.y + sibling_state.height,
-                        ));
+                let Some(sibling_state) = windows.get(&sibling_hwnd) else {
+                    continue;
+                };
+                if !sibling_state.visible {
+                    continue;
+                }
+
+                if sibling_state.window_rgn != 0 {
+                    if let Some(GdiObject::Region { rects }) =
+                        gdi_objects.get(&sibling_state.window_rgn)
+                    {
+                        for rect in rects {
+                            sibling_exclusion_rects.push((
+                                sibling_state.x - state.x + rect.0,
+                                sibling_state.y - state.y + rect.1,
+                                sibling_state.x - state.x + rect.2,
+                                sibling_state.y - state.y + rect.3,
+                            ));
+                        }
+                        continue;
                     }
                 }
+
+                sibling_exclusion_rects.push((
+                    sibling_state.x - state.x,
+                    sibling_state.y - state.y,
+                    sibling_state.x - state.x + sibling_state.width,
+                    sibling_state.y - state.y + sibling_state.height,
+                ));
             }
         }
 
@@ -1291,7 +1400,11 @@ impl DefaultEmulatorPainter {
             let pixels = pixels.lock().unwrap();
             let final_dest_x = if is_root { 0 } else { dest_x };
             let final_dest_y = if is_root { 0 } else { dest_y };
+            let default_clip = [(0, 0, src_width as i32, src_height as i32)];
+            let clip_rects = clip_rects.unwrap_or(&default_clip);
 
+            // 부모는 전체 배경을 먼저 남겨서 투명 키가 부모 배경을 드러내게 하고,
+            // 형제 창끼리만 상위 z-order 영역을 제외해 픽셀 침범을 막습니다.
             Self::blit_bitmap(
                 buffer,
                 buffer_width,
@@ -1301,8 +1414,8 @@ impl DefaultEmulatorPainter {
                 &pixels,
                 src_width,
                 src_height,
-                clip_region,
-                &exclusion_regions,
+                clip_rects,
+                &sibling_exclusion_rects,
             );
 
             // WS_BORDER 처리: 검은색 1px 테두리
@@ -1433,7 +1546,7 @@ impl Painter for DefaultEmulatorPainter {
 
         let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
             Ok(g) => g,
-            Err(_) => return false, // 락 획��� 실패 시 이번 프레임은 건너뜀 (데드락 방지)
+            Err(_) => return false, // 락 획 실패 시 이번 프레임은 건너뜀 (데드락 방지)
         };
 
         if self.cached_windows.contains_key(&self.hwnd) {
@@ -1459,7 +1572,19 @@ impl Painter for DefaultEmulatorPainter {
         }) = gdi_objects.get(&self.surface_bitmap)
         {
             let p = p.lock().unwrap();
-            Self::blit_bitmap(buffer, width, height, 0, 0, &p, *sw, *sh, None, &[]);
+            let default_clip = [(0, 0, *sw as i32, *sh as i32)];
+            Self::blit_bitmap(
+                buffer,
+                width,
+                height,
+                0,
+                0,
+                &p,
+                *sw,
+                *sh,
+                &default_clip,
+                &[],
+            );
         }
 
         true

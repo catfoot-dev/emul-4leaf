@@ -16,6 +16,13 @@ fn get_ttf_font() -> Option<&'static TtfFont<'static>> {
 pub struct GdiRenderer;
 
 impl GdiRenderer {
+    /// 좌표가 클리핑 사각형 목록 안에 포함되는지 확인합니다.
+    fn point_in_clip_rects(clip_rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> bool {
+        clip_rects
+            .iter()
+            .any(|&(left, top, right, bottom)| x >= left && x < right && y >= top && y < bottom)
+    }
+
     /// 선 그리기 (Bresenham 알고리즘 등)
     pub fn draw_line(
         pixels: &mut [u32],
@@ -37,6 +44,52 @@ impl GdiRenderer {
 
         loop {
             if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
+                pixels[(y * width as i32 + x) as usize] = color;
+            }
+
+            if x == x2 && y == y2 {
+                break;
+            }
+
+            let e2 = 2 * err;
+            if e2 > -dy {
+                err -= dy;
+                x += sx;
+            }
+            if e2 < dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// 클리핑 사각형을 적용하여 선을 그립니다.
+    pub fn draw_line_clipped(
+        pixels: &mut [u32],
+        width: u32,
+        height: u32,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: u32,
+        clip_rects: &[(i32, i32, i32, i32)],
+    ) {
+        let mut x = x1;
+        let mut y = y1;
+        let dx = (x2 - x1).abs();
+        let dy = (y2 - y1).abs();
+        let sx = if x1 < x2 { 1 } else { -1 };
+        let sy = if y1 < y2 { 1 } else { -1 };
+        let mut err = dx - dy;
+
+        loop {
+            if x >= 0
+                && x < width as i32
+                && y >= 0
+                && y < height as i32
+                && Self::point_in_clip_rects(clip_rects, x, y)
+            {
                 pixels[(y * width as i32 + x) as usize] = color;
             }
 
@@ -105,7 +158,80 @@ impl GdiRenderer {
         }
     }
 
-    /// BitBlt (단순 픽셀 복사)
+    /// 클리핑 사각형을 적용하여 직사각형을 그립니다.
+    pub fn draw_rect_clipped(
+        pixels: &mut [u32],
+        width: u32,
+        height: u32,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        pen_color: Option<u32>,
+        brush_color: Option<u32>,
+        clip_rects: &[(i32, i32, i32, i32)],
+    ) {
+        if let Some(color) = brush_color {
+            for &(cl, ct, cr, cb) in clip_rects {
+                let il = left.max(cl);
+                let it = top.max(ct);
+                let ir = right.min(cr);
+                let ib = bottom.min(cb);
+                if il < ir && it < ib {
+                    Self::draw_rect(pixels, width, height, il, it, ir, ib, None, Some(color));
+                }
+            }
+        }
+
+        if let Some(color) = pen_color {
+            Self::draw_line_clipped(
+                pixels,
+                width,
+                height,
+                left,
+                top,
+                right - 1,
+                top,
+                color,
+                clip_rects,
+            );
+            Self::draw_line_clipped(
+                pixels,
+                width,
+                height,
+                left,
+                bottom - 1,
+                right - 1,
+                bottom - 1,
+                color,
+                clip_rects,
+            );
+            Self::draw_line_clipped(
+                pixels,
+                width,
+                height,
+                left,
+                top,
+                left,
+                bottom - 1,
+                color,
+                clip_rects,
+            );
+            Self::draw_line_clipped(
+                pixels,
+                width,
+                height,
+                right - 1,
+                top,
+                right - 1,
+                bottom - 1,
+                color,
+                clip_rects,
+            );
+        }
+    }
+
+    /// BitBlt (픽셀 복사 및 래스터 연산 지원)
     pub fn bit_blt(
         dest_pixels: &mut [u32],
         dest_width: u32,
@@ -119,6 +245,7 @@ impl GdiRenderer {
         src_height: u32,
         x_src: i32,
         y_src: i32,
+        rop: u32,
     ) {
         for y in 0..height as i32 {
             let sy = y_src + y;
@@ -134,8 +261,27 @@ impl GdiRenderer {
                     continue;
                 }
 
-                dest_pixels[(dy * dest_width as i32 + dx) as usize] =
-                    src_pixels[(sy * src_width as i32 + sx) as usize];
+                let src_val = src_pixels[(sy * src_width as i32 + sx) as usize];
+                let dst_idx = (dy * dest_width as i32 + dx) as usize;
+
+                match rop {
+                    0x008800C6 => {
+                        // SRCAND: dst = dst & src
+                        dest_pixels[dst_idx] &= src_val;
+                    }
+                    0x00EE0086 => {
+                        // SRCPAINT: dst = dst | src
+                        dest_pixels[dst_idx] |= src_val;
+                    }
+                    0x00660046 => {
+                        // SRCINVERT: dst = dst ^ src
+                        dest_pixels[dst_idx] ^= src_val;
+                    }
+                    0x00CC0020 | _ => {
+                        // SRCCOPY: dst = src
+                        dest_pixels[dst_idx] = src_val;
+                    }
+                }
             }
         }
     }
@@ -184,6 +330,85 @@ impl GdiRenderer {
                     let px = bb.min.x + gx as i32;
                     let py = bb.min.y + gy as i32;
                     if px < 0 || px >= width as i32 || py < 0 || py >= height as i32 {
+                        return;
+                    }
+                    let idx = (py as u32 * width + px as u32) as usize;
+                    if idx >= pixels.len() {
+                        return;
+                    }
+                    let a = (v.clamp(0.0, 1.0) * 255.0) as u16;
+                    if a == 0 {
+                        return;
+                    }
+                    if a >= 250 {
+                        pixels[idx] = color;
+                    } else {
+                        let bg = pixels[idx];
+                        let bg_r = ((bg >> 16) & 0xFF) as u16;
+                        let bg_g = ((bg >> 8) & 0xFF) as u16;
+                        let bg_b = (bg & 0xFF) as u16;
+                        let r = (a * fg_r + (255 - a) * bg_r) / 255;
+                        let g = (a * fg_g + (255 - a) * bg_g) / 255;
+                        let b = (a * fg_b + (255 - a) * bg_b) / 255;
+                        pixels[idx] = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+                    }
+                });
+            }
+        }
+    }
+
+    /// 클리핑 사각형을 적용하여 텍스트를 그립니다.
+    pub fn draw_text_clipped(
+        pixels: &mut [u32],
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+        text: &str,
+        font_size: f32,
+        color: u32,
+        bg_color: Option<u32>,
+        clip_rects: &[(i32, i32, i32, i32)],
+    ) {
+        let Some(font) = get_ttf_font() else { return };
+        let scale = Scale::uniform(font_size);
+        let v_metrics = font.v_metrics(scale);
+        let offset = point(x as f32, y as f32 + v_metrics.ascent);
+        let text_width = Self::measure_text_width(text, font_size);
+        let text_height = (v_metrics.ascent - v_metrics.descent).ceil() as i32;
+
+        let glyphs: Vec<_> = font.layout(text, scale, offset).collect();
+
+        let fg_r = ((color >> 16) & 0xFF) as u16;
+        let fg_g = ((color >> 8) & 0xFF) as u16;
+        let fg_b = (color & 0xFF) as u16;
+
+        if let Some(bg_color) = bg_color {
+            let bg_left = x.max(0);
+            let bg_top = y.max(0);
+            let bg_right = (x + text_width).min(width as i32);
+            let bg_bottom = (y + text_height).min(height as i32);
+
+            for py in bg_top..bg_bottom {
+                for px in bg_left..bg_right {
+                    if Self::point_in_clip_rects(clip_rects, px, py) {
+                        pixels[(py as u32 * width + px as u32) as usize] = bg_color;
+                    }
+                }
+            }
+        }
+
+        for glyph in glyphs {
+            if let Some(bb) = glyph.pixel_bounding_box() {
+                glyph.draw(|gx, gy, v| {
+                    let px = bb.min.x + gx as i32;
+                    let py = bb.min.y + gy as i32;
+                    if px < 0
+                        || px >= width as i32
+                        || py < 0
+                        || py >= height as i32
+                        || !Self::point_in_clip_rects(clip_rects, px, py)
+                    {
                         return;
                     }
                     let idx = (py as u32 * width + px as u32) as usize;

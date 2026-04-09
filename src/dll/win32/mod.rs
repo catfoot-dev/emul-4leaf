@@ -83,8 +83,8 @@ pub struct Win32Context {
     pub rand_state: AtomicU32,
     /// 패킷 로거 (Winsock 통신 분석용)
     pub packet_logger: Arc<Mutex<PacketLogger>>,
-    /// 가상 파일 핸들 맵 (HFILE -> 호스트 파일 객체)
-    pub files: Arc<Mutex<HashMap<u32, std::fs::File>>>,
+    /// 가상 파일 핸들 맵 (HFILE -> CRT 파일 상태)
+    pub files: Arc<Mutex<HashMap<u32, FileState>>>,
     /// WSA 이벤트 핸들 맵 (event_handle → WsaEventEntry)
     /// WSAEventSelect / WSAEnumNetworkEvents / WaitForSingleObject 구현에 사용
     pub wsa_event_map: Arc<Mutex<HashMap<u32, WsaEventEntry>>>,
@@ -235,7 +235,7 @@ impl Win32Context {
                 height,
                 pixels,
                 bits_addr: None,
-                bpp: 32,
+                bpp: 24,
                 top_down: false,
             },
         );

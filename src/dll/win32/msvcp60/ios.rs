@@ -5,8 +5,8 @@ use crate::{
 use unicorn_engine::Unicorn;
 
 use super::{
-    MSVCP60, BASIC_IOS_VTABLE, FACET_REFCOUNT_OFFSET, IOS_BASE_VTABLE, IOS_LOCALE_OFFSET,
-    IOS_STATE_OFFSET, LOCALE_OBJECT_SIZE,
+    BASIC_IOS_VTABLE, FACET_REFCOUNT_OFFSET, IOS_BASE_VTABLE, IOS_LOCALE_OFFSET, IOS_STATE_OFFSET,
+    LOCALE_OBJECT_SIZE, MSVCP60,
 };
 
 pub(super) fn basic_ios_destructor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -252,7 +252,11 @@ pub(super) fn locale_facet_decref(uc: &mut Unicorn<Win32Context>) -> Option<ApiH
         let current = uc.read_u32(this_ptr as u64 + FACET_REFCOUNT_OFFSET).max(1);
         let next = current.saturating_sub(1);
         uc.write_u32(this_ptr as u64 + FACET_REFCOUNT_OFFSET, next);
-        if next == 0 { 0 } else { this_ptr }
+        if next == 0 {
+            0
+        } else {
+            this_ptr
+        }
     } else {
         0
     };

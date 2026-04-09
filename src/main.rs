@@ -13,8 +13,8 @@ mod ui;
 
 // 전역 로깅 인프라 재수출 — 매크로 및 외부 모듈이 `$crate::` / `crate::` 경로로 접근합니다.
 pub use debug::logging::{
-    INDEX, LOG_BUFFER, LOG_COUNT, SOCKET_LOG_BUFFER, SOCKET_LOG_COUNT,
-    init_logger, push_log, push_socket_log,
+    INDEX, LOG_BUFFER, LOG_COUNT, SOCKET_LOG_BUFFER, SOCKET_LOG_COUNT, init_logger, push_log,
+    push_socket_log,
 };
 pub(crate) use debug::logging::{append_capture_line, should_write_capture_files};
 

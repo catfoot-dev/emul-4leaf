@@ -321,6 +321,7 @@ pub(super) fn text_out_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
     if let Some((hbmp, _hpen, text_color, bk_color, bk_mode, hwnd, font_height)) = draw_params {
         if hbmp != 0 {
             GDI32::sync_dib_pixels(uc, hbmp);
+            let clip_rects = GDI32::clip_rects_for_hdc(uc, hdc);
             let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
             if let Some(GdiObject::Bitmap {
                 width,
@@ -331,8 +332,10 @@ pub(super) fn text_out_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
             {
                 let width = *width;
                 let height = *height;
+                let default_clip = vec![(0, 0, width as i32, height as i32)];
+                let clip_rects = clip_rects.unwrap_or(default_clip);
                 let mut pixels = pixels.lock().unwrap();
-                GdiRenderer::draw_text(
+                GdiRenderer::draw_text_clipped(
                     &mut pixels,
                     width,
                     height,
@@ -342,6 +345,7 @@ pub(super) fn text_out_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
                     font_height.abs().max(1) as f32,
                     text_color,
                     if bk_mode == 2 { Some(bk_color) } else { None }, // OPAQUE=2
+                    &clip_rects,
                 );
                 drop(pixels);
                 drop(gdi_objects);

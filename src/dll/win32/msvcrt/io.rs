@@ -1,5 +1,5 @@
 use crate::{
-    dll::win32::{ApiHookResult, Win32Context},
+    dll::win32::{ApiHookResult, FileState, Win32Context},
     helper::UnicornHelper,
 };
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -8,6 +8,18 @@ use unicorn_engine::Unicorn;
 // =========================================================
 // File I/O
 // =========================================================
+
+/// 파일 읽기/쓰기 오류를 CRT 상태에 반영합니다.
+fn mark_file_error(state: &mut FileState) {
+    state.error = true;
+}
+
+/// 파일 위치가 바뀌거나 상태를 초기화해야 할 때 EOF/에러 플래그를 지웁니다.
+fn clear_file_status(state: &mut FileState) {
+    state.eof = false;
+    state.error = false;
+}
+
 // API: FILE* fopen(const char* filename, const char* mode)
 // 역할: 파일을 오픈
 pub(super) fn fopen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -16,7 +28,10 @@ pub(super) fn fopen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let filename = uc.read_euc_kr(filename_addr as u64);
     let mode = uc.read_euc_kr(mode_addr as u64);
 
-    let filename = crate::resource_dir().join(&filename).to_string_lossy().to_string();
+    let filename = crate::resource_dir()
+        .join(&filename)
+        .to_string_lossy()
+        .to_string();
     let mut options = std::fs::OpenOptions::new();
     // Parse mode: r, w, a, +, b, t
 
@@ -40,7 +55,10 @@ pub(super) fn fopen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 
     let mut file_result = options.open(&filename);
     if file_result.is_err() && !filename.contains('/') && !filename.contains('\\') {
-        let alt_path = crate::resource_dir().join(&filename).to_string_lossy().to_string();
+        let alt_path = crate::resource_dir()
+            .join(&filename)
+            .to_string_lossy()
+            .to_string();
         file_result = options.open(&alt_path);
     }
 
@@ -48,7 +66,15 @@ pub(super) fn fopen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         Ok(file) => {
             let context = uc.get_data();
             let handle = context.alloc_handle();
-            context.files.lock().unwrap().insert(handle, file);
+            context.files.lock().unwrap().insert(
+                handle,
+                FileState {
+                    file,
+                    path: filename.clone(),
+                    eof: false,
+                    error: false,
+                },
+            );
             crate::emu_log!(
                 "[MSVCRT] fopen(\"{}\", \"{}\") -> FILE* {:#x}",
                 filename,
@@ -101,8 +127,20 @@ pub(super) fn fread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let bytes_read = {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&{ stream_handle }) {
-            file.read(&mut data).unwrap_or(0)
+        if let Some(state) = files.get_mut(&{ stream_handle }) {
+            match state.file.read(&mut data) {
+                Ok(bytes_read) => {
+                    state.eof = bytes_read < total_size;
+                    if bytes_read > 0 {
+                        state.error = false;
+                    }
+                    bytes_read
+                }
+                Err(_) => {
+                    mark_file_error(state);
+                    0
+                }
+            }
         } else {
             0
         }
@@ -142,8 +180,18 @@ pub(super) fn fwrite(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let bytes_written = {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&{ stream_handle }) {
-            file.write(&data).unwrap_or(0)
+        if let Some(state) = files.get_mut(&{ stream_handle }) {
+            match state.file.write(&data) {
+                Ok(bytes_written) => {
+                    state.error = false;
+                    state.eof = false;
+                    bytes_written
+                }
+                Err(_) => {
+                    mark_file_error(state);
+                    0
+                }
+            }
         } else {
             0
         }
@@ -177,9 +225,10 @@ pub(super) fn fseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 
     let context = uc.get_data();
     let mut files = context.files.lock().unwrap();
-    if let Some(file) = files.get_mut(&{ stream_handle }) {
-        match file.seek(pos) {
+    if let Some(state) = files.get_mut(&{ stream_handle }) {
+        match state.file.seek(pos) {
             Ok(new_pos) => {
+                clear_file_status(state);
                 crate::emu_log!(
                     "[MSVCRT] fseek({:#x}, {:#x}, {:#x}) -> int {:#x}",
                     stream_handle,
@@ -190,6 +239,7 @@ pub(super) fn fseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                 Some(ApiHookResult::callee(3, Some(0)))
             }
             Err(e) => {
+                mark_file_error(state);
                 crate::emu_log!(
                     "[MSVCRT] fseek({:#x}, {:#x}, {:#x}) -> int -1 {:?}",
                     stream_handle,
@@ -215,13 +265,16 @@ pub(super) fn ftell(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let stream_handle = uc.read_arg(0);
     let context = uc.get_data();
     let mut files = context.files.lock().unwrap();
-    if let Some(file) = files.get_mut(&{ stream_handle }) {
-        match file.stream_position() {
+    if let Some(state) = files.get_mut(&{ stream_handle }) {
+        match state.file.stream_position() {
             Ok(pos) => {
                 crate::emu_log!("[MSVCRT] ftell({:#x}) -> long {:#x}", stream_handle, pos);
                 Some(ApiHookResult::callee(1, Some(pos as i32)))
             }
-            Err(_) => Some(ApiHookResult::callee(1, Some(-1))),
+            Err(_) => {
+                mark_file_error(state);
+                Some(ApiHookResult::callee(1, Some(-1)))
+            }
         }
     } else {
         crate::emu_log!(
@@ -238,10 +291,19 @@ pub(super) fn fflush(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let stream_handle = uc.read_arg(0);
     let context = uc.get_data();
     let mut files = context.files.lock().unwrap();
-    if let Some(file) = files.get_mut(&{ stream_handle }) {
-        file.flush().unwrap();
-        crate::emu_log!("[MSVCRT] fflush({:#x}) -> int 0", stream_handle);
-        Some(ApiHookResult::callee(1, Some(0)))
+    if let Some(state) = files.get_mut(&{ stream_handle }) {
+        match state.file.flush() {
+            Ok(_) => {
+                state.error = false;
+                crate::emu_log!("[MSVCRT] fflush({:#x}) -> int 0", stream_handle);
+                Some(ApiHookResult::callee(1, Some(0)))
+            }
+            Err(_) => {
+                mark_file_error(state);
+                crate::emu_log!("[MSVCRT] fflush({:#x}) -> int -1", stream_handle);
+                Some(ApiHookResult::callee(1, Some(-1)))
+            }
+        }
     } else {
         crate::emu_log!("[MSVCRT] fflush({:#x}) -> int -1", stream_handle);
         Some(ApiHookResult::callee(1, Some(-1)))
@@ -278,7 +340,10 @@ pub(super) fn _open(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 
     let mut file_result = options.open(&filename);
     if file_result.is_err() && !filename.contains('/') && !filename.contains('\\') {
-        let alt_path = crate::resource_dir().join(&filename).to_string_lossy().to_string();
+        let alt_path = crate::resource_dir()
+            .join(&filename)
+            .to_string_lossy()
+            .to_string();
         file_result = options.open(&alt_path);
     }
 
@@ -286,7 +351,15 @@ pub(super) fn _open(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         Ok(file) => {
             let context = uc.get_data();
             let handle = context.alloc_handle();
-            context.files.lock().unwrap().insert(handle, file);
+            context.files.lock().unwrap().insert(
+                handle,
+                FileState {
+                    file,
+                    path: filename.clone(),
+                    eof: false,
+                    error: false,
+                },
+            );
             crate::emu_log!(
                 "[MSVCRT] _open(\"{}\", {:#x}) -> int {:#x}",
                 filename,
@@ -332,8 +405,20 @@ pub(super) fn _read(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let bytes_read = {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&fd) {
-            file.read(&mut data).unwrap_or(0)
+        if let Some(state) = files.get_mut(&fd) {
+            match state.file.read(&mut data) {
+                Ok(bytes_read) => {
+                    state.eof = bytes_read < count as usize;
+                    if bytes_read > 0 {
+                        state.error = false;
+                    }
+                    bytes_read
+                }
+                Err(_) => {
+                    mark_file_error(state);
+                    0
+                }
+            }
         } else {
             0
         }
@@ -367,8 +452,18 @@ pub(super) fn _write(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let bytes_written = {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&fd) {
-            file.write(&data).unwrap_or(0)
+        if let Some(state) = files.get_mut(&fd) {
+            match state.file.write(&data) {
+                Ok(bytes_written) => {
+                    state.error = false;
+                    state.eof = false;
+                    bytes_written
+                }
+                Err(_) => {
+                    mark_file_error(state);
+                    0
+                }
+            }
         } else {
             0
         }
@@ -400,9 +495,10 @@ pub(super) fn _lseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 
     let context = uc.get_data();
     let mut files = context.files.lock().unwrap();
-    if let Some(file) = files.get_mut(&fd) {
-        match file.seek(pos) {
+    if let Some(state) = files.get_mut(&fd) {
+        match state.file.seek(pos) {
             Ok(new_pos) => {
+                clear_file_status(state);
                 crate::emu_log!(
                     "[MSVCRT] _lseek({:#x}, {}, {}) -> int {:#x}",
                     fd,
@@ -412,7 +508,10 @@ pub(super) fn _lseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                 );
                 Some(ApiHookResult::callee(3, Some(new_pos as i32)))
             }
-            Err(_) => Some(ApiHookResult::callee(3, Some(-1))),
+            Err(_) => {
+                mark_file_error(state);
+                Some(ApiHookResult::callee(3, Some(-1)))
+            }
         }
     } else {
         crate::emu_log!(
@@ -423,6 +522,65 @@ pub(super) fn _lseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         );
         Some(ApiHookResult::callee(3, Some(-1)))
     }
+}
+
+// API: int feof(FILE* stream)
+// 역할: 스트림이 EOF 상태인지 확인
+pub(super) fn feof(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let stream_handle = uc.read_arg(0);
+    let eof = uc
+        .get_data()
+        .files
+        .lock()
+        .unwrap()
+        .get(&stream_handle)
+        .map(|state| state.eof)
+        .unwrap_or(false);
+    crate::emu_log!("[MSVCRT] feof({:#x}) -> int {}", stream_handle, eof as i32);
+    Some(ApiHookResult::callee(1, Some(eof as i32)))
+}
+
+// API: int ferror(FILE* stream)
+// 역할: 스트림이 에러 상태인지 확인
+pub(super) fn ferror(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let stream_handle = uc.read_arg(0);
+    let error = uc
+        .get_data()
+        .files
+        .lock()
+        .unwrap()
+        .get(&stream_handle)
+        .map(|state| state.error)
+        .unwrap_or(false);
+    crate::emu_log!(
+        "[MSVCRT] ferror({:#x}) -> int {}",
+        stream_handle,
+        error as i32
+    );
+    Some(ApiHookResult::callee(1, Some(error as i32)))
+}
+
+// API: void clearerr(FILE* stream)
+// 역할: 스트림의 EOF/에러 상태를 지움
+pub(super) fn clearerr(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let stream_handle = uc.read_arg(0);
+    if let Some(state) = uc.get_data().files.lock().unwrap().get_mut(&stream_handle) {
+        clear_file_status(state);
+    }
+    crate::emu_log!("[MSVCRT] clearerr({:#x}) -> void", stream_handle);
+    Some(ApiHookResult::callee(1, Some(0)))
+}
+
+// API: void rewind(FILE* stream)
+// 역할: 파일 포인터를 처음으로 되돌리고 상태를 초기화
+pub(super) fn rewind(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let stream_handle = uc.read_arg(0);
+    if let Some(state) = uc.get_data().files.lock().unwrap().get_mut(&stream_handle) {
+        let _ = state.file.seek(SeekFrom::Start(0));
+        clear_file_status(state);
+    }
+    crate::emu_log!("[MSVCRT] rewind({:#x}) -> void", stream_handle);
+    Some(ApiHookResult::callee(1, Some(0)))
 }
 
 // API: int _pipe(int* phandles, unsigned int size, int oflag)

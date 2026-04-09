@@ -14,6 +14,10 @@ pub enum UiCommand {
         hwnd: u32,
         /// 창 제목
         title: String,
+        /// 초기 X 위치
+        x: i32,
+        /// 초기 Y 위치
+        y: i32,
         /// 너비
         width: u32,
         /// 높이

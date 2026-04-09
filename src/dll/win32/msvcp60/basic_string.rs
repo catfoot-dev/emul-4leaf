@@ -109,9 +109,7 @@ pub(super) fn basic_string_split(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     Some(ApiHookResult::callee(0, None))
 }
 
-pub(super) fn basic_string_assign_ptr_len(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_string_assign_ptr_len(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let ptr = uc.read_arg(0);
     let len = uc.read_arg(1) as usize;
@@ -141,9 +139,7 @@ pub(super) fn basic_string_assign_ptr(uc: &mut Unicorn<Win32Context>) -> Option<
     Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
 }
 
-pub(super) fn basic_string_assign_substr(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_string_assign_substr(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let other_ptr = uc.read_arg(0);
     let offset = uc.read_arg(1);
@@ -161,9 +157,7 @@ pub(super) fn basic_string_assign_substr(
     Some(ApiHookResult::callee(3, Some(this_ptr as i32)))
 }
 
-pub(super) fn basic_string_append_substr(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_string_append_substr(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let other_ptr = uc.read_arg(0);
     let offset = uc.read_arg(1);
@@ -183,9 +177,7 @@ pub(super) fn basic_string_append_substr(
     Some(ApiHookResult::callee(3, Some(this_ptr as i32)))
 }
 
-pub(super) fn basic_string_compare_other(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_string_compare_other(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let other_ptr = uc.read_arg(0);
     let lhs = MSVCP60::basic_string_bytes(uc, this_ptr);
@@ -247,9 +239,7 @@ pub(super) fn basic_string_erase(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     Some(ApiHookResult::callee(2, Some(this_ptr as i32)))
 }
 
-pub(super) fn basic_string_replace_repeat(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_string_replace_repeat(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let pos = uc.read_arg(0) as usize;
     let remove_len = uc.read_arg(1) as usize;

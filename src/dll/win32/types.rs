@@ -3,6 +3,7 @@
 //! Win32 API 에뮬레이션에 사용되는 데이터 구조체 및 열거형을 정의합니다.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -177,12 +178,10 @@ pub enum GdiObject {
         current_x: i32,
         current_y: i32,
     },
-    /// 영역(Region) 오브젝트 - 클리핑이나 히트 테스트에 사용됩니다.
+    /// 영역(Region) 오브젝트 - 클리핑이나 히터 테스트에 사용됩니다.
     Region {
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
+        /// 영역을 구성하는 직사각형 목록 (Win32 RGNDATA의 RECT 배열에 해당)
+        rects: Vec<(i32, i32, i32, i32)>,
     },
     /// 팔레트(Palette) 오브젝트
     Palette { num_entries: u32 },
@@ -266,6 +265,19 @@ pub enum SocketState {
 pub struct EventState {
     pub signaled: bool,
     pub manual_reset: bool,
+}
+
+/// 가상 C 런타임 파일 핸들의 상태를 저장합니다.
+#[derive(Debug)]
+pub struct FileState {
+    /// 실제 호스트 파일 객체
+    pub file: File,
+    /// 디버깅용 원본 경로 문자열
+    pub path: String,
+    /// 마지막 읽기에서 EOF를 만났는지 여부
+    pub eof: bool,
+    /// 마지막 I/O에서 에러가 발생했는지 여부
+    pub error: bool,
 }
 
 /// 가상 윈도우 클래스(WNDCLASS) 정보를 저장합니다.

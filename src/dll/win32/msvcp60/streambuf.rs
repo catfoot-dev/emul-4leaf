@@ -6,13 +6,11 @@ use std::io::SeekFrom;
 use unicorn_engine::Unicorn;
 
 use super::{
-    MSVCP60, BASIC_STREAMBUF_VTABLE, STREAMBUF_BUFFER_OFFSET, STREAMBUF_CAPACITY_OFFSET,
+    BASIC_STREAMBUF_VTABLE, MSVCP60, STREAMBUF_BUFFER_OFFSET, STREAMBUF_CAPACITY_OFFSET,
     STREAMBUF_READ_POS_OFFSET, STREAMBUF_WRITE_POS_OFFSET,
 };
 
-pub(super) fn basic_streambuf_copy_ctor(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_streambuf_copy_ctor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let other_ptr = uc.read_arg(0);
     MSVCP60::init_streambuf_layout(uc, this_ptr, BASIC_STREAMBUF_VTABLE);
@@ -26,9 +24,7 @@ pub(super) fn basic_streambuf_copy_ctor(
     Some(ApiHookResult::callee(1, Some(this_ptr as i32)))
 }
 
-pub(super) fn basic_streambuf_destructor(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_streambuf_destructor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     crate::emu_log!(
         "[MSVCP60] (this={:#x}) basic_streambuf::~basic_streambuf()",
@@ -75,9 +71,7 @@ pub(super) fn basic_streambuf_init(uc: &mut Unicorn<Win32Context>) -> Option<Api
     Some(ApiHookResult::callee(0, None))
 }
 
-pub(super) fn basic_streambuf_init_ranges(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_streambuf_init_ranges(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let arg0 = uc.read_arg(0);
     let arg1 = uc.read_arg(1);
@@ -198,10 +192,8 @@ pub(super) fn basic_streambuf_seekoff(uc: &mut Unicorn<Win32Context>) -> Option<
             if has_hidden_ret { 4 } else { 3 },
         ));
     }
-    let available =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET) as i32;
-    let current =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET) as i32;
+    let available = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET) as i32;
+    let current = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET) as i32;
 
     let next = match seekdir {
         1 => current.saturating_add(off),
@@ -233,9 +225,7 @@ pub(super) fn basic_streambuf_seekpos(uc: &mut Unicorn<Win32Context>) -> Option<
     let pos = uc.read_arg(pos_index);
     let mode_index = if has_hidden_ret { 3 } else { 2 };
     let mode = uc.read_arg(mode_index);
-    if let Some(next) =
-        MSVCP60::seek_streambuf_file(uc, this_ptr, SeekFrom::Start(pos as u64))
-    {
+    if let Some(next) = MSVCP60::seek_streambuf_file(uc, this_ptr, SeekFrom::Start(pos as u64)) {
         crate::emu_log!(
             "[MSVCP60] (this={:#x}) basic_streambuf::seekpos({}, {}) -> {}",
             this_ptr,
@@ -250,8 +240,7 @@ pub(super) fn basic_streambuf_seekpos(uc: &mut Unicorn<Win32Context>) -> Option<
             if has_hidden_ret { 4 } else { 3 },
         ));
     }
-    let write_pos =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET);
+    let write_pos = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_WRITE_POS_OFFSET);
     let next = pos.min(write_pos);
     MSVCP60::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, next);
     crate::emu_log!(
@@ -290,42 +279,47 @@ pub(super) fn basic_streambuf_xsgetn(uc: &mut Unicorn<Win32Context>) -> Option<A
     let this_ptr = MSVCP60::this_ptr(uc);
     let dst_ptr = uc.read_arg(0);
     let requested = uc.read_arg(1) as usize;
-    MSVCP60::prepare_streambuf_read(uc, this_ptr);
-    let buffer_ptr =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
-    let read_pos =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET) as usize;
-    let available = MSVCP60::streambuf_available(uc, this_ptr) as usize;
-    let count = requested.min(available);
-    if count != 0 && dst_ptr != 0 && buffer_ptr != 0 {
-        let bytes = MSVCP60::read_exact_bytes(uc, buffer_ptr + read_pos as u32, count);
-        let _ = uc.mem_write(dst_ptr as u64, &bytes);
+    let mut copied = 0usize;
+
+    while copied < requested {
+        MSVCP60::prepare_streambuf_read(uc, this_ptr);
+        let buffer_ptr = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
+        let read_pos =
+            MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET) as usize;
+        let available = MSVCP60::streambuf_available(uc, this_ptr) as usize;
+        if buffer_ptr == 0 || available == 0 {
+            break;
+        }
+
+        let chunk = (requested - copied).min(available);
+        if dst_ptr != 0 {
+            let bytes = MSVCP60::read_exact_bytes(uc, buffer_ptr + read_pos as u32, chunk);
+            let _ = uc.mem_write(dst_ptr as u64 + copied as u64, &bytes);
+        }
+        MSVCP60::write_streambuf_field(
+            uc,
+            this_ptr,
+            STREAMBUF_READ_POS_OFFSET,
+            (read_pos + chunk) as u32,
+        );
+        copied += chunk;
     }
-    MSVCP60::write_streambuf_field(
-        uc,
-        this_ptr,
-        STREAMBUF_READ_POS_OFFSET,
-        (read_pos + count) as u32,
-    );
+
     crate::emu_log!(
         "[MSVCP60] (this={:#x}) basic_streambuf::xsgetn({:#x}, {}) -> {}",
         this_ptr,
         dst_ptr,
         requested,
-        count
+        copied
     );
-    Some(ApiHookResult::callee(2, Some(count as i32)))
+    Some(ApiHookResult::callee(2, Some(copied as i32)))
 }
 
-pub(super) fn basic_streambuf_underflow(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_streambuf_underflow(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     MSVCP60::prepare_streambuf_read(uc, this_ptr);
-    let buffer_ptr =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
-    let read_pos =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
+    let buffer_ptr = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
+    let read_pos = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
     let available = MSVCP60::streambuf_available(uc, this_ptr);
     let value = if buffer_ptr != 0 && available != 0 {
         uc.read_u8(buffer_ptr as u64 + read_pos as u64) as i32
@@ -342,18 +336,10 @@ pub(super) fn basic_streambuf_underflow(
 
 pub(super) fn basic_streambuf_uflow(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
-    let value = basic_streambuf_underflow(uc)?
-        .return_value
-        .unwrap_or(-1);
+    let value = basic_streambuf_underflow(uc)?.return_value.unwrap_or(-1);
     if value >= 0 {
-        let read_pos =
-            MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
-        MSVCP60::write_streambuf_field(
-            uc,
-            this_ptr,
-            STREAMBUF_READ_POS_OFFSET,
-            read_pos + 1,
-        );
+        let read_pos = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
+        MSVCP60::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, read_pos + 1);
     }
     crate::emu_log!(
         "[MSVCP60] (this={:#x}) basic_streambuf::uflow() -> {}",
@@ -363,12 +349,15 @@ pub(super) fn basic_streambuf_uflow(uc: &mut Unicorn<Win32Context>) -> Option<Ap
     Some(ApiHookResult::callee(0, Some(value)))
 }
 
-pub(super) fn basic_streambuf_showmanyc(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_streambuf_showmanyc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     MSVCP60::prepare_streambuf_read(uc, this_ptr);
-    let value = MSVCP60::streambuf_available(uc, this_ptr) as i32;
+    let available = MSVCP60::streambuf_available(uc, this_ptr);
+    let value = if available == 0 && MSVCP60::streambuf_file_eof(uc, this_ptr) {
+        -1
+    } else {
+        available as i32
+    };
     crate::emu_log!(
         "[MSVCP60] (this={:#x}) basic_streambuf::showmanyc() -> {}",
         this_ptr,
@@ -377,16 +366,12 @@ pub(super) fn basic_streambuf_showmanyc(
     Some(ApiHookResult::callee(0, Some(value)))
 }
 
-pub(super) fn basic_streambuf_pbackfail(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_streambuf_pbackfail(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let ch = uc.read_arg(0) as i32;
     MSVCP60::prepare_streambuf_read(uc, this_ptr);
-    let buffer_ptr =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
-    let read_pos =
-        MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
+    let buffer_ptr = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_BUFFER_OFFSET);
+    let read_pos = MSVCP60::read_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET);
     let result = if buffer_ptr != 0 && read_pos != 0 {
         let new_pos = read_pos - 1;
         MSVCP60::write_streambuf_field(uc, this_ptr, STREAMBUF_READ_POS_OFFSET, new_pos);
@@ -412,9 +397,19 @@ pub(super) fn basic_streambuf_sync(uc: &mut Unicorn<Win32Context>) -> Option<Api
     let result = if file_handle != 0 {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&file_handle) {
+        if let Some(state) = files.get_mut(&file_handle) {
             use std::io::Write;
-            file.flush().map(|_| 0).unwrap_or(-1)
+            state
+                .file
+                .flush()
+                .map(|_| {
+                    state.error = false;
+                    0
+                })
+                .unwrap_or_else(|_| {
+                    state.error = true;
+                    -1
+                })
         } else {
             -1
         }
@@ -438,12 +433,7 @@ pub(super) fn streambuf_imbue(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     } else {
         fallback_locale
     };
-    MSVCP60::write_streambuf_field(
-        uc,
-        this_ptr,
-        super::STREAMBUF_LOCALE_OFFSET,
-        locale_value,
-    );
+    MSVCP60::write_streambuf_field(uc, this_ptr, super::STREAMBUF_LOCALE_OFFSET, locale_value);
     crate::emu_log!(
         "[MSVCP60] (this={:#x}) basic_streambuf::imbue({:#x})",
         this_ptr,
@@ -452,9 +442,7 @@ pub(super) fn streambuf_imbue(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     Some(ApiHookResult::callee(1, None))
 }
 
-pub(super) fn streambuf_init_strstream(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn streambuf_init_strstream(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     let flags = uc.read_arg(0);
     let buffer = uc.read_arg(1);

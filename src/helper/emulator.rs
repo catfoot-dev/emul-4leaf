@@ -9,10 +9,10 @@ use std::{
 };
 use unicorn_engine::{HookType, Prot, RegisterX86, Unicorn};
 
-use super::memory::*;
 use super::UnicornHelper;
+use super::memory::*;
 
-pub(super) const DEBUG_AUTO_QUANTUM: usize = 200_000;
+pub(super) const DEBUG_AUTO_QUANTUM: usize = 20_000;
 pub(super) const DEBUG_STEP_QUANTUM: usize = 1;
 pub(super) const DEBUG_STATE_SEND_INTERVAL: Duration = Duration::from_millis(250);
 pub(super) const EMULATOR_IDLE_SLEEP_SLICE: Duration = Duration::from_millis(5);
@@ -306,26 +306,16 @@ pub(crate) fn setup_impl(
     .map_err(|e| crate::emu_log!("[!] Failed to install API hook: {:?}", e))?;
     crate::append_capture_line("emu.log", "[SETUP] add fake import hook done");
 
-    // [5] 전역 코드 훅 (JIT 비활성화 + EIP=0 보호)
-    // 가짜 import 훅 내부에서 schedule_threads(), dispatch_to_wndproc(), qsort 콜백 등이
-    // 중첩 emu_start를 호출합니다. Unicorn의 JIT 블록은 이 중첩 호출 시 내부 상태가
-    // 손상될 수 있으므로, 전체 주소 범위에 코드 훅을 설치하여 인터프리터 모드로 강제합니다.
-    //
-    // 성능 영향: 인터프리터 모드는 JIT 대비 느리지만, 이전 버전에 있던 디버그 트레이스
-    // 로깅(레지스터 읽기 + 문자열 포매팅)을 제거하여 명령어당 오버헤드를 최소화했습니다.
-    crate::append_capture_line("emu.log", "[SETUP] add global code hook begin");
-    uc.add_code_hook(
-        0,
-        u64::MAX,
-        |uc: &mut Unicorn<Win32Context>, addr, _size| {
-            if addr == 0 {
-                crate::emu_log!("[!] Execution at address 0x0 detected. Stopping.");
-                uc.emu_stop().unwrap_or_default();
-            }
-        },
-    )
-    .map_err(|e| crate::emu_log!("[!] Failed to install global code hook: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] add global code hook done");
+    // [5] EIP=0 보호를 위한 전용 코드 훅
+    // 이전에는 JIT 방지를 위해 전체 주소 범위를 훅했으나, 성능 향상을 위해
+    // 실제 문제가 되는 0번지 진입만 차단하는 가벼운 훅으로 대체합니다.
+    crate::append_capture_line("emu.log", "[SETUP] add null-eip protection hook begin");
+    uc.add_code_hook(0, 0, |uc: &mut Unicorn<Win32Context>, _addr, _size| {
+        crate::emu_log!("[!] Execution at address 0x0 detected. Stopping.");
+        uc.emu_stop().unwrap_or_default();
+    })
+    .map_err(|e| crate::emu_log!("[!] Failed to install null-eip hook: {:?}", e))?;
+    crate::append_capture_line("emu.log", "[SETUP] add null-eip protection hook done");
 
     // [6] Unmapped Memory Access Hook
     crate::append_capture_line("emu.log", "[SETUP] add unmapped mem hook begin");

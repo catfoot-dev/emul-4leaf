@@ -80,8 +80,8 @@ pub(super) fn invalidate_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     let hwnd = uc.read_arg(0);
     let ctx = uc.get_data();
     let mut win_event = ctx.win_event.lock().unwrap();
-    if let Some(state) = win_event.windows.get_mut(&hwnd) {
-        state.needs_paint = true;
+    if win_event.windows.contains_key(&hwnd) {
+        win_event.invalidate_rect(hwnd, std::ptr::null_mut());
         crate::emu_log!("[USER32] InvalidateRect({:#x}) -> 1", hwnd);
         Some(ApiHookResult::callee(3, Some(1)))
     } else {
@@ -311,6 +311,7 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
         );
     } else if hbmp != 0 {
         GDI32::sync_dib_pixels(uc, hbmp);
+        let clip_rects = GDI32::clip_rects_for_hdc(uc, hdc);
         let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
         if let Some(GdiObject::Bitmap {
             width,
@@ -321,6 +322,8 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
         {
             let width = *width;
             let height = *height;
+            let default_clip = vec![(0, 0, width as i32, height as i32)];
+            let clip_rects = clip_rects.unwrap_or(default_clip);
             let mut pixels = pixels.lock().unwrap();
             let block_y = if (u_format & DT_VCENTER) != 0 {
                 top + (rect_height - measured_height).max(0) / 2
@@ -341,7 +344,7 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                 };
                 let draw_y = block_y + index as i32 * line_height;
 
-                GdiRenderer::draw_text(
+                GdiRenderer::draw_text_clipped(
                     &mut pixels,
                     width,
                     height,
@@ -351,6 +354,7 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                     font_size,
                     text_color,
                     if bk_mode == 2 { Some(bk_color) } else { None },
+                    &clip_rects,
                 );
             }
 
@@ -373,6 +377,92 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
         measured_height
     );
     Some(ApiHookResult::callee(5, Some(measured_height)))
+}
+
+// API: int FillRect(HDC hDC, const RECT *lprc, HBRUSH hbr)
+// 역할: 지정된 브러시를 사용하여 직사각형 영역을 채움
+pub(super) fn fill_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
+    let hdc = uc.read_arg(0);
+    let lprc = uc.read_arg(1);
+    let hbr = uc.read_arg(2);
+
+    if lprc == 0 || hbr == 0 {
+        return Some(ApiHookResult::callee(3, Some(0)));
+    }
+
+    let left = uc.read_i32(lprc as u64);
+    let top = uc.read_i32(lprc as u64 + 4);
+    let right = uc.read_i32(lprc as u64 + 8);
+    let bottom = uc.read_i32(lprc as u64 + 12);
+
+    let mut draw_params = None;
+    {
+        let gdi = uc.get_data().gdi_objects.lock().unwrap();
+        if let Some(GdiObject::Dc {
+            selected_bitmap,
+            associated_window,
+            ..
+        }) = gdi.get(&hdc)
+        {
+            let mut brush_color = None;
+            if hbr <= 0x1_0000 {
+                // Stock brush 또는 System Color index (COLOR_xxx + 1)
+                // 간단히 Light Gray 또는 흰색으로 기본처리
+                brush_color = Some(0x00C0C0C0);
+            } else if let Some(GdiObject::Brush { color }) = gdi.get(&hbr) {
+                brush_color = Some(*color);
+            }
+            draw_params = Some((*selected_bitmap, brush_color, *associated_window));
+        }
+    }
+
+    if let Some((hbmp, Some(color), hwnd)) = draw_params {
+        if hbmp != 0 {
+            GDI32::sync_dib_pixels(uc, hbmp);
+            let clip_rects = GDI32::clip_rects_for_hdc(uc, hdc);
+            let gdi = uc.get_data().gdi_objects.lock().unwrap();
+            if let Some(GdiObject::Bitmap {
+                width,
+                height,
+                pixels,
+                ..
+            }) = gdi.get(&hbmp)
+            {
+                let width = *width;
+                let height = *height;
+                let mut pixels = pixels.lock().unwrap();
+                for (left, top, right, bottom) in
+                    GDI32::intersect_rect_with_clip_rects(&clip_rects, left, top, right, bottom)
+                {
+                    GdiRenderer::draw_rect(
+                        &mut pixels,
+                        width,
+                        height,
+                        left,
+                        top,
+                        right,
+                        bottom,
+                        None,
+                        Some(color),
+                    );
+                }
+                drop(pixels);
+                drop(gdi);
+                GDI32::flush_dib_pixels_to_memory(uc, hbmp);
+                if hwnd != 0 {
+                    uc.get_data().win_event.lock().unwrap().update_window(hwnd);
+                }
+            }
+        }
+    }
+
+    crate::emu_log!(
+        "[USER32] FillRect({:#x}, {:#x}, {:#x}) -> 1",
+        hdc,
+        lprc,
+        hbr
+    );
+    Some(ApiHookResult::callee(3, Some(1)))
 }
 
 // API: HDC GetDC(HWND hWnd)

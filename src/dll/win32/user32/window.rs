@@ -115,8 +115,7 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         }
         if nccreate_ret == 0 {
             let ctx = uc.get_data();
-            USER32::cleanup_window_runtime_state(ctx, hwnd);
-            ctx.win_event.lock().unwrap().destroy_window(hwnd);
+            USER32::destroy_window_tree(ctx, hwnd);
             crate::emu_log!(
                 "[USER32] CreateWindowExA(\"{}\") -> WM_NCCREATE rejected",
                 class_name
@@ -131,8 +130,7 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         }
         if create_ret == -1 {
             let ctx = uc.get_data();
-            USER32::cleanup_window_runtime_state(ctx, hwnd);
-            ctx.win_event.lock().unwrap().destroy_window(hwnd);
+            USER32::destroy_window_tree(ctx, hwnd);
             crate::emu_log!(
                 "[USER32] CreateWindowExA(\"{}\") -> WM_CREATE rejected",
                 class_name
@@ -201,13 +199,13 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
 pub(super) fn show_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hwnd = uc.read_arg(0);
     let n_cmd_show = uc.read_arg(1);
-    // SW_HIDE = 0, 그 외는 대부분 표시
-    let visible = n_cmd_show != 0;
+    // 최대화/복원/최소화 상태가 `IsZoomed`/`IsIconic`에 반영되도록
+    // Win32의 `ShowWindow` 명령 의미를 함께 적용합니다.
     uc.get_data()
         .win_event
         .lock()
         .unwrap()
-        .show_window(hwnd, visible);
+        .apply_show_window(hwnd, n_cmd_show);
     crate::emu_log!(
         "[USER32] ShowWindow({:#x}, {:#x}) -> BOOL 1",
         hwnd,
@@ -249,8 +247,7 @@ pub(super) fn update_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
 pub(super) fn destroy_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hwnd = uc.read_arg(0);
     let ctx = uc.get_data();
-    USER32::cleanup_window_runtime_state(ctx, hwnd);
-    ctx.win_event.lock().unwrap().destroy_window(hwnd);
+    USER32::destroy_window_tree(ctx, hwnd);
     crate::emu_log!("[USER32] DestroyWindow({:#x}) -> BOOL 1", hwnd);
     Some(ApiHookResult::callee(1, Some(1)))
 }
@@ -385,7 +382,10 @@ pub(super) fn get_window_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
         win_event
             .windows
             .get(&hwnd)
-            .map(|win| (win.x, win.y, win.width, win.height))
+            .map(|win| {
+                let (screen_x, screen_y) = win_event.window_screen_origin(hwnd).unwrap_or((0, 0));
+                (screen_x, screen_y, win.width, win.height)
+            })
             .unwrap_or((0, 0, 640, 480))
     };
 
@@ -651,7 +651,10 @@ pub(super) fn set_window_long_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
         let ctx = uc.get_data();
         let mut win_event = ctx.win_event.lock().unwrap();
         let mut sync_style = false;
-        if let Some(win) = win_event.windows.get_mut(&hwnd) {
+        let mut visibility_changed = false;
+        let mut new_visibility = false;
+        let mut is_child = false;
+        let found = if let Some(win) = win_event.windows.get_mut(&hwnd) {
             match index {
                 -4 => {
                     // GWL_WNDPROC
@@ -668,12 +671,28 @@ pub(super) fn set_window_long_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                     old = win.style;
                     win.style = new_val;
                     sync_style = true;
+                    is_child = (win.style & 0x40000000) != 0;
+                    let visible = (new_val & 0x10000000) != 0;
+                    if !is_child {
+                        if win.visible != visible {
+                            win.visible = visible;
+                            visibility_changed = true;
+                            new_visibility = visible;
+                        }
+                    } else if visible && !win.visible {
+                        // 자식 창은 WS_VISIBLE가 뒤늦게 style에 반영되는 경우가 있어 show는 받아들이고,
+                        // hide는 ShowWindow/SetWindowPos 경로를 우선합니다.
+                        win.visible = true;
+                        visibility_changed = true;
+                        new_visibility = true;
+                    }
                 }
                 -20 => {
                     // GWL_EXSTYLE
                     old = win.ex_style;
                     win.ex_style = new_val;
                     sync_style = true;
+                    is_child = (win.style & 0x40000000) != 0;
                 }
                 -21 => {
                     // GWL_USERDATA
@@ -684,15 +703,26 @@ pub(super) fn set_window_long_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                     crate::emu_log!("[USER32] SetWindowLongA index {} not implemented", index);
                 }
             }
-
-            if sync_style {
-                // Win32 앱이 프레임/캡션 비트를 바꾸면 호스트 창 외형도 즉시 맞춰 둡니다.
-                win_event.sync_window_style(hwnd);
-            }
             true
         } else {
             false
+        };
+
+        if found && sync_style {
+            // Win32 앱이 프레임/캡션 비트를 바꾸면 호스트 창 외형도 즉시 맞춰 둡니다.
+            win_event.sync_window_style(hwnd);
         }
+        if found && visibility_changed {
+            if is_child {
+                win_event.update_window(hwnd);
+            } else {
+                win_event.send_ui_command(crate::ui::UiCommand::ShowWindow {
+                    hwnd,
+                    visible: new_visibility,
+                });
+            }
+        }
+        found
     };
 
     if found {

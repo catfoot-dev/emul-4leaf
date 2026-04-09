@@ -8,7 +8,7 @@ mod paint;
 mod window;
 
 use crate::{
-    dll::win32::{ApiHookResult, StackCleanup, Timer, Win32Context, WindowClass},
+    dll::win32::{ApiHookResult, StackCleanup, Timer, Win32Context, WindowClass, WindowState},
     helper::{EXIT_ADDRESS, UnicornHelper, run_nested_guest_until_exit},
 };
 use unicorn_engine::{RegisterX86, Unicorn};
@@ -35,6 +35,12 @@ impl USER32 {
     const CREATE_STRUCT_A_EX_STYLE_OFFSET: u64 = 44;
     pub const FRAME_BORDER_WIDTH: i32 = 3;
     pub const CAPTION_HEIGHT: i32 = 19;
+    const HTNOWHERE: i32 = 0;
+    const HTCLIENT: i32 = 1;
+    const HTCAPTION: i32 = 2;
+    const HTMINBUTTON: i32 = 8;
+    const HTMAXBUTTON: i32 = 9;
+    const HTCLOSE: i32 = 20;
 
     /// 만료된 타이머를 메시지 큐에 반영하되, 동일 타이머의 `WM_TIMER`는 하나만 유지합니다.
     fn enqueue_elapsed_timer_messages(
@@ -73,6 +79,20 @@ impl USER32 {
             .lock()
             .unwrap()
             .retain(|msg| msg[0] != hwnd);
+    }
+
+    /// 지정된 창과 자식 창 전체를 런타임 상태까지 포함해 한 번에 파괴합니다.
+    fn destroy_window_tree(ctx: &Win32Context, hwnd: u32) {
+        let subtree = {
+            let win_event = ctx.win_event.lock().unwrap();
+            win_event.window_subtree_postorder(hwnd)
+        };
+
+        for handle in &subtree {
+            Self::cleanup_window_runtime_state(ctx, *handle);
+        }
+
+        ctx.win_event.lock().unwrap().destroy_window(hwnd);
     }
 
     /// 현재 메시지 큐나 무효화된 창으로 인해 즉시 처리할 UI 메시지가 있는지 확인합니다.
@@ -270,6 +290,63 @@ impl USER32 {
         (bw, bh, caption)
     }
 
+    /// 기본 비클라이언트 hit-test를 계산하여 캡션 버튼과 드래그 영역을 구분합니다.
+    fn default_hit_test(window: &WindowState, screen_x: i32, screen_y: i32) -> i32 {
+        const WS_SYSMENU: u32 = 0x00080000;
+        const WS_MINIMIZEBOX: u32 = 0x00020000;
+        const WS_MAXIMIZEBOX: u32 = 0x00010000;
+
+        if window.use_native_frame {
+            return Self::HTCLIENT;
+        }
+
+        let x = screen_x - window.x;
+        let y = screen_y - window.y;
+        if x < 0 || x >= window.width || y < 0 || y >= window.height {
+            return Self::HTNOWHERE;
+        }
+
+        let (bw, bh, caption) = Self::get_window_frame_size(window.style, window.ex_style);
+        if caption <= 0 {
+            return Self::HTCLIENT;
+        }
+
+        let caption_top = bh.max(0);
+        let caption_bottom = caption_top + caption;
+        if y < caption_top || y >= caption_bottom {
+            return Self::HTCLIENT;
+        }
+
+        // 우측 캡션 버튼은 닫기 -> 최대화 -> 최소화 순서로 배치됩니다.
+        if (window.style & WS_SYSMENU) != 0 {
+            let button_width = caption.max(1);
+            let mut right = window.width - bw.max(0);
+
+            let close_left = right - button_width;
+            if x >= close_left && x < right {
+                return Self::HTCLOSE;
+            }
+            right = close_left;
+
+            if (window.style & WS_MAXIMIZEBOX) != 0 {
+                let max_left = right - button_width;
+                if x >= max_left && x < right {
+                    return Self::HTMAXBUTTON;
+                }
+                right = max_left;
+            }
+
+            if (window.style & WS_MINIMIZEBOX) != 0 {
+                let min_left = right - button_width;
+                if x >= min_left && x < right {
+                    return Self::HTMINBUTTON;
+                }
+            }
+        }
+
+        Self::HTCAPTION
+    }
+
     fn dispatch_to_wndproc(
         uc: &mut Unicorn<Win32Context>,
         wnd_proc: u32,
@@ -432,6 +509,7 @@ impl USER32 {
                 "KillTimer" => paint::kill_timer(uc),
                 "SetTimer" => paint::set_timer(uc),
                 "DrawTextA" => paint::draw_text_a(uc),
+                "FillRect" => paint::fill_rect(uc),
 
                 "SetFocus" => window::set_focus(uc),
                 "GetFocus" => window::get_focus(uc),
@@ -482,6 +560,35 @@ mod tests {
     use crate::dll::win32::StackCleanup;
     use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
+
+    fn sample_window_state(style: u32, use_native_frame: bool) -> WindowState {
+        WindowState {
+            class_name: "TEST".to_string(),
+            title: "test".to_string(),
+            x: 100,
+            y: 50,
+            width: 200,
+            height: 120,
+            style,
+            ex_style: 0,
+            parent: 0,
+            id: 0,
+            visible: true,
+            enabled: true,
+            zoomed: false,
+            iconic: false,
+            wnd_proc: 0,
+            class_cursor: 0,
+            user_data: 0,
+            use_native_frame,
+            surface_bitmap: 0,
+            window_rgn: 0,
+            needs_paint: false,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order: 0,
+        }
+    }
 
     #[test]
     fn wsprintf_uses_caller_cleanup() {
@@ -564,6 +671,74 @@ mod tests {
     }
 
     #[test]
+    fn destroy_window_tree_cleanup_removes_child_messages_and_timers() {
+        let ctx = Win32Context::new(None);
+        {
+            let mut win_event = ctx.win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state(0, true));
+
+            let mut child = sample_window_state(0x40000000, true);
+            child.parent = 0x1000;
+            win_event.create_window(0x1001, child);
+        }
+
+        ctx.message_queue.lock().unwrap().extend([
+            [0x1000, 0x000F, 0, 0, 0, 0, 0],
+            [0x1001, 0x000F, 0, 0, 0, 0, 0],
+            [0x2002, 0x000F, 0, 0, 0, 0, 0],
+        ]);
+        {
+            let mut timers = ctx.timers.lock().unwrap();
+            timers.insert(
+                1,
+                Timer {
+                    hwnd: 0x1000,
+                    id: 1,
+                    elapse: 50,
+                    timer_proc: 0,
+                    last_tick: Instant::now(),
+                },
+            );
+            timers.insert(
+                2,
+                Timer {
+                    hwnd: 0x1001,
+                    id: 2,
+                    elapse: 50,
+                    timer_proc: 0,
+                    last_tick: Instant::now(),
+                },
+            );
+            timers.insert(
+                3,
+                Timer {
+                    hwnd: 0x2002,
+                    id: 3,
+                    elapse: 50,
+                    timer_proc: 0,
+                    last_tick: Instant::now(),
+                },
+            );
+        }
+
+        USER32::destroy_window_tree(&ctx, 0x1000);
+
+        let queue = ctx.message_queue.lock().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0][0], 0x2002);
+        drop(queue);
+
+        let timers = ctx.timers.lock().unwrap();
+        assert_eq!(timers.len(), 1);
+        assert!(timers.values().all(|timer| timer.hwnd == 0x2002));
+        drop(timers);
+
+        let windows = ctx.win_event.lock().unwrap();
+        assert!(!windows.windows.contains_key(&0x1000));
+        assert!(!windows.windows.contains_key(&0x1001));
+    }
+
+    #[test]
     fn write_create_struct_a_uses_win32_field_order() {
         let expected = [
             0x1111_1111,
@@ -604,5 +779,25 @@ mod tests {
             words[(USER32::CREATE_STRUCT_A_EX_STYLE_OFFSET / 4) as usize],
             expected[11]
         );
+    }
+
+    #[test]
+    fn default_hit_test_detects_minimize_button() {
+        let style = 0x00C00000 | 0x00080000 | 0x00020000 | 0x00010000;
+        let window = sample_window_state(style, false);
+
+        let result = USER32::default_hit_test(&window, 250, 60);
+
+        assert_eq!(result, USER32::HTMINBUTTON);
+    }
+
+    #[test]
+    fn default_hit_test_keeps_native_frame_as_client() {
+        let style = 0x00C00000 | 0x00080000 | 0x00020000;
+        let window = sample_window_state(style, true);
+
+        let result = USER32::default_hit_test(&window, 250, 60);
+
+        assert_eq!(result, USER32::HTCLIENT);
     }
 }

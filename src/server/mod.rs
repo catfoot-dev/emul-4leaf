@@ -518,9 +518,7 @@ pub fn run_dnet_handler(
 
                     let previous_phase = analysis_states.get(&channel_id).map(|state| state.phase);
                     let outcome = match pkt.main_type {
-                        0xE0 | 0x60 => {
-                            handle_main_frame(&pkt, channel_id, &mut game_state)
-                        }
+                        0xE0 | 0x60 => handle_main_frame(&pkt, channel_id, &mut game_state),
                         0x64 => handle_system(&pkt, channel_id, &mut game_state),
                         0x68 => handle_ping(&pkt, channel_id),
                         0x0A => handle_world_map(&pkt, channel_id),
@@ -619,11 +617,7 @@ pub fn run_dnet_handler(
 ///
 /// 본문 구조: `[version_code:u32 LE][control:u32 LE][data...]`
 /// ProtocolPacket 파싱 후: main=vc[0], sub=vc[1], payload=[vc[2..4], control[4], data...]
-fn handle_main_frame(
-    pkt: &ProtocolPacket,
-    ch: u16,
-    state: &mut GameState,
-) -> HandlerOutcome {
+fn handle_main_frame(pkt: &ProtocolPacket, ch: u16, state: &mut GameState) -> HandlerOutcome {
     match pkt.sub_type {
         0x04 | 0x05 => {
             // 클라이언트 버전 코드를 캡처합니다
@@ -633,8 +627,7 @@ fn handle_main_frame(
             match extract_control(&pkt.payload) {
                 Some(0) => {
                     // 초기 부트스트랩 (버전 + 공지)
-                    let response =
-                        build_provisional_main_frame_bootstrap_response(pkt, ch);
+                    let response = build_provisional_main_frame_bootstrap_response(pkt, ch);
                     HandlerOutcome {
                         responses: vec![response],
                         phase_update: Some(ChannelPhase::BootstrapVersionSent),
@@ -667,14 +660,11 @@ fn handle_main_frame(
                 }
                 None => {
                     // payload가 너무 짧으면 부트스트랩으로 처리
-                    let response =
-                        build_provisional_main_frame_bootstrap_response(pkt, ch);
+                    let response = build_provisional_main_frame_bootstrap_response(pkt, ch);
                     HandlerOutcome {
                         responses: vec![response],
                         phase_update: Some(ChannelPhase::BootstrapVersionSent),
-                        analysis_note: Some(
-                            "bootstrap (short payload fallback)".to_string(),
-                        ),
+                        analysis_note: Some("bootstrap (short payload fallback)".to_string()),
                     }
                 }
             }
@@ -762,8 +752,12 @@ fn build_provisional_worldmap_stage_bootstrap_response(ch: u16) -> Vec<u8> {
 
 /// MainType 0x68 — 핑(Ping) / KeepAlive 메시지를 처리합니다.
 fn handle_ping(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
-    crate::emu_socket_log!("[PING] 핑 요청 수신 (sub=0x{:02x}, len={}) → 에코 응답", pkt.sub_type, pkt.payload.len());
-    
+    crate::emu_socket_log!(
+        "[PING] 핑 요청 수신 (sub=0x{:02x}, len={}) → 에코 응답",
+        pkt.sub_type,
+        pkt.payload.len()
+    );
+
     // 수신한 서브타입과 페이로드를 그대로 에코 응답합니다.
     HandlerOutcome {
         responses: vec![protocol::create_app_packet(
@@ -783,11 +777,7 @@ fn handle_ping(pkt: &ProtocolPacket, ch: u16) -> HandlerOutcome {
 }
 
 /// MainType 0x64 — 공통 시스템 메시지 (버전 핸드셰이크, 로그인 등)를 처리합니다.
-fn handle_system(
-    pkt: &ProtocolPacket,
-    ch: u16,
-    state: &mut GameState,
-) -> HandlerOutcome {
+fn handle_system(pkt: &ProtocolPacket, ch: u16, state: &mut GameState) -> HandlerOutcome {
     match pkt.sub_type {
         0x01 => {
             // 버전 확인 요청 → 프로토콜 버전 54로 응답
@@ -891,18 +881,9 @@ fn handle_id_check(pkt: &ProtocolPacket, ch: u16, state: &GameState) -> HandlerO
     let available = !id.is_empty() && !state.users.contains_key(&id);
     let result: u32 = if available { 12 } else { 0 };
 
-    crate::emu_socket_log!(
-        "[REG] 아이디 중복 확인: id={} available={}",
-        id,
-        available
-    );
+    crate::emu_socket_log!("[REG] 아이디 중복 확인: id={} available={}", id, available);
 
-    let response = build_agent_response(
-        ch,
-        state.client_version_code,
-        1,
-        &result.to_le_bytes(),
-    );
+    let response = build_agent_response(ch, state.client_version_code, 1, &result.to_le_bytes());
     HandlerOutcome {
         responses: vec![response],
         phase_update: None,
@@ -955,11 +936,7 @@ fn handle_registration_submit(
 ///
 /// 요청 payload: `[version_hi:2][control=7:u32][avatar_index:u8]`
 /// 응답: control=0 아바타 상세정보 + control=6 방문수당
-fn handle_avatar_selection(
-    pkt: &ProtocolPacket,
-    ch: u16,
-    state: &mut GameState,
-) -> HandlerOutcome {
+fn handle_avatar_selection(pkt: &ProtocolPacket, ch: u16, state: &mut GameState) -> HandlerOutcome {
     let avatar_index = pkt.payload.get(6).copied().unwrap_or(0);
     crate::emu_socket_log!("[AVATAR] 아바타 선택: index={}", avatar_index);
 
@@ -1007,9 +984,7 @@ fn handle_logout(ch: u16, state: &mut GameState) -> HandlerOutcome {
     state.session = None;
 
     // 종료 신호 (채널 닫기 시퀀스)
-    let responses = vec![
-        protocol::create_control_message(protocol::CTRL_CLOSE, ch),
-    ];
+    let responses = vec![protocol::create_control_message(protocol::CTRL_CLOSE, ch)];
 
     HandlerOutcome {
         responses,
@@ -1547,7 +1522,12 @@ mod tests {
         // 부트스트랩 (control=0)
         let bootstrap_payload = [0x0d, 0x40, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00];
         to_handler_tx
-            .send(protocol::create_app_packet(1, 0xE0, 0x04, &bootstrap_payload))
+            .send(protocol::create_app_packet(
+                1,
+                0xE0,
+                0x04,
+                &bootstrap_payload,
+            ))
             .unwrap();
         let _bootstrap_resp = from_handler_rx
             .recv_timeout(Duration::from_secs(1))

@@ -342,8 +342,10 @@ pub(super) fn fprintf(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let bytes = result.as_bytes();
     let context = uc.get_data();
     let mut files = context.files.lock().unwrap();
-    if let Some(file) = files.get_mut(&stream_handle) {
-        let _ = file.write_all(bytes);
+    if let Some(state) = files.get_mut(&stream_handle) {
+        let _ = state.file.write_all(bytes);
+        state.error = false;
+        state.eof = false;
         crate::emu_log!(
             "[MSVCRT] fprintf({:#x}, ...) -> \"{}\" (len={}, args={})",
             stream_handle,
@@ -372,9 +374,11 @@ pub(super) fn fscanf(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
-        if let Some(file) = files.get_mut(&stream_handle) {
+        if let Some(state) = files.get_mut(&stream_handle) {
             // Read everything for now (simplified)
-            let _ = file.read_to_end(&mut data);
+            let _ = state.file.read_to_end(&mut data);
+            state.eof = true;
+            state.error = false;
         }
     }
 

@@ -6,7 +6,7 @@ use std::io::SeekFrom;
 use unicorn_engine::Unicorn;
 
 use super::{
-    MSVCP60, BASIC_ISTREAM_VTABLE, BASIC_IOSTREAM_VTABLE, IOS_FLAGS_OFFSET, IOS_STATE_OFFSET,
+    BASIC_IOSTREAM_VTABLE, BASIC_ISTREAM_VTABLE, IOS_FLAGS_OFFSET, IOS_STATE_OFFSET, MSVCP60,
     STREAMBUF_READ_POS_OFFSET,
 };
 
@@ -120,17 +120,52 @@ pub(super) fn basic_istream_getline(uc: &mut Unicorn<Win32Context>) -> Option<Ap
     let buf_addr = uc.read_arg(0);
     let count = uc.read_arg(1) as usize;
     let delim = uc.read_arg(2) as u8;
+    let streambuf_ptr = MSVCP60::read_basic_ios_streambuf_ptr(uc, this_ptr);
+
+    let mut copied = 0usize;
+    let mut hit_delim = false;
+    let mut hit_eof = false;
+
     if buf_addr != 0 && count != 0 {
-        uc.write_u8(buf_addr as u64, 0);
+        while copied + 1 < count {
+            match MSVCP60::streambuf_take_byte(uc, streambuf_ptr) {
+                Some(byte) if byte == delim => {
+                    hit_delim = true;
+                    break;
+                }
+                Some(byte) => {
+                    uc.write_u8(buf_addr as u64 + copied as u64, byte);
+                    copied += 1;
+                }
+                None => {
+                    hit_eof = true;
+                    break;
+                }
+            }
+        }
+
+        uc.write_u8(buf_addr as u64 + copied as u64, 0);
     }
-    let state = 0x2 | 0x4;
+
+    let mut state = 0u32;
+    if hit_eof {
+        state |= 0x2; // eofbit
+    }
+    if !hit_delim && copied + 1 >= count {
+        state |= 0x4; // failbit
+    }
+    if copied == 0 && !hit_delim {
+        state |= 0x4; // failbit
+    }
     uc.write_u32(this_ptr as u64 + IOS_STATE_OFFSET, state);
     crate::emu_log!(
-        "[MSVCP60] (this={:#x}) basic_istream::getline({:#x}, {}, '{}')",
+        "[MSVCP60] (this={:#x}) basic_istream::getline({:#x}, {}, '{}') -> copied={} state={:#x}",
         this_ptr,
         buf_addr,
         count,
-        delim as char
+        delim as char,
+        copied,
+        state
     );
     Some(ApiHookResult::callee(3, Some(this_ptr as i32)))
 }
@@ -157,9 +192,7 @@ pub(super) fn basic_iostream_destructor(uc: &mut Unicorn<Win32Context>) -> Optio
     Some(ApiHookResult::callee(0, None))
 }
 
-pub(super) fn basic_ifstream_vbase_dtor(
-    uc: &mut Unicorn<Win32Context>,
-) -> Option<ApiHookResult> {
+pub(super) fn basic_ifstream_vbase_dtor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let this_ptr = MSVCP60::this_ptr(uc);
     crate::emu_log!(
         "[MSVCP60] (this={:#x}) basic_ifstream::`vbase dtor`()",

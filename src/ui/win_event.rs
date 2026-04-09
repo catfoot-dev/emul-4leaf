@@ -6,6 +6,16 @@ use std::{
 
 static UI_WAKE_PROXY: OnceLock<winit::event_loop::EventLoopProxy<()>> = OnceLock::new();
 const WS_CHILD: u32 = 0x40000000;
+const SW_HIDE: u32 = 0;
+const SW_SHOWNORMAL: u32 = 1;
+const SW_SHOWMINIMIZED: u32 = 2;
+const SW_SHOWMAXIMIZED: u32 = 3;
+const SW_SHOW: u32 = 5;
+const SW_MINIMIZE: u32 = 6;
+const SW_SHOWMINNOACTIVE: u32 = 7;
+const SW_SHOWNA: u32 = 8;
+const SW_RESTORE: u32 = 9;
+const SW_SHOWDEFAULT: u32 = 10;
 
 fn wake_ui_event_loop() {
     if let Some(proxy) = UI_WAKE_PROXY.get() {
@@ -25,6 +35,64 @@ pub struct WinEvent {
 }
 
 impl WinEvent {
+    /// 지정된 부모 창의 직계 자식 HWND 목록을 안정적인 Z 순서로 반환합니다.
+    fn child_windows(&self, parent_hwnd: u32) -> Vec<u32> {
+        let mut children: Vec<_> = self
+            .windows
+            .iter()
+            .filter_map(|(&hwnd, state)| {
+                (state.parent == parent_hwnd).then_some((hwnd, state.z_order))
+            })
+            .collect();
+        children.sort_unstable_by_key(|&(hwnd, z_order)| (z_order, hwnd));
+        children.into_iter().map(|(hwnd, _)| hwnd).collect()
+    }
+
+    /// 지정된 창과 모든 자손 창을 자식부터 부모 순서로 반환합니다.
+    pub fn window_subtree_postorder(&self, hwnd: u32) -> Vec<u32> {
+        fn collect(win_event: &WinEvent, hwnd: u32, out: &mut Vec<u32>) {
+            for child_hwnd in win_event.child_windows(hwnd) {
+                collect(win_event, child_hwnd, out);
+            }
+            if win_event.windows.contains_key(&hwnd) {
+                out.push(hwnd);
+            }
+        }
+
+        let mut result = Vec::new();
+        collect(self, hwnd, &mut result);
+        result
+    }
+
+    /// 특정 부모 창 내의 좌표 (x, y)에 위치한 가장 깊은 자식 창을 찾습니다.
+    /// x, y는 parent_hwnd의 클라이언트 영역 기준 좌표입니다.
+    pub fn child_window_from_point(&self, parent_hwnd: u32, x: i32, y: i32) -> u32 {
+        // Z-order가 높은 순서(가장 전면)부터 검사하기 위해 정렬된 자식 목록 생성
+        let mut children: Vec<_> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| w.parent == parent_hwnd && w.visible)
+            .collect();
+
+        // z_order 기준 내림차순 정렬
+        children.sort_by_key(|(_, w)| std::cmp::Reverse(w.z_order));
+
+        for (&hwnd, state) in children {
+            // 자식 창의 범위 안에 있는지 확인 (자식 창의 x, y는 부모 클라이언트 기준)
+            if x >= state.x
+                && x < state.x + state.width
+                && y >= state.y
+                && y < state.y + state.height
+            {
+                // 더 깊은 자식 창이 있는지 재귀적으로 탐색
+                // 좌표를 자식 창의 클라이언트 영역 기준으로 변환하여 다음 단계로 전달
+                return self.child_window_from_point(hwnd, x - state.x, y - state.y);
+            }
+        }
+
+        parent_hwnd
+    }
+
     /// 화면 갱신을 실제로 담당하는 호스트 윈도우 HWND를 찾습니다.
     fn redraw_target_for(&self, hwnd: u32) -> Option<u32> {
         let mut current = hwnd;
@@ -36,6 +104,35 @@ impl WinEvent {
             }
             current = state.parent;
         }
+    }
+
+    /// 지정된 창의 좌상단 화면 좌표를 부모 체인을 따라 누적해 계산합니다.
+    pub fn window_screen_origin(&self, hwnd: u32) -> Option<(i32, i32)> {
+        let mut current = hwnd;
+        let mut x = 0i32;
+        let mut y = 0i32;
+
+        for _ in 0..=self.windows.len() {
+            let state = self.windows.get(&current)?;
+            x += state.x;
+            y += state.y;
+
+            if (state.style & WS_CHILD) == 0 || state.parent == 0 {
+                return Some((x, y));
+            }
+
+            current = state.parent;
+        }
+
+        None
+    }
+
+    /// 지정된 창의 좌상단이 루트 호스트 창 클라이언트 기준 어디에 있는지 반환합니다.
+    pub fn window_client_origin_in_host(&self, hwnd: u32) -> Option<(i32, i32)> {
+        let root = self.redraw_target_for(hwnd)?;
+        let (screen_x, screen_y) = self.window_screen_origin(hwnd)?;
+        let (root_x, root_y) = self.window_screen_origin(root)?;
+        Some((screen_x - root_x, screen_y - root_y))
     }
 
     /// 자식 창 변경이 화면에 반영되도록 호스트 윈도우에 다시 그리기를 요청합니다.
@@ -106,6 +203,8 @@ impl WinEvent {
         }
 
         let title = state.title.clone();
+        let x = state.x;
+        let y = state.y;
         let width = state.width as u32;
         let height = state.height as u32;
         let style = state.style;
@@ -129,6 +228,8 @@ impl WinEvent {
         self.send_ui_command(UiCommand::CreateWindow {
             hwnd,
             title,
+            x,
+            y,
             width,
             height,
             style,
@@ -142,6 +243,10 @@ impl WinEvent {
 
     /// 윈도우 파괴 및 UI 스레드에 알림
     pub fn destroy_window(&mut self, hwnd: u32) {
+        for child_hwnd in self.child_windows(hwnd) {
+            self.destroy_window(child_hwnd);
+        }
+
         let is_child = self
             .windows
             .get(&hwnd)
@@ -188,6 +293,27 @@ impl WinEvent {
             self.request_visual_refresh(hwnd);
         } else {
             self.send_ui_command(UiCommand::ShowWindow { hwnd, visible });
+        }
+    }
+
+    /// `ShowWindow` 명령값을 Win32 의미에 맞춰 윈도우 상태에 반영합니다.
+    pub fn apply_show_window(&mut self, hwnd: u32, n_cmd_show: u32) {
+        match n_cmd_show {
+            SW_HIDE => self.show_window(hwnd, false),
+            SW_SHOWMINIMIZED | SW_MINIMIZE | SW_SHOWMINNOACTIVE => {
+                self.show_window(hwnd, true);
+                self.minimize_window(hwnd);
+            }
+            SW_SHOWMAXIMIZED => {
+                self.show_window(hwnd, true);
+                self.maximize_window(hwnd);
+            }
+            SW_SHOWNORMAL | SW_RESTORE => {
+                self.show_window(hwnd, true);
+                self.restore_window(hwnd);
+            }
+            SW_SHOW | SW_SHOWNA | SW_SHOWDEFAULT => self.show_window(hwnd, true),
+            _ => self.show_window(hwnd, n_cmd_show != 0),
         }
     }
 
@@ -245,6 +371,23 @@ impl WinEvent {
         }
     }
 
+    /// 호스트 OS 창 이동 결과를 내부 창 좌표에 반영합니다.
+    pub fn sync_host_window_position(&mut self, hwnd: u32, x: i32, y: i32) -> bool {
+        let Some(state) = self.windows.get_mut(&hwnd) else {
+            return false;
+        };
+
+        if (state.style & WS_CHILD) != 0 || (state.x == x && state.y == y) {
+            return false;
+        }
+
+        state.x = x;
+        state.y = y;
+        state.last_hittest_lparam = u32::MAX;
+        self.bump_generation();
+        true
+    }
+
     /// 윈도우 크기, 위치 및 Z 순서 변경, UI 알림
     pub fn set_window_pos(
         &mut self,
@@ -261,38 +404,40 @@ impl WinEvent {
             .get(&hwnd)
             .map(|state| (state.style & WS_CHILD) != 0)
             .unwrap_or(false);
+        let mut visibility_changed = false;
+        let mut new_visibility = false;
 
         let parent = self.windows.get(&hwnd).map(|s| s.parent).unwrap_or(0);
 
         // SWP_NOZORDER = 0x0004
         if flags & 0x0004 == 0 {
-            let mut new_z_order = None;
+            let mut siblings = self
+                .windows
+                .iter()
+                .filter_map(|(handle, state)| {
+                    (state.parent == parent && *handle != hwnd).then_some((*handle, state.z_order))
+                })
+                .collect::<Vec<_>>();
+            siblings.sort_unstable_by_key(|&(handle, z_order)| (z_order, handle));
 
-            if insert_after == 0 {
-                // HWND_TOP
-                let max_z = self
-                    .windows
-                    .iter()
-                    .filter(|(k, w)| w.parent == parent && **k != hwnd)
-                    .map(|(_, w)| w.z_order)
-                    .max()
-                    .unwrap_or(0);
-                new_z_order = Some(max_z + 1);
+            let insert_index = if insert_after == 0 {
+                siblings.len()
             } else if insert_after == 1 {
-                // HWND_BOTTOM
-                let min_z = self
-                    .windows
-                    .iter()
-                    .filter(|(k, w)| w.parent == parent && **k != hwnd)
-                    .map(|(_, w)| w.z_order)
-                    .min()
-                    .unwrap_or(0);
-                new_z_order = Some(min_z.saturating_sub(1));
-            }
+                0
+            } else if let Some(idx) = siblings
+                .iter()
+                .position(|&(handle, _)| handle == insert_after)
+            {
+                idx + 1
+            } else {
+                siblings.len()
+            };
 
-            if let Some(z) = new_z_order {
-                if let Some(state) = self.windows.get_mut(&hwnd) {
-                    state.z_order = z;
+            siblings.insert(insert_index.min(siblings.len()), (hwnd, 0));
+
+            for (index, (handle, _)) in siblings.into_iter().enumerate() {
+                if let Some(state) = self.windows.get_mut(&handle) {
+                    state.z_order = index as u32;
                 }
             }
         }
@@ -309,6 +454,19 @@ impl WinEvent {
             state.width = cx as i32;
             state.height = cy as i32;
         }
+        // 자식 창은 고전 UI 엔진이 SetWindowPos를 레이아웃/클리핑 보조로도 사용하므로,
+        // HIDE를 그대로 반영하면 배경용 child가 통째로 사라질 수 있습니다.
+        // 대신 SHOW는 반영해서, 생성 후 SetWindowPos(..., SWP_SHOWWINDOW)로 드러나는 child는 살립니다.
+        if flags & 0x0040 != 0 && !state.visible {
+            state.visible = true;
+            visibility_changed = true;
+            new_visibility = true;
+        }
+        if !is_child && flags & 0x0080 != 0 && state.visible {
+            state.visible = false;
+            visibility_changed = true;
+            new_visibility = false;
+        }
         let (final_x, final_y, final_w, final_h) =
             (state.x, state.y, state.width as u32, state.height as u32);
         self.bump_generation();
@@ -316,6 +474,12 @@ impl WinEvent {
         if is_child {
             self.request_visual_refresh(hwnd);
         } else {
+            if visibility_changed {
+                self.send_ui_command(UiCommand::ShowWindow {
+                    hwnd,
+                    visible: new_visibility,
+                });
+            }
             self.send_ui_command(UiCommand::MoveWindow {
                 hwnd,
                 x: final_x,
@@ -338,6 +502,7 @@ impl WinEvent {
     pub fn invalidate_rect(&mut self, hwnd: u32, _rect: *mut std::ffi::c_void) {
         if let Some(state) = self.windows.get_mut(&hwnd) {
             state.needs_paint = true;
+            self.update_window(hwnd);
         }
     }
 
@@ -416,5 +581,149 @@ impl WinEvent {
     /// 윈도우 드래그 모드를 시작합니다.
     pub fn drag_window(&mut self, hwnd: u32) {
         self.send_ui_command(UiCommand::DragWindow { hwnd });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_window_state() -> WindowState {
+        WindowState {
+            class_name: "TEST".to_string(),
+            title: "test".to_string(),
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+            style: 0,
+            ex_style: 0,
+            parent: 0,
+            id: 0,
+            visible: false,
+            enabled: true,
+            zoomed: false,
+            iconic: false,
+            wnd_proc: 0,
+            class_cursor: 0,
+            user_data: 0,
+            use_native_frame: true,
+            surface_bitmap: 0,
+            window_rgn: 0,
+            needs_paint: false,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order: 0,
+        }
+    }
+
+    #[test]
+    fn apply_show_window_marks_maximized_windows_as_zoomed() {
+        let mut win_event = WinEvent::new(None);
+        win_event.create_window(0x1000, sample_window_state());
+
+        win_event.apply_show_window(0x1000, SW_SHOWMAXIMIZED);
+
+        let state = win_event.windows.get(&0x1000).unwrap();
+        assert!(state.visible);
+        assert!(state.zoomed);
+        assert!(!state.iconic);
+    }
+
+    #[test]
+    fn apply_show_window_restore_clears_minimized_and_maximized_flags() {
+        let mut win_event = WinEvent::new(None);
+        let mut state = sample_window_state();
+        state.visible = true;
+        state.zoomed = true;
+        state.iconic = true;
+        win_event.create_window(0x1000, state);
+
+        win_event.apply_show_window(0x1000, SW_RESTORE);
+
+        let state = win_event.windows.get(&0x1000).unwrap();
+        assert!(state.visible);
+        assert!(!state.zoomed);
+        assert!(!state.iconic);
+    }
+
+    #[test]
+    fn window_screen_origin_accumulates_parent_chain() {
+        let mut win_event = WinEvent::new(None);
+
+        let mut parent = sample_window_state();
+        parent.x = 100;
+        parent.y = 200;
+        win_event.create_window(0x1000, parent);
+
+        let mut child = sample_window_state();
+        child.style = WS_CHILD;
+        child.parent = 0x1000;
+        child.x = 10;
+        child.y = 20;
+        win_event.create_window(0x1001, child);
+
+        let mut grandchild = sample_window_state();
+        grandchild.style = WS_CHILD;
+        grandchild.parent = 0x1001;
+        grandchild.x = 3;
+        grandchild.y = 4;
+        win_event.create_window(0x1002, grandchild);
+
+        assert_eq!(win_event.window_screen_origin(0x1002), Some((113, 224)));
+        assert_eq!(
+            win_event.window_client_origin_in_host(0x1002),
+            Some((13, 24))
+        );
+    }
+
+    #[test]
+    fn sync_host_window_position_updates_only_top_level_windows() {
+        let mut win_event = WinEvent::new(None);
+
+        let mut parent = sample_window_state();
+        parent.x = 10;
+        parent.y = 20;
+        win_event.create_window(0x1000, parent);
+
+        let mut child = sample_window_state();
+        child.style = WS_CHILD;
+        child.parent = 0x1000;
+        child.x = 5;
+        child.y = 6;
+        win_event.create_window(0x1001, child);
+
+        assert!(win_event.sync_host_window_position(0x1000, 30, 40));
+        assert_eq!(win_event.window_screen_origin(0x1001), Some((35, 46)));
+        assert!(!win_event.sync_host_window_position(0x1001, 50, 60));
+    }
+
+    #[test]
+    fn destroy_window_removes_child_subtree_with_parent() {
+        let mut win_event = WinEvent::new(None);
+
+        let parent = sample_window_state();
+        win_event.create_window(0x1000, parent);
+
+        let mut child = sample_window_state();
+        child.style = WS_CHILD;
+        child.parent = 0x1000;
+        win_event.create_window(0x1001, child);
+
+        let mut grandchild = sample_window_state();
+        grandchild.style = WS_CHILD;
+        grandchild.parent = 0x1001;
+        win_event.create_window(0x1002, grandchild);
+
+        assert_eq!(
+            win_event.window_subtree_postorder(0x1000),
+            vec![0x1002, 0x1001, 0x1000]
+        );
+
+        win_event.destroy_window(0x1000);
+
+        assert!(!win_event.windows.contains_key(&0x1000));
+        assert!(!win_event.windows.contains_key(&0x1001));
+        assert!(!win_event.windows.contains_key(&0x1002));
     }
 }

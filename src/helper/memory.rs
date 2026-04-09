@@ -67,7 +67,11 @@ pub(crate) fn write_u8_impl(uc: &mut Unicorn<Win32Context>, addr: u64, value: u8
     uc.mem_write(addr, &[value]).unwrap();
 }
 
-pub(crate) fn read_string_bytes_impl(uc: &Unicorn<Win32Context>, addr: u64, max_len: usize) -> Vec<u8> {
+pub(crate) fn read_string_bytes_impl(
+    uc: &Unicorn<Win32Context>,
+    addr: u64,
+    max_len: usize,
+) -> Vec<u8> {
     let mut chars = Vec::new();
     let mut curr = addr;
 

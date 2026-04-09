@@ -668,12 +668,12 @@ pub(super) fn is_dialog_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiH
 pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hwnd = uc.read_arg(0);
     let msg = uc.read_arg(1);
-    let _w_param = uc.read_arg(2);
-    let _l_param = uc.read_arg(3);
+    let w_param = uc.read_arg(2);
+    let l_param = uc.read_arg(3);
     let default_ret = match msg {
         0x0006 => {
             // WM_ACTIVATE
-            let state = _w_param & 0xFFFF;
+            let state = w_param & 0xFFFF;
             if state != 0 {
                 let ctx = uc.get_data();
                 ctx.active_hwnd
@@ -695,14 +695,13 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
             // WM_KILLFOCUS
             let ctx = uc.get_data();
             if ctx.focus_hwnd.load(std::sync::atomic::Ordering::SeqCst) == hwnd {
-                ctx.focus_hwnd
-                    .store(0, std::sync::atomic::Ordering::SeqCst);
+                ctx.focus_hwnd.store(0, std::sync::atomic::Ordering::SeqCst);
             }
             0
         }
         0x000C => {
             // WM_SETTEXT
-            let text = uc.read_euc_kr(_l_param as u64);
+            let text = uc.read_euc_kr(l_param as u64);
             uc.get_data()
                 .win_event
                 .lock()
@@ -712,8 +711,8 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
         }
         0x000D => {
             // WM_GETTEXT
-            let max_count = _w_param;
-            let buf_addr = _l_param;
+            let max_count = w_param;
+            let buf_addr = l_param;
             let title_info = {
                 let ctx = uc.get_data();
                 let win_event = ctx.win_event.lock().unwrap();
@@ -732,15 +731,17 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
         }
         0x000F => {
             // WM_PAINT
-            uc.get_data().win_event.lock().unwrap().validate_window(hwnd);
+            uc.get_data()
+                .win_event
+                .lock()
+                .unwrap()
+                .validate_window(hwnd);
             0
         }
         0x0010 => {
             // WM_CLOSE
             let ctx = uc.get_data();
-            let mut win_event = ctx.win_event.lock().unwrap();
-            USER32::cleanup_window_runtime_state(ctx, hwnd);
-            win_event.destroy_window(hwnd);
+            USER32::destroy_window_tree(ctx, hwnd);
             0
         }
         0x0011 => 1, // WM_QUERYENDSESSION
@@ -756,12 +757,8 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
             if let Some(hbmp) = surface_bitmap {
                 let ctx = uc.get_data();
                 let gdi_objects = ctx.gdi_objects.lock().unwrap();
-                if let Some(crate::dll::win32::GdiObject::Bitmap {
-                    pixels,
-                    width,
-                    height,
-                    ..
-                }) = gdi_objects.get(&hbmp)
+                if let Some(crate::dll::win32::GdiObject::Bitmap { pixels, .. }) =
+                    gdi_objects.get(&hbmp)
                 {
                     let mut p = pixels.lock().unwrap();
                     // 0xD4D0C8 = Classic Windows gray
@@ -771,87 +768,6 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                 }
             }
             1
-        }
-        0x0024 => 0, // WM_GETMINMAXINFO
-        0x0080 => 0, // WM_SETICON
-        0x0081 => 1, // WM_NCCREATE
-        0x00A1 => {
-            // WM_NCLBUTTONDOWN
-            if _w_param == 2 {
-                // HTCAPTION
-                uc.get_data().win_event.lock().unwrap().drag_window(hwnd);
-            }
-            0
-        }
-        0x00A2 => {
-            // WM_NCLBUTTONUP
-            match _w_param {
-                20 => {
-                    // HTCLOSE
-                    let ctx = uc.get_data();
-                    let time = ctx.start_time.elapsed().as_millis() as u32;
-                    let mut q = ctx.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0112, 0xF060, _l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_CLOSE
-                }
-                8 => {
-                    // HTMINBUTTON
-                    let ctx = uc.get_data();
-                    let time = ctx.start_time.elapsed().as_millis() as u32;
-                    let mut q = ctx.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0112, 0xF020, _l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_MINIMIZE
-                }
-                9 => {
-                    // HTMAXBUTTON
-                    let ctx = uc.get_data();
-                    let time = ctx.start_time.elapsed().as_millis() as u32;
-                    let mut q = ctx.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0112, 0xF030, _l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_MAXIMIZE
-                }
-                _ => {}
-            }
-            0
-        }
-        0x0112 => {
-            // WM_SYSCOMMAND
-            let cmd = _w_param & 0xFFF0;
-            match cmd {
-                0xF060 => {
-                    // SC_CLOSE
-                    let ctx = uc.get_data();
-                    let time = ctx.start_time.elapsed().as_millis() as u32;
-                    let mut q = ctx.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0010, 0, 0, time, 0, 0]); // WM_CLOSE
-                }
-                0xF020 => {
-                    // SC_MINIMIZE
-                    uc.get_data()
-                        .win_event
-                        .lock()
-                        .unwrap()
-                        .minimize_window(hwnd);
-                }
-                0xF030 => {
-                    // SC_MAXIMIZE
-                    let ctx = uc.get_data();
-                    let mut win_event = ctx.win_event.lock().unwrap();
-                    let is_zoomed = win_event
-                        .windows
-                        .get(&hwnd)
-                        .map(|w| w.zoomed)
-                        .unwrap_or(false);
-                    if is_zoomed {
-                        win_event.restore_window(hwnd);
-                    } else {
-                        win_event.maximize_window(hwnd);
-                    }
-                }
-                0xF120 => {
-                    // SC_RESTORE
-                    uc.get_data().win_event.lock().unwrap().restore_window(hwnd);
-                }
-                _ => {}
-            }
-            0
         }
         0x0020 => {
             let ctx = uc.get_data();
@@ -879,10 +795,29 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                 0
             }
         }
+        0x0024 => 0, // WM_GETMINMAXINFO
+        0x0080 => 0, // WM_SETICON
+        0x0081 => 1, // WM_NCCREATE
+        0x0084 => {
+            // WM_NCHITTEST
+            let screen_x = (l_param & 0xFFFF) as i16 as i32;
+            let screen_y = ((l_param >> 16) & 0xFFFF) as i16 as i32;
+
+            let hit_test = {
+                let ctx = uc.get_data();
+                let win_event = ctx.win_event.lock().unwrap();
+                win_event
+                    .windows
+                    .get(&hwnd)
+                    .map(|w| USER32::default_hit_test(w, screen_x, screen_y))
+                    .unwrap_or(0)
+            };
+            hit_test
+        }
         0x0083 => {
             // WM_NCCALCSIZE
-            if _w_param != 0 {
-                let rect_ptr = _l_param as u64;
+            if w_param != 0 {
+                let rect_ptr = l_param as u64;
                 let (bw, bh, caption) = {
                     let ctx = uc.get_data();
                     let win_event = ctx.win_event.lock().unwrap();
@@ -920,6 +855,99 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
             // WM_NCACTIVATE
             super::nc_paint::draw_window_frame(uc, hwnd);
             1
+        }
+        0x00A1 => {
+            // WM_NCLBUTTONDOWN
+            if w_param == 2 {
+                // HTCAPTION
+                uc.get_data().win_event.lock().unwrap().drag_window(hwnd);
+            }
+            0
+        }
+        0x00A2 => {
+            // WM_NCLBUTTONUP
+            let ctx = uc.get_data();
+            let time = ctx.start_time.elapsed().as_millis() as u32;
+            let mut q = ctx.message_queue.lock().unwrap();
+            match w_param {
+                20 => {
+                    // HTCLOSE
+                    q.push_back([hwnd, 0x0112, 0xF060, l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_CLOSE
+                }
+                8 => {
+                    // HTMINBUTTON
+                    q.push_back([hwnd, 0x0112, 0xF020, l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_MINIMIZE
+                }
+                9 => {
+                    // HTMAXBUTTON
+                    let win_event = ctx.win_event.lock().unwrap();
+                    let is_zoomed = win_event
+                        .windows
+                        .get(&hwnd)
+                        .map(|w| w.zoomed)
+                        .unwrap_or(false);
+                    let cmd = if is_zoomed { 0xF120 } else { 0xF030 }; // SC_RESTORE or SC_MAXIMIZE
+                    q.push_back([hwnd, 0x0112, cmd, l_param, time, 0, 0]);
+                }
+                _ => {}
+            }
+            0
+        }
+        0x0112 => {
+            // WM_SYSCOMMAND
+            let cmd = w_param & 0xFFF0;
+            match cmd {
+                0xF060 => {
+                    // SC_CLOSE
+                    let ctx = uc.get_data();
+                    let time = ctx.start_time.elapsed().as_millis() as u32;
+                    let mut q = ctx.message_queue.lock().unwrap();
+                    q.push_back([hwnd, 0x0010, 0, 0, time, 0, 0]); // WM_CLOSE
+                }
+                0xF020 => {
+                    // SC_MINIMIZE
+                    uc.get_data()
+                        .win_event
+                        .lock()
+                        .unwrap()
+                        .minimize_window(hwnd);
+                }
+                0xF030 => {
+                    // SC_MAXIMIZE
+                    uc.get_data()
+                        .win_event
+                        .lock()
+                        .unwrap()
+                        .maximize_window(hwnd);
+                }
+                0xF120 => {
+                    // SC_RESTORE
+                    uc.get_data().win_event.lock().unwrap().restore_window(hwnd);
+                }
+                _ => {}
+            }
+            0
+        }
+        0x0600 => {
+            if w_param == 0x50000 {
+                let id = (l_param & 0xFFFF) as u16;
+                match id {
+                    0x9090 => {
+                        // MINIMIZE
+                        uc.get_data()
+                            .win_event
+                            .lock()
+                            .unwrap()
+                            .minimize_window(hwnd);
+                    }
+                    0xc2c8 => {
+                        // CLOSE
+                        uc.get_data().win_event.lock().unwrap().close_window(hwnd);
+                    }
+                    _ => {}
+                }
+            }
+            0
         }
         _ => 0,
     };
