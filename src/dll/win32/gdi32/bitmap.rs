@@ -574,7 +574,6 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
         (raw_height.max(1), false)
     };
     let bpp = (uc.read_u32(lp_bits_info as u64 + 14) & 0xFFFF).max(1);
-    println!("bpp: {}", bpp);
     let stride = ((bmi_width * bpp + 31) / 32) * 4;
 
     let total_bytes = (stride * c_scans) as usize;

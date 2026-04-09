@@ -152,7 +152,6 @@ impl GDI32 {
             Some(v) => v,
             None => return,
         };
-        println!("sync_dib_pixels bpp: {}", bpp);
         let stride = ((width * bpp + 31) / 32) * 4;
         let total_bytes = (stride * height) as usize;
         let raw = uc

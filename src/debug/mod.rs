@@ -527,8 +527,8 @@ impl Painter for Debug {
                         style_r.clone()
                     } else if message.contains("[*]") {
                         style_c.clone()
-                    } else if message.contains("_stricmp") {
-                        style_y.clone()
+                    // } else if message.contains("_stricmp") {
+                    //     style_y.clone()
                     } else {
                         style_w.clone()
                     };

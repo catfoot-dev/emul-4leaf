@@ -71,8 +71,7 @@ const SYMBOL_LOCALE_GLOBAL_PTR: &str = "?_Global@_Locimp@locale@std@@0PAV123@A";
 const SYMBOL_LOCALE_CLOCPTR: &str = "?_Clocptr@_Locimp@locale@std@@0PAV123@A";
 const SYMBOL_LOCALE_FACET_ID_CNT: &str = "?_Id_cnt@facet@locale@std@@0HA";
 const SYMBOL_LOCALE_ID_ID_CNT: &str = "?_Id_cnt@id@locale@std@@0HA";
-const SYMBOL_BASIC_FILEBUF_STATIC_INIT_FLAG: &str =
-    "?_Stinit@?1??_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@23@@Z@4HA";
+const SYMBOL_BASIC_FILEBUF_STATIC_INIT_FLAG: &str = "?_Stinit@?1??_Init@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IAEXPAU_iobuf@@W4_Initfl@23@@Z@4HA";
 const SYMBOL_STD_FLUSH: &str =
     "?flush@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z";
 
@@ -149,8 +148,7 @@ const FN_BASIC_STREAMBUF_IMBUE: &str =
     "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEXABVlocale@2@@Z";
 const FN_BASIC_STREAMBUF_SETBUF: &str =
     "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAEPAV12@PADH@Z";
-const FN_BASIC_STREAMBUF_SEEKOFF: &str =
-    "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z";
+const FN_BASIC_STREAMBUF_SEEKOFF: &str = "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@JW4seekdir@ios_base@2@H@Z";
 const FN_BASIC_STREAMBUF_SEEKPOS: &str =
     "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MAE?AV?$fpos@H@2@V32@H@Z";
 const FN_BASIC_STREAMBUF_XSPUTN: &str =
@@ -169,24 +167,20 @@ const FN_BASIC_STREAMBUF_SYNC: &str = "?sync@?$basic_streambuf@DU?$char_traits@D
 
 const FN_BASIC_OSTREAM_COPY_CTOR: &str =
     "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@ABV01@@Z";
-const FN_BASIC_OSTREAM_CTOR3: &str =
-    "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N1@Z";
-const FN_BASIC_OSTREAM_CTOR2: &str =
-    "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z";
+const FN_BASIC_OSTREAM_CTOR3: &str = "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N1@Z";
+const FN_BASIC_OSTREAM_CTOR2: &str = "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z";
 const FN_BASIC_OSTREAM_DTOR: &str = "??1?$basic_ostream@DU?$char_traits@D@std@@@std@@UAE@XZ";
 const FN_OSTREAM_INSERT_INT: &str = "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z";
 const FN_BASIC_OSTREAM_WRITE: &str =
     "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z";
 
-const FN_BASIC_ISTREAM_CTOR: &str =
-    "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z";
+const FN_BASIC_ISTREAM_CTOR: &str = "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z";
 const FN_BASIC_ISTREAM_DTOR: &str = "??1?$basic_istream@DU?$char_traits@D@std@@@std@@UAE@XZ";
 const FN_BASIC_ISTREAM_SEEKG: &str =
     "?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@V?$fpos@H@2@@Z";
 const FN_BASIC_ISTREAM_GETLINE: &str =
     "?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADHD@Z";
-const FN_BASIC_IOSTREAM_CTOR: &str =
-    "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z";
+const FN_BASIC_IOSTREAM_CTOR: &str = "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QAE@PAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z";
 const FN_BASIC_IOSTREAM_DTOR: &str = "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UAE@XZ";
 const FN_BASIC_IFSTREAM_VBASE_DTOR: &str =
     "??_D?$basic_ifstream@DU?$char_traits@D@std@@@std@@QAEXXZ";
@@ -206,8 +200,7 @@ const FN_BASIC_FILEBUF_DTOR: &str = "??1?$basic_filebuf@DU?$char_traits@D@std@@@
 const FN_BASIC_IOS_CTOR: &str = "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IAE@XZ";
 const FN_BASIC_IOS_CLEAR: &str = "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z";
 const FN_BASIC_IOS_SETSTATE: &str = "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z";
-const FN_BASIC_IOS_INIT: &str =
-    "?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IAEXPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z";
+const FN_BASIC_IOS_INIT: &str = "?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IAEXPAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z";
 const FN_BASIC_IOS_WIDEN: &str = "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QBEDD@Z";
 const FN_BASIC_IOS_DTOR: &str = "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UAE@XZ";
 const FN_BASIC_IOS_ASSIGN: &str = "??4?$basic_ios@DU?$char_traits@D@std@@@std@@QAEAAV01@ABV01@@Z";
