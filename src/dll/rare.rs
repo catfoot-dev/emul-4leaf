@@ -97,8 +97,6 @@ enum ResolvedAudioSource {
 pub(crate) struct RareSoundState {
     /// 이 사운드를 생성한 컨텍스트 객체 포인터입니다.
     pub context_ptr: u32,
-    /// 원본 파일 경로입니다.
-    pub path: String,
     /// 디코딩된 소스 데이터입니다.
     pub wave: Arc<RareWaveData>,
     /// Rare_SetVolume에 전달된 원시 값입니다.
@@ -667,7 +665,7 @@ impl Rare {
             }
         };
 
-        let sound_ptr = Self::create_sound_object(uc, context_ptr, &display_name, wave);
+        let sound_ptr = Self::create_sound_object(uc, context_ptr, wave);
         uc.get_data().last_error.store(0, Ordering::SeqCst);
         sound_ptr
     }
@@ -675,7 +673,6 @@ impl Rare {
     fn create_sound_object(
         uc: &mut Unicorn<Win32Context>,
         context_ptr: u32,
-        path: &str,
         wave: Arc<RareWaveData>,
     ) -> u32 {
         let vtable_ptr = Self::ensure_sound_vtable(uc);
@@ -688,7 +685,6 @@ impl Rare {
             sound_ptr,
             RareSoundState {
                 context_ptr,
-                path: path.to_string(),
                 wave,
                 volume: 0,
                 pan: 0,
