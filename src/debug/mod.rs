@@ -7,6 +7,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use embedded_graphics::{pixelcolor::Rgb888, prelude::*, text::Text};
 use embedded_ttf::FontTextStyleBuilder;
 use rusttype::Font as TtfFont;
+use winit::platform::macos::WindowAttributesExtMacOS;
+use winit::window::WindowButtons;
 
 static TTF_FONT: std::sync::OnceLock<TtfFont<'static>> = std::sync::OnceLock::new();
 
@@ -84,8 +86,8 @@ impl Debug {
     /// 디버그 창 페인터를 생성합니다.
     pub fn new(cmd_tx: Sender<DebugCommand>, state_rx: Receiver<CpuContext>) -> Self {
         Debug {
-            cmd_tx: cmd_tx,
-            state_rx: state_rx,
+            cmd_tx,
+            state_rx,
             cpu_state: None,
             waiting_for_step: false,
             auto_running: true,
@@ -104,11 +106,6 @@ impl Debug {
         self.cpu_state = Some(state);
         self.waiting_for_step = false;
     }
-
-    /// 마지막으로 반영한 로그 카운터 값을 반환합니다.
-    pub fn last_log_count(&self) -> usize {
-        self.last_log_count
-    }
 }
 
 impl Painter for Debug {
@@ -118,9 +115,16 @@ impl Painter for Debug {
     ) -> winit::window::Window {
         event_loop
             .create_window(
-                winit::window::Window::default_attributes()
-                    .with_title("4Leaf Emulator Debugger")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1600, 600)),
+                crate::ui::apply_platform_window_attributes(
+                    winit::window::Window::default_attributes()
+                        .with_title("4Leaf Emulator Debugger")
+                        .with_position(winit::dpi::LogicalPosition::new(0, 0))
+                        .with_inner_size(winit::dpi::LogicalSize::new(1200, 600))
+                        .with_min_inner_size(winit::dpi::LogicalSize::new(1200, 600)),
+                )
+                .with_enabled_buttons(WindowButtons::CLOSE)
+                .with_titlebar_transparent(false)
+                .with_fullsize_content_view(false),
             )
             .unwrap()
     }
@@ -458,17 +462,17 @@ impl Painter for Debug {
 
             let socket_content_h = panel_h - 40; // 제목 + 입력란 제외 높이
             let socket_lines_max = (socket_content_h / 18).max(1) as usize;
-            if let Some(buf) = crate::SOCKET_LOG_BUFFER.get() {
-                if let Ok(b) = buf.try_lock() {
-                    let total = b.len();
-                    let start = total.saturating_sub(socket_lines_max);
-                    let mut sy = current_y + 18;
-                    for line in b.iter().skip(start) {
-                        Text::new(line, Point::new(3, sy), style_g.clone())
-                            .draw(&mut display)
-                            .ok();
-                        sy += 18;
-                    }
+            if let Some(buf) = crate::SOCKET_LOG_BUFFER.get()
+                && let Ok(b) = buf.try_lock()
+            {
+                let total = b.len();
+                let start = total.saturating_sub(socket_lines_max);
+                let mut sy = current_y + 18;
+                for line in b.iter().skip(start) {
+                    Text::new(line, Point::new(3, sy), style_g.clone())
+                        .draw(&mut display)
+                        .ok();
+                    sy += 18;
                 }
             }
 
@@ -536,7 +540,7 @@ impl Painter for Debug {
                     Text::new(&message, Point::new(3, log_y), style)
                         .draw(&mut display)
                         .ok();
-                    Text::new(&no, Point::new(9, log_y), style_w.clone())
+                    Text::new(no, Point::new(9, log_y), style_w.clone())
                         .draw(&mut display)
                         .ok();
                     log_y += 18;

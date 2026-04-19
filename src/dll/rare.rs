@@ -178,10 +178,7 @@ pub struct Rare;
 impl Rare {
     /// Rare.dll의 프록시 익스포트 주소를 해소합니다.
     pub(crate) fn resolve_export(uc: &mut Unicorn<Win32Context>, func_name: &str) -> Option<u32> {
-        let symbol = match normalize_export_name(func_name) {
-            Some(symbol) => symbol,
-            None => return None,
-        };
+        let symbol = normalize_export_name(func_name)?;
         Some(Self::register_proxy_symbol(uc, symbol))
     }
 

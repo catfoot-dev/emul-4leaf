@@ -62,7 +62,7 @@ pub(super) fn tls_set_value(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         .lock()
         .unwrap()
         .entry(tid)
-        .or_insert_with(std::collections::HashMap::new)
+        .or_default()
         .insert(index, value);
     crate::emu_log!("[KERNEL32] TlsSetValue({}, {:#x}) -> BOOL 1", index, value);
     Some(ApiHookResult::callee(2, Some(1))) // TRUE
@@ -361,7 +361,7 @@ pub(super) fn schedule_threads_impl(uc: &mut Unicorn<Win32Context>) {
         );
 
         const QUANTUM: usize = 200_000;
-        let res = uc.emu_start(t.eip as u64, EXIT_ADDRESS as u64, 0, QUANTUM);
+        let res = uc.emu_start(t.eip as u64, EXIT_ADDRESS, 0, QUANTUM);
         let new_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0) as u32;
 
         if let Err(e) = res {
@@ -458,28 +458,31 @@ fn write_regs(uc: &mut Unicorn<Win32Context>, r: [u32; 9]) {
 
 /// 종료된 가상 스레드 엔트리와 해당 TLS 슬롯을 정리합니다.
 pub(super) fn cleanup_finished_threads_impl(ctx: &Win32Context) {
-    let finished_thread_ids = {
+    let finished_threads = {
         let mut threads = ctx.threads.lock().unwrap();
-        let mut finished_ids = Vec::new();
+        let mut finished = Vec::new();
 
         threads.retain(|thread| {
             if thread.alive {
                 true
             } else {
-                finished_ids.push(thread.thread_id);
+                finished.push((thread.thread_id, thread.stack_alloc));
                 false
             }
         });
 
-        finished_ids
+        finished
     };
 
-    if finished_thread_ids.is_empty() {
+    if finished_threads.is_empty() {
         return;
     }
 
     let mut tls_slots = ctx.tls_slots.lock().unwrap();
-    for thread_id in finished_thread_ids {
+    for (thread_id, stack_alloc) in finished_threads {
         tls_slots.remove(&thread_id);
+        if stack_alloc != 0 {
+            let _ = ctx.free_heap_block(stack_alloc);
+        }
     }
 }

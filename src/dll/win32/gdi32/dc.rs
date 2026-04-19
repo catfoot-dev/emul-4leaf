@@ -30,8 +30,14 @@ pub(super) fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<Api
             height: 1,
             pixels: std::sync::Arc::new(std::sync::Mutex::new(vec![0u32; 1])),
             bits_addr: None,
-            bpp: 24,
+            stride: 4,
+            bit_count: 1,
             top_down: false,
+            palette: vec![0x000000, 0x00FF_FFFF],
+            red_mask: 0,
+            green_mask: 0,
+            blue_mask: 0,
+            alpha_mask: 0,
         },
     );
 
@@ -41,6 +47,8 @@ pub(super) fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<Api
             associated_window: 0,
             width,
             height,
+            origin_x: 0,
+            origin_y: 0,
             selected_bitmap: default_bitmap,
             selected_font: 0,
             selected_brush: 0,
@@ -78,10 +86,25 @@ pub(super) fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     let hdc = uc.read_arg(0);
     let hobj = uc.read_arg(1);
     let ctx = uc.get_data();
+    let obj_clone = {
+        let gdi_objects = ctx.gdi_objects.lock().unwrap();
+        gdi_objects.get(&hobj).cloned()
+    };
+    let selected_window = if matches!(obj_clone, Some(GdiObject::Bitmap { .. })) {
+        let win_event = ctx.win_event.lock().unwrap();
+        win_event
+            .windows
+            .iter()
+            .find_map(|(&hwnd, state)| (state.surface_bitmap == hobj).then_some(hwnd))
+    } else {
+        None
+    };
     let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
-    let obj_clone = gdi_objects.get(&hobj).cloned();
     let mut old_hobj = 0;
     if let Some(GdiObject::Dc {
+        associated_window,
+        width,
+        height,
         selected_bitmap,
         selected_font,
         selected_brush,
@@ -92,9 +115,16 @@ pub(super) fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     }) = gdi_objects.get_mut(&hdc)
     {
         match obj_clone {
-            Some(GdiObject::Bitmap { .. }) => {
+            Some(GdiObject::Bitmap {
+                width: bmp_width,
+                height: bmp_height,
+                ..
+            }) => {
                 old_hobj = *selected_bitmap;
                 *selected_bitmap = hobj;
+                *associated_window = selected_window.unwrap_or(0);
+                *width = bmp_width as i32;
+                *height = bmp_height as i32;
             }
             Some(GdiObject::Font { .. }) => {
                 old_hobj = *selected_font;
@@ -120,10 +150,10 @@ pub(super) fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
                 if id < 5 || id == 18 {
                     old_hobj = *selected_brush;
                     *selected_brush = hobj;
-                } else if id >= 5 && id <= 8 {
+                } else if (5..=8).contains(&id) {
                     old_hobj = *selected_pen;
                     *selected_pen = hobj;
-                } else if id >= 10 && id <= 17 {
+                } else if (10..=17).contains(&id) {
                     old_hobj = *selected_font;
                     *selected_font = hobj;
                 }
@@ -170,10 +200,18 @@ pub(super) fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     let ret = if selected_somewhere {
         0
     } else {
-        gdi_objects.remove(&hobj);
+        let removed = gdi_objects.remove(&hobj);
+        drop(gdi_objects);
+        if let Some(GdiObject::Bitmap {
+            bits_addr: Some(bits_addr),
+            ..
+        }) = removed
+        {
+            let _ = ctx.free_heap_block(bits_addr);
+        }
         1
     };
-    crate::emu_log!("[GDI32] DeleteObject({:#x}) -> BOOL {}", hobj, ret);
+    // crate::emu_log!("[GDI32] DeleteObject({:#x}) -> BOOL {}", hobj, ret);
     Some(ApiHookResult::callee(1, Some(ret)))
 }
 
@@ -249,26 +287,32 @@ pub(super) fn get_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
             Some(GdiObject::Bitmap {
                 width,
                 height,
-                bpp,
                 bits_addr,
+                bit_count,
                 ..
             }) => {
-                let width_bytes = ((*width * *bpp).div_ceil(16) * 2).max(1);
-                Some((*width, *height, width_bytes, *bpp, bits_addr.unwrap_or(0)))
+                let width_bytes = ((*width * u32::from(*bit_count).max(1)).div_ceil(16) * 2).max(1);
+                Some((
+                    *width,
+                    *height,
+                    width_bytes,
+                    *bit_count,
+                    bits_addr.unwrap_or(0),
+                ))
             }
             Some(GdiObject::Font { .. }) => None,
             _ => None,
         }
     };
 
-    let result = if let Some((width, height, width_bytes, bpp, bits)) = bitmap_info {
+    let result = if let Some((width, height, width_bytes, bit_count, bits)) = bitmap_info {
         if pv != 0 {
             uc.write_u32(pv as u64, 0); // bmType
             uc.write_u32(pv as u64 + 4, width); // bmWidth
             uc.write_u32(pv as u64 + 8, height); // bmHeight
             uc.write_u32(pv as u64 + 12, width_bytes); // bmWidthBytes
             uc.write_u32(pv as u64 + 16, 1); // bmPlanes
-            uc.write_u32(pv as u64 + 20, bpp); // bmBitsPixel
+            uc.write_u32(pv as u64 + 20, u32::from(bit_count)); // bmBitsPixel
             uc.write_u32(pv as u64 + 24, bits); // bmBits
         }
         28

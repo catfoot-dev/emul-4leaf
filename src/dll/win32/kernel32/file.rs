@@ -235,7 +235,7 @@ pub(super) fn get_full_path_name_a(uc: &mut Unicorn<Win32Context>) -> Option<Api
     let full = format!("C:\\4Leaf\\{}\0", name);
     uc.mem_write(buf_addr as u64, full.as_bytes()).unwrap();
     if file_part_addr != 0 {
-        uc.write_u32(file_part_addr as u64, buf_addr as u32);
+        uc.write_u32(file_part_addr as u64, buf_addr);
     }
     crate::emu_log!(
         "[KERNEL32] GetFullPathNameA(\"{}\", {}, {:#x}, {:#x}) -> {:#x}",

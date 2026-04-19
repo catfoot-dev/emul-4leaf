@@ -1,5 +1,4 @@
 use crate::dll::win32::{StackCleanup, Win32Context};
-use std::sync::atomic::Ordering;
 use unicorn_engine::{RegisterX86, Unicorn};
 
 // pub const HOOK_BASE: u64 = 0x1000_0000;
@@ -104,6 +103,7 @@ pub(crate) fn push_u32_impl(uc: &mut Unicorn<Win32Context>, value: u32) {
     let _ = uc.reg_write(RegisterX86::ESP, new_esp);
 }
 
+#[allow(dead_code)]
 pub(crate) fn pop_u32_impl(uc: &mut Unicorn<Win32Context>) -> u32 {
     let esp = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
     let val = read_u32_impl(uc, esp);
@@ -122,15 +122,20 @@ pub(crate) fn apply_stack_cleanup_impl(uc: &mut Unicorn<Win32Context>, cleanup: 
 }
 
 pub(crate) fn malloc_impl(uc: &mut Unicorn<Win32Context>, size: usize) -> u64 {
-    let data = uc.get_data();
-    // 4바이트 정렬
-    let aligned_size = (size as u32 + 3) & !3;
-    let addr = data.heap_cursor.fetch_add(aligned_size, Ordering::SeqCst);
-
-    if (addr as u64 + aligned_size as u64) > (HEAP_BASE + HEAP_SIZE) {
-        crate::emu_log!("[!] HEAP OVERFLOW at {:#x}", addr);
+    let ctx = uc.get_data();
+    match ctx.alloc_heap_block(size) {
+        Some(addr) => addr as u64,
+        None => {
+            let cursor = ctx.heap_cursor.load(std::sync::atomic::Ordering::SeqCst);
+            crate::emu_log!(
+                "[!] HEAP OVERFLOW size={} cursor={:#x} limit={:#x}",
+                size.max(1),
+                cursor,
+                HEAP_BASE + HEAP_SIZE
+            );
+            0
+        }
     }
-    addr as u64
 }
 
 pub(crate) fn alloc_str_impl(uc: &mut Unicorn<Win32Context>, text: &str) -> u32 {
@@ -140,6 +145,7 @@ pub(crate) fn alloc_str_impl(uc: &mut Unicorn<Win32Context>, text: &str) -> u32 
     addr as u32
 }
 
+#[allow(dead_code)]
 pub(crate) fn alloc_bytes_impl(uc: &mut Unicorn<Win32Context>, data: &[u8]) -> u32 {
     let addr = malloc_impl(uc, data.len());
     let _ = uc.mem_write(addr, data);

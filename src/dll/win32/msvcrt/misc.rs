@@ -178,8 +178,8 @@ pub(super) fn localtime(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
     data[7] = 0; // tm_yday
     data[8] = 0; // tm_isdst
 
-    for i in 0..9 {
-        uc.write_u32((tm_ptr + (i * 4) as u32) as u64, data[i]);
+    for (i, value) in data.iter().enumerate() {
+        uc.write_u32((tm_ptr + (i * 4) as u32) as u64, *value);
     }
 
     crate::emu_log!(

@@ -25,6 +25,7 @@ pub struct EmulatedThread {
     pub thread_id: u32,
     /// 스레드 스택 블록의 시작 주소 (힙에서 할당)
     pub stack_alloc: u32,
+    #[allow(dead_code)]
     pub stack_size: u32,
     // 저장된 CPU 레지스터
     pub eax: u32,
@@ -150,10 +151,22 @@ pub enum GdiObject {
         pixels: Arc<Mutex<Vec<u32>>>,
         /// DIBSection용 에뮬레이터 힙 주소 (CreateDIBSection이 프로그램에 반환한 bits 포인터)
         bits_addr: Option<u32>,
-        /// 픽셀 비트 심도 (8/24/32)
-        bpp: u32,
+        /// 스캔라인 바이트 수. `biSizeImage`가 주어진 경우 `biSizeImage / |height|`로 계산하고,
+        /// 아니면 DWORD 정렬된 `((width*bpp+31)/32)*4` 값이 저장됩니다. 게스트가 DIB에 픽셀을
+        /// 쓸 때 사용한 피치와 반드시 일치해야 합니다.
+        stride: u32,
+        /// 원본 DIB의 색심도입니다. GIF/BMP가 만드는 1/4/8bpp 팔레트 DIB를
+        /// 그대로 추적해야 하므로 CreateDIBSection 시점의 값을 보존합니다.
+        bit_count: u16,
         /// true = 탑다운(top-down) DIB (biHeight < 0)
         top_down: bool,
+        /// 팔레트 기반 DIB의 RGBQUAD 테이블입니다.
+        palette: Vec<u32>,
+        /// BI_BITFIELDS / BI_ALPHABITFIELDS용 채널 마스크입니다.
+        red_mask: u32,
+        green_mask: u32,
+        blue_mask: u32,
+        alpha_mask: u32,
     },
     /// 디바이스 컨텍스트(DC) - 그래픽 작업의 상태를 유지합니다.
     Dc {
@@ -161,6 +174,10 @@ pub enum GdiObject {
         associated_window: u32,
         width: i32,
         height: i32,
+        /// DC 논리 좌표계를 실제 비트맵 좌표계로 옮길 때 더하는 X 오프셋
+        origin_x: i32,
+        /// DC 논리 좌표계를 실제 비트맵 좌표계로 옮길 때 더하는 Y 오프셋
+        origin_y: i32,
         /// 선택된 GDI 오브젝트 핸들들
         selected_bitmap: u32,
         selected_font: u32,
@@ -273,6 +290,7 @@ pub struct FileState {
     /// 실제 호스트 파일 객체
     pub file: File,
     /// 디버깅용 원본 경로 문자열
+    #[allow(dead_code)]
     pub path: String,
     /// 마지막 읽기에서 EOF를 만났는지 여부
     pub eof: bool,
@@ -315,6 +333,7 @@ pub struct Timer {
 pub struct TrackMouseEventState {
     pub hwnd: u32,
     pub flags: u32,
+    #[allow(dead_code)]
     pub hover_time: u32,
 }
 
@@ -323,6 +342,10 @@ pub struct TrackMouseEventState {
 #[derive(Debug, Clone)]
 pub struct WindowState {
     pub class_name: String,
+    pub class_icon: u32,
+    pub big_icon: u32,
+    pub small_icon: u32,
+    pub class_hbr_background: u32,
     pub title: String,
     pub x: i32,
     pub y: i32,
@@ -346,6 +369,14 @@ pub struct WindowState {
     pub surface_bitmap: u32,
     /// 윈도우의 가시 영역(Region) 핸들
     pub window_rgn: u32,
+    /// guest가 직접 계산한 비클라이언트 좌측 inset
+    pub guest_frame_left: i32,
+    /// guest가 직접 계산한 비클라이언트 상단 inset
+    pub guest_frame_top: i32,
+    /// guest가 직접 계산한 비클라이언트 우측 inset
+    pub guest_frame_right: i32,
+    /// guest가 직접 계산한 비클라이언트 하단 inset
+    pub guest_frame_bottom: i32,
     /// 윈도우가 다시 그려져야 하는지 여부 (WM_PAINT 생성용)
     pub needs_paint: bool,
     /// WM_NCHITTEST 캐시: 마지막 테스트 좌표 (LPARAM 형식)

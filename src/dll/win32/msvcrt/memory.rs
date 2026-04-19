@@ -16,9 +16,9 @@ pub(super) fn malloc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 // API: void free(void* ptr)
 // 역할: 할당된 메모리를 해제
 pub(super) fn free(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
-    // 간이 힙이므로 free는 아무 작업도 수행하지 않음
     let ptr = uc.read_arg(0);
-    crate::emu_log!("[MSVCRT] free({:#x}) -> void", ptr);
+    let released = ptr != 0 && uc.get_data().free_heap_block(ptr);
+    crate::emu_log!("[MSVCRT] free({:#x}) -> void (released={})", ptr, released);
     Some(ApiHookResult::caller(None))
 }
 
@@ -43,15 +43,26 @@ pub(super) fn realloc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let ptr = uc.read_arg(0);
     let size = uc.read_arg(1) as usize;
     if size == 0 {
+        if ptr != 0 {
+            let _ = uc.get_data().free_heap_block(ptr);
+        }
         crate::emu_log!("[MSVCRT] realloc({:#x}, 0) -> NULL", ptr);
         return Some(ApiHookResult::callee(2, Some(0)));
     }
     let addr = uc.malloc(size);
+    if addr == 0 {
+        crate::emu_log!("[MSVCRT] realloc({:#x}, {}) -> void* 0x0", ptr, size);
+        return Some(ApiHookResult::callee(2, Some(0)));
+    }
     if ptr != 0 {
-        // We don't know the exact original size, so we copy up to 'size' bytes.
-        // This is a limitation of our simple monotonic heap.
-        let data = uc.mem_read_as_vec(ptr as u64, size).unwrap_or_default();
+        let copy_len = uc
+            .get_data()
+            .heap_block_size(ptr)
+            .map(|block_size| (block_size as usize).min(size))
+            .unwrap_or(size);
+        let data = uc.mem_read_as_vec(ptr as u64, copy_len).unwrap_or_default();
         uc.mem_write(addr, &data).unwrap();
+        let _ = uc.get_data().free_heap_block(ptr);
     }
     crate::emu_log!(
         "[MSVCRT] realloc({:#x}, {}) -> void* {:#x}",

@@ -7,10 +7,6 @@ use std::io::{Read, Write};
 use unicorn_engine::Unicorn;
 
 /// 포맷 문자열 파싱 및 에뮬레이트 메모리 기반 sprintf 구현
-/// 포맷 문자열을 파싱하여 가변 인자 개수를 카운팅하는 헬퍼 (printf 계열)
-/// 반환: 포맷 스펙이 소비하는 스택 슬롯 수 (double은 2 슬롯)
-
-/// 포맷 문자열 파싱 및 에뮬레이트 메모리 기반 sprintf 구현
 /// 반환: (결과 문자열, 소비된 전체 인자 수)
 pub(super) fn format_string(
     uc: &mut Unicorn<Win32Context>,
@@ -316,10 +312,8 @@ pub(super) fn sscanf(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             }
         } else if ch.is_whitespace() {
             input_ptr = input_ptr.trim_start();
-        } else {
-            if input_ptr.starts_with(ch) {
-                input_ptr = &input_ptr[1..];
-            }
+        } else if input_ptr.starts_with(ch) {
+            input_ptr = &input_ptr[1..];
         }
     }
 
@@ -329,7 +323,7 @@ pub(super) fn sscanf(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         fmt,
         count
     );
-    Some(ApiHookResult::callee(arg_idx, Some(count as i32)))
+    Some(ApiHookResult::callee(arg_idx, Some(count)))
 }
 
 // API: int fprintf(FILE* stream, const char* format, ...)
@@ -443,10 +437,8 @@ pub(super) fn fscanf(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             }
         } else if ch.is_whitespace() {
             input_ptr = input_ptr.trim_start();
-        } else {
-            if input_ptr.starts_with(ch) {
-                input_ptr = &input_ptr[1..];
-            }
+        } else if input_ptr.starts_with(ch) {
+            input_ptr = &input_ptr[1..];
         }
     }
 
@@ -456,5 +448,5 @@ pub(super) fn fscanf(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         fmt,
         count
     );
-    Some(ApiHookResult::callee(arg_idx, Some(count as i32)))
+    Some(ApiHookResult::callee(arg_idx, Some(count)))
 }

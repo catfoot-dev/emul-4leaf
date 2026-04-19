@@ -248,7 +248,7 @@ pub(crate) fn setup_impl(
                     // 이 경로는 C++ thiscall / SEH 프레임까지 포함한 원래 호출 구조를 보존하므로,
                     // WinCore 내부 메서드가 다시 다른 guest 함수를 호출할 때 상위 프레임이 오염되는
                     // 문제를 막습니다.
-                    let _ = uc.reg_write(RegisterX86::EIP, func_address as u64);
+                    let _ = uc.reg_write(RegisterX86::EIP, func_address);
                     uc.emu_stop().unwrap_or_default();
                     return;
                 }
@@ -352,6 +352,7 @@ pub(crate) fn setup_impl(
 /// * `dll_name`: 호출할 함수가 포함된 DLL 이름
 /// * `func_name`: 호출할 대상 함수 이름
 /// * `args`: 함수에 전달될 인자들 모음
+#[allow(dead_code)]
 pub(crate) fn run_dll_func_impl(
     uc: &mut Unicorn<Win32Context>,
     dll_name: &str,
@@ -361,7 +362,7 @@ pub(crate) fn run_dll_func_impl(
     uc.prepare_dll_func(dll_name, func_name, args);
     let eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
 
-    if let Err(e) = uc.emu_start(eip, EXIT_ADDRESS as u64, 0, 0) {
+    if let Err(e) = uc.emu_start(eip, EXIT_ADDRESS, 0, 0) {
         crate::emu_log!(
             "[!] Execution of {}!{} failed: {:?}",
             dll_name,
@@ -387,10 +388,10 @@ pub(crate) fn run_emulator_impl(
     // 에뮬레이터 스레드 핸들을 저장하여 UI 스레드에서 unpark로 즉시 깨울 수 있도록 합니다.
     *uc.get_data().emu_thread.lock().unwrap() = Some(std::thread::current());
 
-    if let Some(state_tx) = state_tx.as_ref() {
-        if state_tx.send(capture_cpu_context(uc)).is_ok() {
-            debug_last_state_sent = Instant::now();
-        }
+    if let Some(state_tx) = state_tx.as_ref()
+        && state_tx.send(capture_cpu_context(uc)).is_ok()
+    {
+        debug_last_state_sent = Instant::now();
     }
 
     loop {
@@ -408,11 +409,11 @@ pub(crate) fn run_emulator_impl(
                         debug_auto_run = true;
                         continue;
                     }
-                    Ok(DebugCommand::Stop) | Err(_) => {
+                    Ok(DebugCommand::Pause) => continue,
+                    Err(_) => {
                         uc.emu_stop().unwrap_or_default();
                         break;
                     }
-                    Ok(DebugCommand::Pause) => continue,
                 }
             } else {
                 match cmd_rx.try_recv() {
@@ -426,10 +427,6 @@ pub(crate) fn run_emulator_impl(
                             debug_last_state_sent = Instant::now();
                         }
                         continue;
-                    }
-                    Ok(DebugCommand::Stop) => {
-                        uc.emu_stop().unwrap_or_default();
-                        break;
                     }
                     Ok(DebugCommand::Run) | Ok(DebugCommand::Step) => {}
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -447,7 +444,7 @@ pub(crate) fn run_emulator_impl(
         let should_run_main = {
             let ctx = uc.get_data();
             let resume = *ctx.main_resume_time.lock().unwrap();
-            resume.map_or(true, |t| Instant::now() >= t)
+            resume.is_none_or(|t| Instant::now() >= t)
         };
 
         if should_run_main {
@@ -460,7 +457,7 @@ pub(crate) fn run_emulator_impl(
             } else {
                 200_000
             };
-            let _ = uc.emu_start(eip, EXIT_ADDRESS as u64, 0, quantum);
+            let _ = uc.emu_start(eip, EXIT_ADDRESS, 0, quantum);
         }
 
         // 백그라운드 스레드 스케줄링
@@ -555,6 +552,6 @@ pub(crate) fn prepare_dll_func_impl(
             func_address
         );
 
-        let _ = uc.reg_write(RegisterX86::EIP, func_address as u64);
+        let _ = uc.reg_write(RegisterX86::EIP, func_address);
     }
 }

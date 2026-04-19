@@ -132,7 +132,7 @@ fn parse_packet_record(line: &str) -> Option<PacketRecord> {
     let mirrored_prev_send = parse_prefixed_value(prefix, "mirror_prev_send=")?
         .parse()
         .ok()?;
-    let data = Vec::from_hex(&hex).ok()?;
+    let data = Vec::from_hex(hex).ok()?;
 
     Some(PacketRecord {
         direction,

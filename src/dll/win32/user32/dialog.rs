@@ -91,9 +91,9 @@ pub(super) fn wsprintf_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
                         arg_idx += 1;
                         let mut s = match format_char {
                             'd' | 'i' => format!("{}", arg_val as i32),
-                            'u' => format!("{}", arg_val as u32),
-                            'x' => format!("{:x}", arg_val as u32),
-                            'X' => format!("{:X}", arg_val as u32),
+                            'u' => format!("{}", { arg_val }),
+                            'x' => format!("{:x}", { arg_val }),
+                            'X' => format!("{:X}", { arg_val }),
                             'c' => format!("{}", (arg_val as u8) as char),
                             's' | 'S' => {
                                 if arg_val != 0 {

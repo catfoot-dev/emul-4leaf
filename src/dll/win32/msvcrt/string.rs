@@ -2,32 +2,59 @@ use crate::{
     dll::win32::{ApiHookResult, Win32Context},
     helper::UnicornHelper,
 };
-use encoding_rs::EUC_KR;
 use unicorn_engine::Unicorn;
+
+fn read_c_bytes(uc: &Unicorn<Win32Context>, addr: u32, limit: usize) -> Vec<u8> {
+    if addr == 0 || limit == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for offset in 0..limit {
+        let byte = uc.read_u8(addr as u64 + offset as u64);
+        out.push(byte);
+        if byte == 0 {
+            break;
+        }
+    }
+    out
+}
 
 // API: int strncmp(const char* str1, const char* str2, size_t count)
 // 역할: 두 문자열을 지정된 길이만큼 비교
 pub(super) fn strncmp(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let s1_addr = uc.read_arg(0);
-    let s1 = if s1_addr != 0 {
-        uc.read_euc_kr(s1_addr as u64)
-    } else {
-        String::new()
-    };
     let s2_addr = uc.read_arg(1);
-    let s2 = if s2_addr != 0 {
-        uc.read_euc_kr(s2_addr as u64)
-    } else {
-        String::new()
-    };
     let n = uc.read_arg(2) as usize;
-    let r1: Vec<u8> = s1.bytes().take(n).collect();
-    let r2: Vec<u8> = s2.bytes().take(n).collect();
-    let result = r1.cmp(&r2) as i32;
+    let mut result = 0i32;
+    let mut r1 = Vec::with_capacity(n);
+    let mut r2 = Vec::with_capacity(n);
+
+    for offset in 0..n {
+        let b1 = if s1_addr != 0 {
+            uc.read_u8(s1_addr as u64 + offset as u64)
+        } else {
+            0
+        };
+        let b2 = if s2_addr != 0 {
+            uc.read_u8(s2_addr as u64 + offset as u64)
+        } else {
+            0
+        };
+        r1.push(b1);
+        r2.push(b2);
+        if b1 != b2 {
+            result = (b1 as i32) - (b2 as i32);
+            break;
+        }
+        if b1 == 0 {
+            break;
+        }
+    }
     crate::emu_log!(
-        "[MSVCRT] strncmp(\"{}\", \"{}\", {}) -> int {}",
-        s1,
-        s2,
+        "[MSVCRT] strncmp({:02x?}, {:02x?}, {}) -> int {}",
+        r1,
+        r2,
         n,
         result
     );
@@ -59,22 +86,29 @@ pub(super) fn strcoll(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 pub(super) fn strncpy(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let dst = uc.read_arg(0);
     let src = uc.read_arg(1);
-    let s = if src != 0 {
-        uc.read_euc_kr(src as u64)
-    } else {
-        String::new()
-    };
     let n = uc.read_arg(2) as usize;
-    let (encoded, _, _) = EUC_KR.encode(&s);
-    let mut bytes: Vec<u8> = encoded.as_ref().iter().copied().take(n).collect();
+    let mut bytes = Vec::with_capacity(n);
+
+    for offset in 0..n {
+        let byte = if src != 0 {
+            uc.read_u8(src as u64 + offset as u64)
+        } else {
+            0
+        };
+        bytes.push(byte);
+        if byte == 0 {
+            bytes.resize(n, 0);
+            break;
+        }
+    }
     while bytes.len() < n {
         bytes.push(0);
     }
     uc.mem_write(dst as u64, &bytes).unwrap();
     crate::emu_log!(
-        "[MSVCRT] strncpy({:#x}, \"{}\", {}) -> char* {:#x}",
+        "[MSVCRT] strncpy({:#x}, {:02x?}, {}) -> char* {:#x}",
         dst,
-        s,
+        bytes,
         n,
         dst
     );
@@ -230,23 +264,19 @@ pub(super) fn _strnicmp(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
     let s1_addr = uc.read_arg(0);
     let s2_addr = uc.read_arg(1);
     let n = uc.read_arg(2) as usize;
-    let s1: String = uc
-        .read_euc_kr(s1_addr as u64)
-        .chars()
-        .take(n)
-        .collect::<String>()
-        .to_lowercase();
-    let s2: String = uc
-        .read_euc_kr(s2_addr as u64)
-        .chars()
-        .take(n)
-        .collect::<String>()
-        .to_lowercase();
-    let result = s1.cmp(&s2) as i32;
+    let b1 = read_c_bytes(uc, s1_addr, n)
+        .into_iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let b2 = read_c_bytes(uc, s2_addr, n)
+        .into_iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let result = b1.cmp(&b2) as i32;
     crate::emu_log!(
-        "[MSVCRT] _strnicmp(\"{}\", \"{}\", {}) -> int {}",
-        s1,
-        s2,
+        "[MSVCRT] _strnicmp({:02x?}, {:02x?}, {}) -> int {}",
+        b1,
+        b2,
         n,
         result
     );

@@ -65,7 +65,7 @@ pub(super) fn register_class_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiH
 // 역할: 창 클래스를 등록
 pub(super) fn register_class_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let class_addr = uc.read_arg(0);
-    let style = uc.read_u32(class_addr as u64 + 0);
+    let style = uc.read_u32(class_addr as u64);
     let wnd_proc = uc.read_u32(class_addr as u64 + 4);
     let cb_cls_extra = uc.read_u32(class_addr as u64 + 8) as i32;
     let cb_wnd_extra = uc.read_u32(class_addr as u64 + 12) as i32;

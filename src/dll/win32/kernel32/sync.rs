@@ -463,13 +463,13 @@ pub(super) fn interlocked_exchange(uc: &mut Unicorn<Win32Context>) -> Option<Api
 /// 이벤트 핸들이 신호 상태인지 확인하고 자동 리셋 이벤트면 소비합니다.
 pub(super) fn try_consume_signaled_event(ctx: &Win32Context, handle: u32) -> bool {
     let mut events = ctx.events.lock().unwrap();
-    if let Some(event) = events.get_mut(&handle) {
-        if event.signaled {
-            if !event.manual_reset {
-                event.signaled = false;
-            }
-            return true;
+    if let Some(event) = events.get_mut(&handle)
+        && event.signaled
+    {
+        if !event.manual_reset {
+            event.signaled = false;
         }
+        return true;
     }
     false
 }

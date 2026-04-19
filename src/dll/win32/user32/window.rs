@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use crate::{
     dll::win32::{ApiHookResult, Win32Context, WindowState},
     helper::UnicornHelper,
@@ -6,6 +8,71 @@ use encoding_rs::EUC_KR;
 use unicorn_engine::{RegisterX86, Unicorn};
 
 use super::USER32;
+
+fn estimate_guest_frame_metrics(
+    ctx: &Win32Context,
+    h_rgn: u32,
+    width: i32,
+    height: i32,
+) -> crate::dll::win32::user32::WindowFrameMetrics {
+    if h_rgn == 0 || width <= 0 || height <= 0 {
+        return crate::dll::win32::user32::WindowFrameMetrics::default();
+    }
+
+    let rects = {
+        let gdi_objects = ctx.gdi_objects.lock().unwrap();
+        match gdi_objects.get(&h_rgn) {
+            Some(crate::dll::win32::GdiObject::Region { rects }) => rects.clone(),
+            _ => return crate::dll::win32::user32::WindowFrameMetrics::default(),
+        }
+    };
+
+    let mut row_left = vec![width; height as usize];
+    let mut row_right = vec![0; height as usize];
+    let mut row_has = vec![false; height as usize];
+
+    for (left, top, right, bottom) in rects {
+        let left = left.clamp(0, width);
+        let right = right.clamp(0, width);
+        let top = top.clamp(0, height);
+        let bottom = bottom.clamp(0, height);
+        if left >= right || top >= bottom {
+            continue;
+        }
+
+        for y in top..bottom {
+            let row = &mut row_left[y as usize];
+            *row = (*row).min(left);
+            row_right[y as usize] = row_right[y as usize].max(right);
+            row_has[y as usize] = true;
+        }
+    }
+
+    let is_full_row = |row: usize| row_has[row] && row_left[row] <= 0 && row_right[row] >= width;
+
+    let Some(first_full_row) = (0..height as usize).find(|&row| is_full_row(row)) else {
+        return crate::dll::win32::user32::WindowFrameMetrics::default();
+    };
+    let Some(last_full_row) = (0..height as usize).rev().find(|&row| is_full_row(row)) else {
+        return crate::dll::win32::user32::WindowFrameMetrics::default();
+    };
+
+    let top_inset = first_full_row as i32;
+    let bottom_inset = height - 1 - last_full_row as i32;
+    if top_inset <= 0 || bottom_inset <= 0 || (top_inset - bottom_inset).abs() > 2 {
+        return crate::dll::win32::user32::WindowFrameMetrics::default();
+    }
+
+    // Lime 기반 팝업은 둥근 모서리 반경과 내부 프레임 두께가 동일하므로
+    // 상단에서 관측한 inset을 네 변 모두에 동일하게 적용합니다.
+    let inset = top_inset.min(bottom_inset);
+    crate::dll::win32::user32::WindowFrameMetrics {
+        left: inset,
+        top: inset,
+        right: inset,
+        bottom: inset,
+    }
+}
 
 // API: HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
 // 역할: 확장 스타일을 포함한 창을 생성
@@ -30,12 +97,9 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
 
     let return_addr = uc.read_u32(esp);
     let caller_info = uc.resolve_address(return_addr);
-    let ecx = uc.reg_read(RegisterX86::ECX).unwrap_or(0) as u32;
-    let esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0) as u32;
-    let edi = uc.reg_read(RegisterX86::EDI).unwrap_or(0) as u32;
-    let ebp = uc.reg_read(RegisterX86::EBP).unwrap_or(0) as u32;
 
     let hwnd = uc.get_data().alloc_handle();
+    let child_id = if menu_or_id < 0x10000 { menu_or_id } else { 0 };
     let (class_name, class_meta) = USER32::resolve_window_class(uc, class_addr);
     let title = if title_addr != 0 {
         uc.read_euc_kr(title_addr as u64)
@@ -45,7 +109,7 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
 
     let (class_wnd_proc, class_cursor, hinstance) = {
         let ctx = uc.get_data();
-        if let Some(class_meta) = class_meta {
+        if let Some(class_meta) = class_meta.as_ref() {
             (
                 class_meta.wnd_proc,
                 class_meta.h_cursor,
@@ -57,12 +121,30 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
             (0, 0, instance)
         }
     };
-    let use_native_frame = USER32::is_builtin_window_class(&class_name);
+    let class_icon = class_meta
+        .as_ref()
+        .map(|meta| {
+            if meta.h_icon != 0 {
+                meta.h_icon
+            } else {
+                meta.h_icon_sm
+            }
+        })
+        .unwrap_or(0);
+    let class_hbr_background = class_meta
+        .as_ref()
+        .map(|meta| meta.hbr_background)
+        .unwrap_or(0);
+    let use_native_frame = USER32::should_use_native_frame(style);
 
     let surface_bitmap = uc.get_data().create_surface_bitmap(width, height);
 
     let window_state = WindowState {
         class_name: class_name.clone(),
+        class_icon,
+        big_icon: 0,
+        small_icon: 0,
+        class_hbr_background,
         title: title.clone(),
         x: x as i32,
         y: y as i32,
@@ -71,7 +153,7 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         style,
         ex_style,
         parent,
-        id: if menu_or_id < 0x10000 { menu_or_id } else { 0 },
+        id: child_id,
         visible: style & 0x10000000 != 0,
         enabled: true,
         zoomed: false,
@@ -82,6 +164,10 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         use_native_frame,
         surface_bitmap,
         window_rgn: 0,
+        guest_frame_left: 0,
+        guest_frame_top: 0,
+        guest_frame_right: 0,
+        guest_frame_bottom: 0,
         needs_paint: true,
         last_hittest_lparam: u32::MAX,
         last_hittest_result: 0,
@@ -105,14 +191,16 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
             title_addr, class_addr, ex_style,
         );
 
-        let nccreate_ret =
-            USER32::dispatch_to_wndproc(uc, class_wnd_proc, hwnd, 0x0081, 0, cs_ptr as u32);
-        // `CreateWindowExA` 훅은 현재 스택 프레임을 기준으로 RET 정리를 마치므로,
-        // 생성 메시지 중 중첩 게스트 호출이 상위 호출 프레임을 건드려도 원래 인자/복귀
-        // 레이아웃을 다시 맞춰 둡니다.
-        for (index, value) in saved_call_frame.iter().enumerate() {
-            uc.write_u32(esp + (index as u64 * 4), *value);
-        }
+        let nccreate_ret = USER32::dispatch_to_wndproc_with_saved_frame(
+            uc,
+            esp,
+            &saved_call_frame,
+            class_wnd_proc,
+            hwnd,
+            USER32::WM_NCCREATE,
+            0,
+            cs_ptr as u32,
+        );
         if nccreate_ret == 0 {
             let ctx = uc.get_data();
             USER32::destroy_window_tree(ctx, hwnd);
@@ -123,11 +211,16 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
             return Some(ApiHookResult::callee(12, Some(0)));
         }
 
-        let create_ret =
-            USER32::dispatch_to_wndproc(uc, class_wnd_proc, hwnd, 0x0001, 0, cs_ptr as u32);
-        for (index, value) in saved_call_frame.iter().enumerate() {
-            uc.write_u32(esp + (index as u64 * 4), *value);
-        }
+        let create_ret = USER32::dispatch_to_wndproc_with_saved_frame(
+            uc,
+            esp,
+            &saved_call_frame,
+            class_wnd_proc,
+            hwnd,
+            USER32::WM_CREATE,
+            0,
+            cs_ptr as u32,
+        );
         if create_ret == -1 {
             let ctx = uc.get_data();
             USER32::destroy_window_tree(ctx, hwnd);
@@ -143,17 +236,14 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     // 생성 도중 역주입되는 활성화/리사이즈 이벤트를 막습니다.
     uc.get_data().win_event.lock().unwrap().realize_window(hwnd);
 
-    // 최상위 창이라면 활성화 및 포커스 설정
-    if parent == 0 {
-        use std::sync::atomic::Ordering;
-        let ctx = uc.get_data();
-        ctx.active_hwnd.store(hwnd, Ordering::SeqCst);
-        ctx.foreground_hwnd.store(hwnd, Ordering::SeqCst);
-        ctx.focus_hwnd.store(hwnd, Ordering::SeqCst);
+    // 활성화 및 포커스 설정
+    let ctx = uc.get_data();
+    ctx.active_hwnd.store(hwnd, Ordering::SeqCst);
+    ctx.foreground_hwnd.store(hwnd, Ordering::SeqCst);
+    ctx.focus_hwnd.store(hwnd, Ordering::SeqCst);
 
-        // UI 스레드에도 활성화 알림
-        ctx.win_event.lock().unwrap().activate_window(hwnd);
-    }
+    // UI 스레드에도 활성화 알림
+    ctx.win_event.lock().unwrap().activate_window(hwnd);
 
     crate::emu_log!(
         "[USER32] CreateWindowExA({:#x}, \"{}\", \"{}\", {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> HWND {:#x} [caller: {}]",
@@ -172,25 +262,6 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         hwnd,
         caller_info
     );
-    if caller_info.contains("?Create@TWindow@@QAEXPAV1@PBDHHHHIIPAUHMENU__@@@Z+0x7a") {
-        let this_words = if esi >= 0x2000_0000 {
-            (0..4)
-                .map(|i| format!("{:#x}", uc.read_u32(esi as u64 + (i * 4) as u64)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        } else {
-            String::from("n/a")
-        };
-        crate::emu_log!(
-            "[TRACE] CreateWindowExA caller regs: ECX={:#x} ESI(this?)={:#x} EDI={:#x} EBP={:#x} param={:#x} this_words=[{}]",
-            ecx,
-            esi,
-            edi,
-            ebp,
-            param,
-            this_words
-        );
-    }
     Some(ApiHookResult::callee(12, Some(hwnd as i32)))
 }
 
@@ -378,15 +449,25 @@ pub(super) fn get_window_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     let rect_addr = uc.read_arg(1);
     let (x, y, w, h) = {
         let ctx = uc.get_data();
-        let win_event = ctx.win_event.lock().unwrap();
-        win_event
-            .windows
-            .get(&hwnd)
-            .map(|win| {
-                let (screen_x, screen_y) = win_event.window_screen_origin(hwnd).unwrap_or((0, 0));
-                (screen_x, screen_y, win.width, win.height)
-            })
-            .unwrap_or((0, 0, 640, 480))
+        let desktop_hwnd = ctx.desktop_hwnd.load(std::sync::atomic::Ordering::SeqCst);
+        if hwnd != 0 && hwnd == desktop_hwnd {
+            // GetWindowRect on the desktop HWND must return the host screen rect
+            // so guest centering math (GetDesktopWindow + GetWindowRect) places
+            // popup dialogs correctly.
+            let (left, top, right, bottom) = ctx.work_area_rect();
+            (left, top, (right - left).max(0), (bottom - top).max(0))
+        } else {
+            let win_event = ctx.win_event.lock().unwrap();
+            win_event
+                .windows
+                .get(&hwnd)
+                .map(|win| {
+                    let (screen_x, screen_y) =
+                        win_event.window_screen_origin(hwnd).unwrap_or((0, 0));
+                    (screen_x, screen_y, win.width, win.height)
+                })
+                .unwrap_or((0, 0, 640, 480))
+        }
     };
 
     uc.write_u32(rect_addr as u64, x as u32);
@@ -408,23 +489,29 @@ pub(super) fn get_client_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     let rect_addr = uc.read_arg(1);
     let (w, h) = {
         let ctx = uc.get_data();
-        let win_event = ctx.win_event.lock().unwrap();
-        win_event
-            .windows
-            .get(&hwnd)
-            .map(|win| {
-                let (bw, bh, caption) = USER32::get_window_frame_size(win.style, win.ex_style);
-                let mut rect_w = win.width;
-                let mut rect_h = win.height;
-                if !win.use_native_frame {
-                    rect_w = (rect_w - bw * 2).max(0);
-                    rect_h = (rect_h - bh * 2 - caption).max(0);
-                }
-                (rect_w, rect_h)
-            })
-            .unwrap_or((640, 480))
+        let desktop_hwnd = ctx.desktop_hwnd.load(std::sync::atomic::Ordering::SeqCst);
+        if hwnd != 0 && hwnd == desktop_hwnd {
+            // 데스크톱 HWND의 클라이언트 영역 == 화면 전체
+            let (left, top, right, bottom) = ctx.work_area_rect();
+            ((right - left).max(0), (bottom - top).max(0))
+        } else {
+            let win_event = ctx.win_event.lock().unwrap();
+            win_event
+                .windows
+                .get(&hwnd)
+                .map(|win| {
+                    let metrics = USER32::get_window_frame_metrics(win);
+                    let mut rect_w = win.width;
+                    let mut rect_h = win.height;
+                    rect_w = (rect_w - metrics.left - metrics.right).max(0);
+                    rect_h = (rect_h - metrics.top - metrics.bottom).max(0);
+                    (rect_w, rect_h)
+                })
+                .unwrap_or((640, 480))
+        }
     };
 
+    // GetClientRect는 항상 클라이언트 좌표계 원점(0, 0)을 기준으로 돌려줍니다.
     uc.write_u32(rect_addr as u64, 0);
     uc.write_u32(rect_addr as u64 + 4, 0);
     uc.write_u32(rect_addr as u64 + 8, w as u32);
@@ -810,12 +897,26 @@ pub(super) fn set_window_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
     let b_redraw = uc.read_arg(2);
 
     let ctx = uc.get_data();
+    let window_size = {
+        let win_event = ctx.win_event.lock().unwrap();
+        win_event
+            .windows
+            .get(&hwnd)
+            .map(|win| (win.width, win.height))
+    };
+    let guest_metrics = window_size
+        .map(|(width, height)| estimate_guest_frame_metrics(ctx, h_rgn, width, height))
+        .unwrap_or_default();
     let mut win_event = ctx.win_event.lock().unwrap();
 
     let ret = if let Some(win) = win_event.get_window_mut(hwnd) {
         let had_rgn = win.window_rgn != 0;
         let has_rgn = h_rgn != 0;
         win.window_rgn = h_rgn;
+        win.guest_frame_left = guest_metrics.left;
+        win.guest_frame_top = guest_metrics.top;
+        win.guest_frame_right = guest_metrics.right;
+        win.guest_frame_bottom = guest_metrics.bottom;
         win_event.bump_generation();
         if had_rgn != has_rgn {
             win_event.send_ui_command(crate::ui::UiCommand::SetWindowTransparent {
@@ -909,4 +1010,35 @@ pub(super) fn get_focus(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
     let focus = ctx.focus_hwnd.load(std::sync::atomic::Ordering::SeqCst);
     crate::emu_log!("[USER32] GetFocus() -> HWND {:#x}", focus);
     Some(ApiHookResult::callee(0, Some(focus as i32)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimate_guest_frame_metrics;
+    use crate::dll::win32::{GdiObject, Win32Context};
+
+    #[test]
+    fn rounded_region_produces_uniform_guest_frame_inset() {
+        let ctx = Win32Context::new(None);
+        let hrgn = ctx.alloc_handle();
+        ctx.gdi_objects.lock().unwrap().insert(
+            hrgn,
+            GdiObject::Region {
+                rects: vec![
+                    (2, 0, 8, 1),
+                    (1, 1, 9, 2),
+                    (0, 2, 10, 8),
+                    (1, 8, 9, 9),
+                    (2, 9, 8, 10),
+                ],
+            },
+        );
+
+        let metrics = estimate_guest_frame_metrics(&ctx, hrgn, 10, 10);
+
+        assert_eq!(metrics.left, 2);
+        assert_eq!(metrics.top, 2);
+        assert_eq!(metrics.right, 2);
+        assert_eq!(metrics.bottom, 2);
+    }
 }

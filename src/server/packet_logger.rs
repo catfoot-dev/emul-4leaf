@@ -25,6 +25,7 @@ pub enum PacketDirection {
 #[derive(Debug, Clone)]
 pub struct CapturedPacket {
     /// 패킷 로거 시작 이후로 흐른 시간 (밀리초 단위)
+    #[allow(dead_code)]
     pub timestamp_ms: u64,
     /// 해당 패킷이 송신된 것인지, 수신된 것인지 방향 식별
     pub direction: PacketDirection,
@@ -85,17 +86,6 @@ impl PacketLogger {
                 .map(|b| format!("{:02x}", b))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let ascii: String = data
-                .iter()
-                .map(|&b| {
-                    if (0x20..=0x7e).contains(&b) {
-                        b as char
-                    } else {
-                        '.'
-                    }
-                })
-                .collect();
-
             crate::emu_socket_log!(
                 "[{}] t={}ms sock={} len={} | {}",
                 dir_str,
@@ -365,16 +355,19 @@ impl PacketLogger {
     }
 
     /// 현재 로거에 기록된(캡처된) 총 패킷의 개수를 반환
+    #[allow(dead_code)]
     pub fn packet_count(&self) -> usize {
         self.packets.len()
     }
 
     /// 현재 캡처된 모든 패킷 데이터의 읽기 전용 슬라이스를 반환
+    #[allow(dead_code)]
     pub fn get_packets(&self) -> &VecDeque<CapturedPacket> {
         &self.packets
     }
 
     /// 여태까지 캡처한 전체 패킷의 개수(`Send`/`Recv` 별)와 총 바이트 크기를 계산하여 콘솔에 요약 정보로 출력
+    #[allow(dead_code)]
     pub fn print_summary(&self) {
         let send_count = self
             .packets

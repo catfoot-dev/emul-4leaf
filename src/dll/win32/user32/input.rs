@@ -1,6 +1,16 @@
-use crate::dll::win32::{ApiHookResult, CursorFrame, GdiObject, Win32Context};
+use crate::dll::win32::{ApiHookResult, CursorFrame, GdiObject, IconFrame, Win32Context};
 use crate::helper::UnicornHelper;
+use goblin::pe::PE;
+use std::sync::atomic::Ordering;
 use unicorn_engine::Unicorn;
+
+use super::USER32;
+
+const SPI_GETWORKAREA: u32 = 0x0030;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const IDI_APPLICATION: u32 = 32512;
+const RT_ICON: u32 = 3;
+const RT_GROUP_ICON: u32 = 14;
 
 // API: HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName)
 pub(super) fn load_cursor_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -9,7 +19,7 @@ pub(super) fn load_cursor_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     let ctx = uc.get_data();
 
     let (res_id, name) = if lpcursorname < 0x10000 {
-        (lpcursorname as u32, None)
+        (lpcursorname, None)
     } else {
         (0, Some(uc.read_string(lpcursorname as u64)))
     };
@@ -81,12 +91,11 @@ pub(super) fn load_cursor_from_file_a(uc: &mut Unicorn<Win32Context>) -> Option<
                             data[list_pos + 4..list_pos + 8].try_into().unwrap(),
                         ) as usize;
                         list_pos += 8;
-                        if item_id == b"icon" {
-                            if let Some(frame) =
+                        if item_id == b"icon"
+                            && let Some(frame) =
                                 parse_cur_data(&data[list_pos..list_pos + item_size])
-                            {
-                                frames.push(frame);
-                            }
+                        {
+                            frames.push(frame);
                         }
                         list_pos += (item_size + 1) & !1;
                     }
@@ -131,32 +140,235 @@ pub(super) fn load_icon_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
     let ctx = uc.get_data();
 
     let (res_id, name) = if lpiconname < 0x10000 {
-        (lpiconname as u32, None)
+        (lpiconname, None)
     } else {
         (0, Some(uc.read_string(lpiconname as u64)))
     };
+    let frames = if instance != 0 || res_id == IDI_APPLICATION {
+        load_application_icon_frames(if res_id != 0 { Some(res_id) } else { None })
+    } else {
+        Vec::new()
+    };
 
     let handle = ctx.alloc_handle();
+    let frames_len = frames.len();
     ctx.gdi_objects.lock().unwrap().insert(
         handle,
         GdiObject::Icon {
             resource_id: res_id,
             name: name.clone(),
-            frames: Vec::new(),
+            frames,
         },
     );
 
     crate::emu_log!(
-        "[USER32] LoadIconA({:#x}, {}) -> HICON {:#x}",
+        "[USER32] LoadIconA({:#x}, {}) -> HICON {:#x} (frames: {})",
         instance,
         if let Some(n) = name {
             n
         } else {
             format!("#{}", res_id)
         },
-        handle
+        handle,
+        frames_len
     );
     Some(ApiHookResult::callee(2, Some(handle as i32)))
+}
+
+fn load_application_icon_frames(requested_group_id: Option<u32>) -> Vec<IconFrame> {
+    let exe_path = crate::resource_dir().join("4Leaf.exe");
+    let Ok(buffer) = std::fs::read(&exe_path) else {
+        return Vec::new();
+    };
+    let Ok(pe) = PE::parse(&buffer) else {
+        return Vec::new();
+    };
+    let Some(resource_dir_info) = pe
+        .header
+        .optional_header
+        .and_then(|opt| opt.data_directories.get_resource_table().copied())
+    else {
+        return Vec::new();
+    };
+
+    let r_rva = resource_dir_info.virtual_address;
+    let r_size = resource_dir_info.size as usize;
+    let r_offset = rva_to_offset(&pe, r_rva);
+    if r_offset == 0 || r_offset.saturating_add(r_size) > buffer.len() {
+        return Vec::new();
+    }
+
+    let res_section = &buffer[r_offset..r_offset + r_size];
+    let Some(group_icon_data) =
+        find_resource_data(res_section, &pe, &buffer, RT_GROUP_ICON, requested_group_id)
+    else {
+        return Vec::new();
+    };
+    if group_icon_data.len() < 6 {
+        return Vec::new();
+    }
+
+    let count = u16::from_le_bytes([group_icon_data[4], group_icon_data[5]]) as usize;
+    let mut frames = Vec::new();
+
+    for index in 0..count {
+        let entry_offset = 6 + index * 14;
+        if entry_offset + 14 > group_icon_data.len() {
+            break;
+        }
+
+        let bytes_in_res = u32::from_le_bytes(
+            group_icon_data[entry_offset + 8..entry_offset + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let icon_resource_id = u16::from_le_bytes(
+            group_icon_data[entry_offset + 12..entry_offset + 14]
+                .try_into()
+                .unwrap(),
+        ) as u32;
+        let Some(icon_data) =
+            find_resource_data(res_section, &pe, &buffer, RT_ICON, Some(icon_resource_id))
+        else {
+            continue;
+        };
+        let Some(ico_data) = build_ico_from_group_entry(
+            &group_icon_data[entry_offset..entry_offset + 14],
+            icon_data,
+            bytes_in_res,
+        ) else {
+            continue;
+        };
+        if let Some(frame) = parse_icon_data(&ico_data) {
+            frames.push(frame);
+        }
+    }
+
+    frames
+}
+
+fn build_ico_from_group_entry(
+    entry: &[u8],
+    icon_data: &[u8],
+    bytes_in_res: u32,
+) -> Option<Vec<u8>> {
+    if entry.len() < 14 {
+        return None;
+    }
+
+    let icon_dir_offset: usize = 6 + 16;
+    let total_len = icon_dir_offset.checked_add(icon_data.len())?;
+    let mut ico = vec![0u8; total_len];
+    ico[2..4].copy_from_slice(&1u16.to_le_bytes());
+    ico[4..6].copy_from_slice(&1u16.to_le_bytes());
+    ico[6] = entry[0];
+    ico[7] = entry[1];
+    ico[8] = entry[2];
+    ico[9] = entry[3];
+    ico[10..12].copy_from_slice(&entry[4..6]);
+    ico[12..14].copy_from_slice(&entry[6..8]);
+    ico[14..18].copy_from_slice(&bytes_in_res.to_le_bytes());
+    ico[18..22].copy_from_slice(&(icon_dir_offset as u32).to_le_bytes());
+    ico[icon_dir_offset..].copy_from_slice(icon_data);
+    Some(ico)
+}
+
+fn parse_icon_data(data: &[u8]) -> Option<IconFrame> {
+    let frame = parse_cur_data(data)?;
+    Some(IconFrame {
+        width: frame.width,
+        height: frame.height,
+        pixels: frame.pixels,
+    })
+}
+
+fn find_resource_data<'a>(
+    res_section: &'a [u8],
+    pe: &PE,
+    buffer: &'a [u8],
+    type_id: u32,
+    requested_id: Option<u32>,
+) -> Option<&'a [u8]> {
+    let (_, type_entry_offset) = find_resource_entry(res_section, 0, Some(type_id))?;
+    let type_dir_offset = (type_entry_offset & 0x7FFF_FFFF) as usize;
+    let (_, name_entry_offset) = find_resource_entry(res_section, type_dir_offset, requested_id)
+        .or_else(|| find_resource_entry(res_section, type_dir_offset, None))?;
+    let name_dir_offset = (name_entry_offset & 0x7FFF_FFFF) as usize;
+    let (_, lang_entry_offset) = find_resource_entry(res_section, name_dir_offset, None)?;
+    if (lang_entry_offset & 0x8000_0000) != 0 {
+        return None;
+    }
+
+    let data_entry_offset = lang_entry_offset as usize;
+    if data_entry_offset + 16 > res_section.len() {
+        return None;
+    }
+
+    let data_rva = u32::from_le_bytes(
+        res_section[data_entry_offset..data_entry_offset + 4]
+            .try_into()
+            .ok()?,
+    );
+    let data_size = u32::from_le_bytes(
+        res_section[data_entry_offset + 4..data_entry_offset + 8]
+            .try_into()
+            .ok()?,
+    ) as usize;
+    let file_offset = rva_to_offset(pe, data_rva);
+    (file_offset != 0 && file_offset.saturating_add(data_size) <= buffer.len())
+        .then_some(&buffer[file_offset..file_offset + data_size])
+}
+
+fn find_resource_entry(
+    section: &[u8],
+    dir_offset: usize,
+    wanted_id: Option<u32>,
+) -> Option<(u32, u32)> {
+    if dir_offset + 16 > section.len() {
+        return None;
+    }
+
+    let named_entries =
+        u16::from_le_bytes(section[dir_offset + 12..dir_offset + 14].try_into().ok()?);
+    let id_entries = u16::from_le_bytes(section[dir_offset + 14..dir_offset + 16].try_into().ok()?);
+    let total_entries = named_entries + id_entries;
+    let mut fallback = None;
+
+    for index in 0..total_entries {
+        let entry_offset = dir_offset + 16 + index as usize * 8;
+        if entry_offset + 8 > section.len() {
+            break;
+        }
+        let name_or_id =
+            u32::from_le_bytes(section[entry_offset..entry_offset + 4].try_into().ok()?);
+        let offset_to_data = u32::from_le_bytes(
+            section[entry_offset + 4..entry_offset + 8]
+                .try_into()
+                .ok()?,
+        );
+
+        if fallback.is_none() {
+            fallback = Some((name_or_id, offset_to_data));
+        }
+
+        if let Some(wanted_id) = wanted_id
+            && (name_or_id & 0x8000_0000) == 0
+            && name_or_id == wanted_id
+        {
+            return Some((name_or_id, offset_to_data));
+        }
+    }
+
+    fallback
+}
+
+fn rva_to_offset(pe: &PE, rva: u32) -> usize {
+    for section in &pe.sections {
+        if rva >= section.virtual_address && rva < section.virtual_address + section.virtual_size {
+            return (rva - section.virtual_address + section.pointer_to_raw_data) as usize;
+        }
+    }
+    0
 }
 
 pub(super) fn dib_row_stride(width: u32, bits_per_pixel: u16) -> Option<usize> {
@@ -207,7 +419,7 @@ pub(super) fn parse_cur_data(data: &[u8]) -> Option<CursorFrame> {
     }
 
     if width == 0 {
-        width = bi_width.abs() as u32;
+        width = bi_width.unsigned_abs();
     }
     if height == 0 {
         height = (bi_height.abs() / 2) as u32;
@@ -365,8 +577,8 @@ pub(super) fn set_cursor(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
         .current_cursor
         .swap(hcursor, std::sync::atomic::Ordering::SeqCst);
 
-    // UI 스레드에도 커서 변경 알림 (현재 포커스된 창 기준)
-    let hwnd = ctx.focus_hwnd.load(std::sync::atomic::Ordering::SeqCst);
+    // UI 스레드에도 커서 변경 알림을 보내되, 현재 wndproc 문맥의 HWND를 우선 사용합니다.
+    let hwnd = USER32::resolve_cursor_target_hwnd(ctx);
     if hwnd != 0 {
         ctx.win_event
             .lock()
@@ -398,14 +610,14 @@ pub(super) fn map_window_points(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
         (0, 0)
     } else {
         let win_event = uc.get_data().win_event.lock().unwrap();
-        win_event.window_screen_origin(hwnd_from).unwrap_or((0, 0))
+        win_event.client_screen_origin(hwnd_from).unwrap_or((0, 0))
     };
 
     let (to_x, to_y) = if hwnd_to == 0 {
         (0, 0)
     } else {
         let win_event = uc.get_data().win_event.lock().unwrap();
-        win_event.window_screen_origin(hwnd_to).unwrap_or((0, 0))
+        win_event.client_screen_origin(hwnd_to).unwrap_or((0, 0))
     };
 
     let dx = from_x - to_x;
@@ -439,24 +651,56 @@ pub(super) fn system_parameters_info_a(uc: &mut Unicorn<Win32Context>) -> Option
     let pv_param = uc.read_arg(2);
     let f_win_ini = uc.read_arg(3);
 
-    match ui_action {
-        0x30 => {
-            // SPI_GETWORKAREA
-            uc.write_u32(pv_param as u64, 0); // left
-            uc.write_u32(pv_param as u64 + 4, 0); // top
-            uc.write_u32(pv_param as u64 + 8, 800); // right
-            uc.write_u32(pv_param as u64 + 12, 600); // bottom
+    let ret = match ui_action {
+        SPI_GETWORKAREA => {
+            if pv_param == 0 {
+                uc.get_data()
+                    .last_error
+                    .store(ERROR_INVALID_PARAMETER, Ordering::SeqCst);
+                crate::emu_log!(
+                    "[USER32] SystemParametersInfoA({:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 0 (pvParam is NULL)",
+                    ui_action,
+                    ui_param,
+                    pv_param,
+                    f_win_ini
+                );
+                0
+            } else {
+                let (left, top, right, bottom) = uc.get_data().work_area_rect();
+
+                // 게스트가 넘긴 RECT 버퍼에 현재 가상 작업 영역을 그대로 기록합니다.
+                uc.write_u32(pv_param as u64, left as u32);
+                uc.write_u32(pv_param as u64 + 4, top as u32);
+                uc.write_u32(pv_param as u64 + 8, right as u32);
+                uc.write_u32(pv_param as u64 + 12, bottom as u32);
+                uc.get_data().last_error.store(0, Ordering::SeqCst);
+                crate::emu_log!(
+                    "[USER32] SystemParametersInfoA({:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1, work_area=({}, {}, {}, {})",
+                    ui_action,
+                    ui_param,
+                    pv_param,
+                    f_win_ini,
+                    left,
+                    top,
+                    right,
+                    bottom
+                );
+                1
+            }
         }
-        _ => {}
+        _ => {
+            crate::emu_log!(
+                "[USER32] SystemParametersInfoA({:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1 (stub)",
+                ui_action,
+                ui_param,
+                pv_param,
+                f_win_ini
+            );
+            1
+        }
     };
-    crate::emu_log!(
-        "[USER32] SystemParametersInfoA({:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
-        ui_action,
-        ui_param,
-        pv_param,
-        f_win_ini
-    );
-    Some(ApiHookResult::callee(4, Some(1)))
+
+    Some(ApiHookResult::callee(4, Some(ret)))
 }
 
 // API: BOOL GetCursorPos(LPPOINT lpPoint)
@@ -503,14 +747,14 @@ pub(super) fn set_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> 
     uc.write_u32(rect_addr as u64 + 4, top as u32);
     uc.write_u32(rect_addr as u64 + 8, right as u32);
     uc.write_u32(rect_addr as u64 + 12, bottom as u32);
-    crate::emu_log!(
-        "[USER32] SetRect({:#x}, {}, {}, {}, {}) -> BOOL 1",
-        rect_addr,
-        left,
-        top,
-        right,
-        bottom
-    );
+    // crate::emu_log!(
+    //     "[USER32] SetRect({:#x}, {}, {}, {}, {}) -> BOOL 1",
+    //     rect_addr,
+    //     left,
+    //     top,
+    //     right,
+    //     bottom
+    // );
     Some(ApiHookResult::callee(5, Some(1)))
 }
 
@@ -610,9 +854,7 @@ pub(super) fn get_clipboard_data(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
             if cb.is_empty() {
                 (0, Vec::new())
             } else {
-                let ptr = ctx
-                    .heap_cursor
-                    .fetch_add(cb.len() as u32 + 1, std::sync::atomic::Ordering::SeqCst);
+                let ptr = ctx.alloc_heap_block(cb.len() + 1).unwrap_or(0);
                 (ptr, cb.clone())
             }
         };
@@ -748,7 +990,7 @@ pub(super) fn screen_to_client(uc: &mut Unicorn<Win32Context>) -> Option<ApiHook
     let (win_x, win_y) = {
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
-        win_event.window_screen_origin(hwnd).unwrap_or((0, 0))
+        win_event.client_screen_origin(hwnd).unwrap_or((0, 0))
     };
     let x = uc.read_u32(pt_addr as u64) as i32;
     let y = uc.read_u32(pt_addr as u64 + 4) as i32;
@@ -769,7 +1011,7 @@ pub(super) fn client_to_screen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHook
     let (win_x, win_y) = {
         let ctx = uc.get_data();
         let win_event = ctx.win_event.lock().unwrap();
-        win_event.window_screen_origin(hwnd).unwrap_or((0, 0))
+        win_event.client_screen_origin(hwnd).unwrap_or((0, 0))
     };
     let x = uc.read_u32(pt_addr as u64) as i32;
     let y = uc.read_u32(pt_addr as u64 + 4) as i32;
@@ -864,5 +1106,60 @@ pub(super) fn get_sys_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         _ => 0x00808080,
     };
     crate::emu_log!("[USER32] GetSysColor({:#x}) -> COLOR {:#x}", index, color);
-    Some(ApiHookResult::callee(1, Some(color as i32)))
+    Some(ApiHookResult::callee(1, Some(color)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dll::win32::StackCleanup;
+    use unicorn_engine::{Arch, Mode, RegisterX86, Unicorn};
+
+    fn new_test_uc() -> Unicorn<'static, Win32Context> {
+        let mut uc =
+            Unicorn::new_with_data(Arch::X86, Mode::MODE_32, Win32Context::new(None)).unwrap();
+        uc.setup(None, None).unwrap();
+        uc
+    }
+
+    fn write_call_frame(uc: &mut Unicorn<Win32Context>, args: &[u32]) {
+        let esp = uc.reg_read(RegisterX86::ESP).unwrap() as u32;
+        uc.write_u32(esp as u64, 0xDEAD_BEEF);
+        for (index, value) in args.iter().enumerate() {
+            uc.write_u32(esp as u64 + 4 + (index as u64 * 4), *value);
+        }
+    }
+
+    #[test]
+    fn system_parameters_info_getworkarea_writes_current_work_area() {
+        let mut uc = new_test_uc();
+        uc.get_data().set_work_area(-8, 16, 1912, 1048);
+        let rect_addr = uc.malloc(16) as u32;
+
+        write_call_frame(&mut uc, &[SPI_GETWORKAREA, 0, rect_addr, 0]);
+        let result = system_parameters_info_a(&mut uc).unwrap();
+
+        assert_eq!(result.cleanup, StackCleanup::Callee(4));
+        assert_eq!(result.return_value, Some(1));
+        assert_eq!(uc.read_u32(rect_addr as u64) as i32, -8);
+        assert_eq!(uc.read_u32(rect_addr as u64 + 4) as i32, 16);
+        assert_eq!(uc.read_u32(rect_addr as u64 + 8) as i32, 1912);
+        assert_eq!(uc.read_u32(rect_addr as u64 + 12) as i32, 1048);
+        assert_eq!(uc.get_data().last_error.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn system_parameters_info_getworkarea_rejects_null_rect_pointer() {
+        let mut uc = new_test_uc();
+
+        write_call_frame(&mut uc, &[SPI_GETWORKAREA, 0, 0, 0]);
+        let result = system_parameters_info_a(&mut uc).unwrap();
+
+        assert_eq!(result.cleanup, StackCleanup::Callee(4));
+        assert_eq!(result.return_value, Some(0));
+        assert_eq!(
+            uc.get_data().last_error.load(Ordering::SeqCst),
+            ERROR_INVALID_PARAMETER
+        );
+    }
 }

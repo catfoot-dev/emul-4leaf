@@ -14,7 +14,7 @@ impl COMCTL32 {
     // 역할: 지정된 윈도우에서 마우스 포인터가 벗어나거나 일정 시간 머무를 때 메시지를 게시하도록 요청
     pub fn _track_mouse_event(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let lp_event_track = uc.read_arg(0);
-        let size = uc.read_u32(lp_event_track as u64 + 0);
+        let size = uc.read_u32(lp_event_track as u64);
         let flags = uc.read_u32(lp_event_track as u64 + 4);
         let hwnd = uc.read_u32(lp_event_track as u64 + 8);
         let hover_time = uc.read_u32(lp_event_track as u64 + 12);

@@ -163,6 +163,7 @@ pub fn write_u32(v: u32) -> [u8; 4] {
 }
 
 /// `u16`를 little-endian 2바이트로 직렬화합니다.
+#[allow(dead_code)]
 pub fn write_u16(v: u16) -> [u8; 2] {
     v.to_le_bytes()
 }

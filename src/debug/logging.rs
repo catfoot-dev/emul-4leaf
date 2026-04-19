@@ -52,18 +52,18 @@ pub fn push_log(msg: String) {
         return;
     }
     if should_mirror_logs_to_stderr() {
-        eprintln!("[EMU] {}", msg);
+        println!("[EMU] {}", msg);
     }
-    if let Some(buf) = LOG_BUFFER.get() {
-        if let Ok(mut b) = buf.lock() {
-            for line in msg.lines() {
-                b.push_back(line.to_string());
-                if b.len() > LOG_SCROLL_MAX {
-                    b.pop_front();
-                }
+    if let Some(buf) = LOG_BUFFER.get()
+        && let Ok(mut b) = buf.lock()
+    {
+        for line in msg.lines() {
+            b.push_back(line.to_string());
+            if b.len() > LOG_SCROLL_MAX {
+                b.pop_front();
             }
-            LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -79,17 +79,17 @@ pub fn push_socket_log(msg: String) {
     if !crate::debug::should_send_debug_messages() {
         return;
     }
-    // eprintln!("[SOCK] {}", msg);
-    if let Some(buf) = SOCKET_LOG_BUFFER.get() {
-        if let Ok(mut b) = buf.lock() {
-            for line in msg.lines() {
-                b.push_back(line.to_string());
-                if b.len() > 200 {
-                    b.pop_front();
-                }
+    // println!("[SOCK] {}", msg);
+    if let Some(buf) = SOCKET_LOG_BUFFER.get()
+        && let Ok(mut b) = buf.lock()
+    {
+        for line in msg.lines() {
+            b.push_back(line.to_string());
+            if b.len() > 200 {
+                b.pop_front();
             }
-            SOCKET_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        SOCKET_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -100,6 +100,8 @@ pub fn init_logger() {
     reset_capture_file("packets.log");
     reset_capture_file("frames.log");
     reset_capture_file("protocol_analysis.log");
+    reset_capture_file("hbitmap.log");
+    reset_capture_file("wallpaper.log");
 
     if crate::debug::should_send_debug_messages() {
         let _ = LOG_BUFFER.set(Mutex::new(VecDeque::new()));
@@ -109,9 +111,6 @@ pub fn init_logger() {
 
 /// 현재 실행에서 캡처 파일을 기록할지 여부를 결정합니다.
 pub(crate) fn should_write_capture_files() -> bool {
-    if cfg!(test) {
-        return false;
-    }
     crate::debug::should_send_debug_messages()
         || env::var("EMUL_CAPTURE").ok().as_deref() == Some("1")
 }

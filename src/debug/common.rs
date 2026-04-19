@@ -21,6 +21,4 @@ pub enum DebugCommand {
     Run,
     /// F5: 자동 연속 실행 중 멈춤(Step 모드로 전환)
     Pause,
-    /// 내부/외부적인 요인에 의한 강제 에뮬레이션 종료
-    Stop,
 }

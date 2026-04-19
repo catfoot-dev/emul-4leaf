@@ -16,7 +16,7 @@ pub(super) fn global_alloc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResu
     let size = uc.read_arg(1);
     let addr = uc.malloc(size as usize);
     // `GMEM_ZEROINIT`일 때만 원본과 같이 0으로 초기화합니다.
-    if flags & GMEM_ZEROINIT != 0 {
+    if addr != 0 && flags & GMEM_ZEROINIT != 0 {
         let zeros = vec![0u8; size as usize];
         uc.mem_write(addr, &zeros).unwrap();
     }
@@ -54,6 +54,11 @@ pub(super) fn global_unlock(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
 // 역할: 지정된 전역 메모리 개체를 해제
 pub(super) fn global_free(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let handle = uc.read_arg(0);
-    crate::emu_log!("[KERNEL32] GlobalFree({:#x}) -> HGLOBAL 0", handle);
+    let released = handle != 0 && uc.get_data().free_heap_block(handle);
+    crate::emu_log!(
+        "[KERNEL32] GlobalFree({:#x}) -> HGLOBAL 0 (released={})",
+        handle,
+        released
+    );
     Some(ApiHookResult::callee(1, Some(0))) // 성공 시 NULL
 }

@@ -8,6 +8,18 @@ use unicorn_engine::Unicorn;
 
 use super::USER32;
 
+fn write_point(uc: &mut Unicorn<Win32Context>, addr: u64, x: i32, y: i32) {
+    uc.write_u32(addr, x as u32);
+    uc.write_u32(addr + 4, y as u32);
+}
+
+/// `MSG` 구조체 7개 DWORD 슬롯을 0으로 초기화합니다.
+fn clear_msg_struct(uc: &mut Unicorn<Win32Context>, lp_msg: u32) {
+    for index in 0..7 {
+        uc.write_u32(lp_msg as u64 + (index * 4) as u64, 0);
+    }
+}
+
 // API: LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 // 역할: 지정된 창에 메시지를 전송하고 처리가 완료될 때까지 대기
 pub(super) fn send_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -145,6 +157,12 @@ pub(super) fn dispatch_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     let msg = uc.read_u32(lp_msg as u64 + 4);
     let w_param = uc.read_u32(lp_msg as u64 + 8);
     let l_param = uc.read_u32(lp_msg as u64 + 12);
+    let time = uc.read_u32(lp_msg as u64 + 16);
+
+    if msg == 0x0113 && l_param != 0 {
+        USER32::dispatch_to_timer_proc(uc, l_param, hwnd, w_param, time);
+        return Some(ApiHookResult::callee(1, Some(0)));
+    }
 
     let wnd_proc = {
         let ctx = uc.get_data();
@@ -165,7 +183,7 @@ pub(super) fn dispatch_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
 // 역할: 메시지를 번역
 pub(super) fn translate_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let lp_msg = uc.read_arg(0);
-    let hwnd = uc.read_u32(lp_msg as u64 + 0);
+    let hwnd = uc.read_u32(lp_msg as u64);
     let msg = uc.read_u32(lp_msg as u64 + 4);
     let vk = uc.read_u32(lp_msg as u64 + 8);
     let l_param = uc.read_u32(lp_msg as u64 + 12);
@@ -253,6 +271,7 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
     // 타 스레드 스케줄링 (협력적 멀티태스킹 유도)
     KERNEL32::schedule_threads(uc);
 
+    let mut cleared_paint_hwnd = 0u32;
     let msg = {
         let ctx = uc.get_data();
 
@@ -276,10 +295,8 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
             }
 
             // 메시지 범위 필터링: min/max가 0이면 모든 메시지
-            if msg_min != 0 || msg_max != 0 {
-                if m_type < msg_min || m_type > msg_max {
-                    continue;
-                }
+            if (msg_min != 0 || msg_max != 0) && (m_type < msg_min || m_type > msg_max) {
+                continue;
             }
 
             found_idx = Some(i);
@@ -287,6 +304,9 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         }
 
         if let Some(idx) = found_idx {
+            if (remove_flag & 0x0001) != 0 && q[idx][1] == 0x000F {
+                cleared_paint_hwnd = q[idx][0];
+            }
             if (remove_flag & 0x0001) != 0 {
                 q.remove(idx)
             } else {
@@ -309,6 +329,10 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
                             continue;
                         }
                         synthesized = Some([*hwnd, 0x000F, 0, 0, 0, 0, 0]);
+                        if (remove_flag & 0x0001) != 0 {
+                            state.needs_paint = false;
+                            cleared_paint_hwnd = *hwnd;
+                        }
                         break;
                     }
                 }
@@ -316,6 +340,23 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
             synthesized
         }
     };
+
+    if cleared_paint_hwnd != 0 {
+        let ctx = uc.get_data();
+        if let Some(state) = ctx
+            .win_event
+            .lock()
+            .unwrap()
+            .windows
+            .get_mut(&cleared_paint_hwnd)
+        {
+            state.needs_paint = false;
+        }
+        crate::emu_log!(
+            "[USER32] PeekMessageA cleared paint state for HWND {:#x}",
+            cleared_paint_hwnd
+        );
+    }
 
     let (time, pt_x, pt_y) = {
         let ctx = uc.get_data();
@@ -373,7 +414,7 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         }
 
         // MSG 구조체 채우기
-        uc.write_u32(lp_msg as u64 + 0, m[0]); // hwnd
+        uc.write_u32(lp_msg as u64, m[0]); // hwnd
         uc.write_u32(lp_msg as u64 + 4, m[1]); // message
         uc.write_u32(lp_msg as u64 + 8, m[2]); // wParam
         uc.write_u32(lp_msg as u64 + 12, m[3]); // lParam
@@ -382,6 +423,9 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         uc.write_u32(lp_msg as u64 + 24, m[6].max(pt_y)); // pt.y
         1
     } else {
+        // 메시지가 없을 때 이전 MSG 내용이 남아 있으면 호출자가 오래된 커스텀 메시지를
+        // 다시 Dispatch하는 루프에 빠질 수 있으므로 구조체 전체를 비웁니다.
+        clear_msg_struct(uc, lp_msg);
         0
     };
 
@@ -410,6 +454,7 @@ pub(super) fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     let _min = uc.read_arg(2);
     let _max = uc.read_arg(3);
 
+    let mut cleared_paint_hwnd = 0u32;
     let msg = {
         let ctx = uc.get_data(); // Immutable borrow of ctx
         let mut q = ctx.message_queue.lock().unwrap();
@@ -430,13 +475,20 @@ pub(super) fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
             }
         }
 
-        q.pop_front()
+        let popped = q.pop_front();
+        if let Some(msg) = popped
+            && msg[1] == 0x000F
+        {
+            cleared_paint_hwnd = msg[0];
+        }
+        popped
     };
 
     // 메시지가 없으면 retry를 반환하여 에뮬레이터 메인 루프에 양보합니다.
     // 메인 루프가 schedule_threads() 호출 및 idle sleep을 처리하므로
     // 여기서 직접 sleep/polling 할 필요가 없습니다.
     if msg.is_none() {
+        clear_msg_struct(uc, lp_msg);
         // 메인 스레드가 idle 상태임을 표시하여 메인 루프의 idle sleep이 작동하도록 합니다.
         let ctx = uc.get_data();
         let resume = Instant::now() + std::time::Duration::from_millis(1);
@@ -445,6 +497,23 @@ pub(super) fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     }
 
     if let Some(mut m) = msg {
+        if cleared_paint_hwnd != 0 {
+            let ctx = uc.get_data();
+            if let Some(state) = ctx
+                .win_event
+                .lock()
+                .unwrap()
+                .windows
+                .get_mut(&cleared_paint_hwnd)
+            {
+                state.needs_paint = false;
+            }
+            crate::emu_log!(
+                "[USER32] GetMessageA cleared paint state for HWND {:#x}",
+                cleared_paint_hwnd
+            );
+        }
+
         if m[1] >= 0x0200 && m[1] <= 0x0209 {
             let hwnd = m[0];
             let wnd_proc = {
@@ -498,7 +567,7 @@ pub(super) fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         Some(ApiHookResult::callee(4, Some(if is_quit { 0 } else { 1 })))
     } else {
         // No message (Note: native GetMessage blocks, but for now we return WM_NULL)
-        uc.write_u32(lp_msg as u64 + 4, 0); // message = 0 (WM_NULL)
+        clear_msg_struct(uc, lp_msg);
         Some(ApiHookResult::callee(4, Some(1)))
     }
 }
@@ -510,9 +579,9 @@ pub(super) fn msg_wait_for_multiple_objects(
 ) -> Option<ApiHookResult> {
     let n_count = uc.read_arg(0);
     let p_handles = uc.read_arg(1);
-    let f_wait_all = uc.read_arg(2);
+    let _f_wait_all = uc.read_arg(2);
     let dw_milliseconds = uc.read_arg(3);
-    let dw_wake_mask = uc.read_arg(4);
+    let _dw_wake_mask = uc.read_arg(4);
 
     // 타 스레드 스케줄링
     KERNEL32::schedule_threads(uc);
@@ -531,40 +600,40 @@ pub(super) fn msg_wait_for_multiple_objects(
 
     if USER32::has_pending_ui_message(ctx) {
         KERNEL32::clear_retry_wait(ctx, tid);
-        crate::emu_log!(
-            "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> message",
-            n_count,
-            p_handles,
-            f_wait_all,
-            dw_milliseconds,
-            dw_wake_mask
-        );
+        // crate::emu_log!(
+        //     "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> message",
+        //     n_count,
+        //     p_handles,
+        //     f_wait_all,
+        //     dw_milliseconds,
+        //     dw_wake_mask
+        // );
         return Some(ApiHookResult::callee(5, Some(n_count as i32)));
     }
 
     if let Some(index) = KERNEL32::first_ready_wait_handle(ctx, &handles) {
         KERNEL32::clear_retry_wait(ctx, tid);
-        crate::emu_log!(
-            "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> WAIT_OBJECT_0+{}",
-            n_count,
-            p_handles,
-            f_wait_all,
-            dw_milliseconds,
-            dw_wake_mask,
-            index
-        );
+        // crate::emu_log!(
+        //     "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> WAIT_OBJECT_0+{}",
+        //     n_count,
+        //     p_handles,
+        //     f_wait_all,
+        //     dw_milliseconds,
+        //     dw_wake_mask,
+        //     index
+        // );
         return Some(ApiHookResult::callee(5, Some(index as i32)));
     }
 
     if dw_milliseconds == 0 {
         KERNEL32::clear_retry_wait(ctx, tid);
-        crate::emu_log!(
-            "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, 0, {:#x}) -> WAIT_TIMEOUT",
-            n_count,
-            p_handles,
-            f_wait_all,
-            dw_wake_mask
-        );
+        // crate::emu_log!(
+        //     "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, 0, {:#x}) -> WAIT_TIMEOUT",
+        //     n_count,
+        //     p_handles,
+        //     f_wait_all,
+        //     dw_wake_mask
+        // );
         return Some(ApiHookResult::callee(5, Some(0x102)));
     }
 
@@ -581,14 +650,14 @@ pub(super) fn msg_wait_for_multiple_objects(
         && now >= limit
     {
         KERNEL32::clear_retry_wait(ctx, tid);
-        crate::emu_log!(
-            "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> WAIT_TIMEOUT",
-            n_count,
-            p_handles,
-            f_wait_all,
-            dw_milliseconds,
-            dw_wake_mask
-        );
+        // crate::emu_log!(
+        //     "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> WAIT_TIMEOUT",
+        //     n_count,
+        //     p_handles,
+        //     f_wait_all,
+        //     dw_milliseconds,
+        //     dw_wake_mask
+        // );
         return Some(ApiHookResult::callee(5, Some(0x102)));
     }
 
@@ -747,27 +816,11 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
         0x0011 => 1, // WM_QUERYENDSESSION
         0x0014 => {
             // WM_ERASEBKGND
-            // 기본 회색(COLOR_BTNFACE 대용)으로 배경 채우기
-            let surface_bitmap = {
-                let ctx = uc.get_data();
-                let win_event = ctx.win_event.lock().unwrap();
-                win_event.windows.get(&hwnd).map(|w| w.surface_bitmap)
-            };
-
-            if let Some(hbmp) = surface_bitmap {
-                let ctx = uc.get_data();
-                let gdi_objects = ctx.gdi_objects.lock().unwrap();
-                if let Some(crate::dll::win32::GdiObject::Bitmap { pixels, .. }) =
-                    gdi_objects.get(&hbmp)
-                {
-                    let mut p = pixels.lock().unwrap();
-                    // 0xD4D0C8 = Classic Windows gray
-                    for pix in p.iter_mut() {
-                        *pix = 0xFFD4D0C8;
-                    }
-                }
+            if super::paint::erase_window_background(uc, hwnd) {
+                1
+            } else {
+                0
             }
-            1
         }
         0x0020 => {
             let ctx = uc.get_data();
@@ -795,15 +848,74 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                 0
             }
         }
-        0x0024 => 0, // WM_GETMINMAXINFO
-        0x0080 => 0, // WM_SETICON
-        0x0081 => 1, // WM_NCCREATE
+        0x0024 => {
+            // WM_GETMINMAXINFO
+            if l_param != 0 {
+                const PT_MAX_SIZE_OFFSET: u64 = 8;
+                const PT_MAX_POSITION_OFFSET: u64 = 16;
+                const PT_MIN_TRACK_SIZE_OFFSET: u64 = 24;
+                const PT_MAX_TRACK_SIZE_OFFSET: u64 = 32;
+
+                let (work_left, work_top, work_right, work_bottom) = uc.get_data().work_area_rect();
+                let work_width = (work_right - work_left).max(1);
+                let work_height = (work_bottom - work_top).max(1);
+                let (min_track_width, min_track_height, max_track_width, max_track_height) = {
+                    let ctx = uc.get_data();
+                    let win_event = ctx.win_event.lock().unwrap();
+                    win_event
+                        .windows
+                        .get(&hwnd)
+                        .map(|win| {
+                            let metrics = USER32::get_window_frame_metrics(win);
+                            (
+                                (metrics.left + metrics.right + 1).max(1),
+                                (metrics.top + metrics.bottom + 1).max(1),
+                                work_width.max(win.width.max(1)),
+                                work_height.max(win.height.max(1)),
+                            )
+                        })
+                        .unwrap_or((1, 1, work_width, work_height))
+                };
+                let info_ptr = l_param as u64;
+                write_point(uc, info_ptr + PT_MAX_SIZE_OFFSET, work_width, work_height);
+                write_point(uc, info_ptr + PT_MAX_POSITION_OFFSET, work_left, work_top);
+                write_point(
+                    uc,
+                    info_ptr + PT_MIN_TRACK_SIZE_OFFSET,
+                    min_track_width,
+                    min_track_height,
+                );
+                write_point(
+                    uc,
+                    info_ptr + PT_MAX_TRACK_SIZE_OFFSET,
+                    max_track_width,
+                    max_track_height,
+                );
+            }
+            0
+        }
+        0x0080 => {
+            // WM_SETICON
+            let old_icon = uc
+                .get_data()
+                .win_event
+                .lock()
+                .unwrap()
+                .set_window_icon(hwnd, w_param, l_param);
+            old_icon as i32
+        }
+        0x0081 => {
+            // WM_NCCREATE
+            // 생성 승인/거부는 `CreateWindowExA`가 guest wndproc에 직접 `WM_NCCREATE`를 보내
+            // 이미 판정했으므로, 기본 프로시저는 중복 상태 변경 없이 성공만 반환합니다.
+            1
+        }
         0x0084 => {
             // WM_NCHITTEST
             let screen_x = (l_param & 0xFFFF) as i16 as i32;
             let screen_y = ((l_param >> 16) & 0xFFFF) as i16 as i32;
 
-            let hit_test = {
+            {
                 let ctx = uc.get_data();
                 let win_event = ctx.win_event.lock().unwrap();
                 win_event
@@ -811,37 +923,32 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                     .get(&hwnd)
                     .map(|w| USER32::default_hit_test(w, screen_x, screen_y))
                     .unwrap_or(0)
-            };
-            hit_test
+            }
         }
         0x0083 => {
             // WM_NCCALCSIZE
             if w_param != 0 {
                 let rect_ptr = l_param as u64;
-                let (bw, bh, caption) = {
+                let metrics = {
                     let ctx = uc.get_data();
                     let win_event = ctx.win_event.lock().unwrap();
                     if let Some(win) = win_event.windows.get(&hwnd) {
-                        if !win.use_native_frame {
-                            USER32::get_window_frame_size(win.style, win.ex_style)
-                        } else {
-                            (0, 0, 0)
-                        }
+                        USER32::get_window_frame_metrics(win)
                     } else {
-                        (0, 0, 0)
+                        crate::dll::win32::user32::WindowFrameMetrics::default()
                     }
                 };
 
-                if bw > 0 || bh > 0 || caption > 0 {
+                if metrics.left > 0 || metrics.top > 0 || metrics.right > 0 || metrics.bottom > 0 {
                     let left = uc.read_u32(rect_ptr) as i32;
                     let top = uc.read_u32(rect_ptr + 4) as i32;
                     let right = uc.read_u32(rect_ptr + 8) as i32;
                     let bottom = uc.read_u32(rect_ptr + 12) as i32;
 
-                    uc.write_u32(rect_ptr, (left + bw) as u32);
-                    uc.write_u32(rect_ptr + 4, (top + bh + caption) as u32);
-                    uc.write_u32(rect_ptr + 8, (right - bw) as u32);
-                    uc.write_u32(rect_ptr + 12, (bottom - bh) as u32);
+                    uc.write_u32(rect_ptr, (left + metrics.left) as u32);
+                    uc.write_u32(rect_ptr + 4, (top + metrics.top) as u32);
+                    uc.write_u32(rect_ptr + 8, (right - metrics.right) as u32);
+                    uc.write_u32(rect_ptr + 12, (bottom - metrics.bottom) as u32);
                 }
             }
             0
@@ -942,7 +1049,9 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                     }
                     0xc2c8 => {
                         // CLOSE
-                        uc.get_data().win_event.lock().unwrap().close_window(hwnd);
+                        // uc.get_data().win_event.lock().unwrap().close_window(hwnd);
+                        let ctx = uc.get_data();
+                        USER32::destroy_window_tree(ctx, hwnd);
                     }
                     _ => {}
                 }

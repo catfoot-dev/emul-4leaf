@@ -23,90 +23,83 @@ pub fn load_splash_data(path: &std::path::Path) -> Option<(Vec<u32>, u32, u32)> 
 
     let mut bitmap_data: Option<&[u8]> = None;
 
-    if let Some(opt) = pe.header.optional_header {
-        if let Some(resource_dir_info) = opt.data_directories.get_resource_table() {
-            let r_rva = resource_dir_info.virtual_address as u32;
-            let r_size = resource_dir_info.size as u32;
-            let r_offset = rva_to_offset(&pe, r_rva);
+    if let Some(opt) = pe.header.optional_header
+        && let Some(resource_dir_info) = opt.data_directories.get_resource_table()
+    {
+        let r_rva = resource_dir_info.virtual_address;
+        let r_size = resource_dir_info.size;
+        let r_offset = rva_to_offset(&pe, r_rva);
 
-            if r_offset != 0 && r_offset + r_size as usize <= buffer.len() {
-                let res_section = &buffer[r_offset..r_offset + r_size as usize];
+        if r_offset != 0 && r_offset + r_size as usize <= buffer.len() {
+            let res_section = &buffer[r_offset..r_offset + r_size as usize];
 
-                // Manual parsing of Resource Directory
-                let find_resource = |section: &[u8], type_id: u32| -> Option<u32> {
-                    if section.len() < 16 {
-                        return None;
+            // Manual parsing of Resource Directory
+            let find_resource = |section: &[u8], type_id: u32| -> Option<u32> {
+                if section.len() < 16 {
+                    return None;
+                }
+                let named_entries = u16::from_le_bytes(section[12..14].try_into().ok()?);
+                let id_entries = u16::from_le_bytes(section[14..16].try_into().ok()?);
+                let total_entries = named_entries + id_entries;
+
+                for i in 0..total_entries {
+                    let entry_offset = 16 + (i as usize * 8);
+                    if section.len() < entry_offset + 8 {
+                        break;
                     }
-                    let named_entries = u16::from_le_bytes(section[12..14].try_into().ok()?);
-                    let id_entries = u16::from_le_bytes(section[14..16].try_into().ok()?);
-                    let total_entries = named_entries + id_entries;
+                    let name_or_id = u32::from_le_bytes(
+                        section[entry_offset..entry_offset + 4].try_into().ok()?,
+                    );
+                    let offset_to_data = u32::from_le_bytes(
+                        section[entry_offset + 4..entry_offset + 8]
+                            .try_into()
+                            .ok()?,
+                    );
 
-                    for i in 0..total_entries {
-                        let entry_offset = 16 + (i as usize * 8);
-                        if section.len() < entry_offset + 8 {
-                            break;
-                        }
-                        let name_or_id = u32::from_le_bytes(
-                            section[entry_offset..entry_offset + 4].try_into().ok()?,
-                        );
-                        let offset_to_data = u32::from_le_bytes(
-                            section[entry_offset + 4..entry_offset + 8]
-                                .try_into()
-                                .ok()?,
-                        );
-
-                        if name_or_id == type_id || type_id == 0xFFFF_FFFF {
-                            return Some(offset_to_data);
-                        }
+                    if name_or_id == type_id || type_id == 0xFFFF_FFFF {
+                        return Some(offset_to_data);
                     }
-                    None
-                };
+                }
+                None
+            };
 
-                // Root -> Type 2 (RT_BITMAP)
-                if let Some(type_entry) = find_resource(res_section, 2) {
-                    if type_entry & 0x8000_0000 != 0 {
-                        let type_dir_offset = (type_entry & 0x7FFF_FFFF) as usize;
-                        if type_dir_offset < res_section.len() {
-                            // Type -> Name/ID (any)
-                            if let Some(name_entry) =
-                                find_resource(&res_section[type_dir_offset..], 0xFFFF_FFFF)
+            // Root -> Type 2 (RT_BITMAP)
+            if let Some(type_entry) = find_resource(res_section, 2)
+                && type_entry & 0x8000_0000 != 0
+            {
+                let type_dir_offset = (type_entry & 0x7FFF_FFFF) as usize;
+                if type_dir_offset < res_section.len() {
+                    // Type -> Name/ID (any)
+                    if let Some(name_entry) =
+                        find_resource(&res_section[type_dir_offset..], 0xFFFF_FFFF)
+                        && name_entry & 0x8000_0000 != 0
+                    {
+                        let name_dir_offset = (name_entry & 0x7FFF_FFFF) as usize;
+                        if name_dir_offset < res_section.len() {
+                            // Name -> Language (any)
+                            if let Some(lang_entry) =
+                                find_resource(&res_section[name_dir_offset..], 0xFFFF_FFFF)
+                                && lang_entry & 0x8000_0000 == 0
                             {
-                                if name_entry & 0x8000_0000 != 0 {
-                                    let name_dir_offset = (name_entry & 0x7FFF_FFFF) as usize;
-                                    if name_dir_offset < res_section.len() {
-                                        // Name -> Language (any)
-                                        if let Some(lang_entry) = find_resource(
-                                            &res_section[name_dir_offset..],
-                                            0xFFFF_FFFF,
-                                        ) {
-                                            if lang_entry & 0x8000_0000 == 0 {
-                                                let data_entry_offset = lang_entry as usize;
-                                                if data_entry_offset + 16 <= res_section.len() {
-                                                    let data_rva = u32::from_le_bytes(
-                                                        res_section[data_entry_offset
-                                                            ..data_entry_offset + 4]
-                                                            .try_into()
-                                                            .unwrap(),
-                                                    );
-                                                    let data_size = u32::from_le_bytes(
-                                                        res_section[data_entry_offset + 4
-                                                            ..data_entry_offset + 8]
-                                                            .try_into()
-                                                            .unwrap(),
-                                                    );
-                                                    let file_offset = rva_to_offset(&pe, data_rva);
-                                                    if file_offset != 0
-                                                        && file_offset + data_size as usize
-                                                            <= buffer.len()
-                                                    {
-                                                        bitmap_data = Some(
-                                                            &buffer[file_offset
-                                                                ..file_offset + data_size as usize],
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
+                                let data_entry_offset = lang_entry as usize;
+                                if data_entry_offset + 16 <= res_section.len() {
+                                    let data_rva = u32::from_le_bytes(
+                                        res_section[data_entry_offset..data_entry_offset + 4]
+                                            .try_into()
+                                            .unwrap(),
+                                    );
+                                    let data_size = u32::from_le_bytes(
+                                        res_section[data_entry_offset + 4..data_entry_offset + 8]
+                                            .try_into()
+                                            .unwrap(),
+                                    );
+                                    let file_offset = rva_to_offset(&pe, data_rva);
+                                    if file_offset != 0
+                                        && file_offset + data_size as usize <= buffer.len()
+                                    {
+                                        bitmap_data = Some(
+                                            &buffer[file_offset..file_offset + data_size as usize],
+                                        );
                                     }
                                 }
                             }
@@ -150,8 +143,8 @@ fn decode_bitmap_resource(data: &[u8]) -> Option<(Vec<u32>, u32, u32)> {
         return None;
     }
 
-    let abs_width = width.abs() as u32;
-    let abs_height = height.abs() as u32;
+    let abs_width = width.unsigned_abs();
+    let abs_height = height.unsigned_abs();
 
     let mut pixels = vec![0u32; (abs_width * abs_height) as usize];
 
@@ -234,13 +227,14 @@ impl crate::ui::Painter for SplashPainter {
         &self,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> winit::window::Window {
-        let attributes = winit::window::Window::default_attributes()
-            .with_title("4Leaf Emulator")
-            .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
-            .with_resizable(false)
-            .with_decorations(false)
-            .with_visible(true)
-            .with_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        let attributes = crate::ui::apply_platform_window_attributes(
+            winit::window::Window::default_attributes()
+                .with_title("4Leaf Emulator")
+                .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
+                .with_resizable(false)
+                .with_decorations(false)
+                .with_visible(true),
+        );
 
         let window = event_loop.create_window(attributes).unwrap();
 

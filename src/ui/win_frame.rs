@@ -1,44 +1,58 @@
 use crate::{
     dll::win32::{GdiObject, Win32Context},
-    ui::{Painter, UiCommand, gdi_renderer::GdiRenderer},
+    ui::{Painter, UiCommand, WindowPositionMode, apply_platform_window_attributes},
 };
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use softbuffer::{Context as SoftContext, Surface};
 use std::{collections::HashMap, num::NonZeroU32, sync::mpsc::Receiver};
 #[cfg(target_os = "windows")]
 use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
+#[cfg(target_os = "windows")]
+use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
-    raw_window_handle::{DisplayHandle, HasDisplayHandle},
-    window::{Window, WindowAttributes, WindowButtons, WindowId, WindowLevel},
+    raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle},
+    window::{Icon, Window, WindowAttributes, WindowButtons, WindowId, WindowLevel},
 };
 
 // Windows 스타일 -> winit 속성 매핑
-const WS_BORDER: u32 = 0x00800000;
-const WS_CAPTION: u32 = 0x00C00000;
-const WS_CHILD: u32 = 0x40000000;
-const WS_CLIPSIBLINGS: u32 = 0x04000000;
-const WS_DLGFRAME: u32 = 0x00400000;
-const WS_GROUP: u32 = 0x00020000;
-const WS_HSCROLL: u32 = 0x00100000;
-const WS_SIZEBOX: u32 = 0x00040000;
-const WS_SYSMENU: u32 = 0x00080000;
-const WS_POPUP: u32 = 0x80000000;
-const WS_THICKFRAME: u32 = 0x00040000; // WS_SIZEBOX
-const WS_MINIMIZEBOX: u32 = 0x00020000;
-const WS_MAXIMIZEBOX: u32 = 0x00010000;
-const WS_EX_TOPMOST: u32 = 0x00000008;
-const WS_EX_LAYERED: u32 = 0x00080000;
+const WS_CAPTION: u32 = 0x00C0_0000;
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_POPUP: u32 = 0x8000_0000;
+const WS_DLGFRAME: u32 = 0x0040_0000;
+const WS_BORDER: u32 = 0x0080_0000;
+const WS_SYSMENU: u32 = 0x0008_0000;
+const WS_THICKFRAME: u32 = 0x0004_0000; // WS_SIZEBOX
+const WS_MINIMIZEBOX: u32 = 0x0002_0000;
+const WS_MAXIMIZEBOX: u32 = 0x0001_0000;
+const WS_EX_TOPMOST: u32 = 0x0000_0008;
+const WS_EX_LAYERED: u32 = 0x0008_0000;
 const CW_USEDEFAULT: i32 = i32::MIN;
 #[cfg(target_os = "windows")]
-const WS_EX_TOOLWINDOW: u32 = 0x00000080;
+const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 #[cfg(target_os = "windows")]
-const WS_EX_APPWINDOW: u32 = 0x00040000;
+const WS_EX_APPWINDOW: u32 = 0x0004_0000;
 
 type WinSurface = Surface<DisplayHandle<'static>, Window>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostParentLink {
+    None,
+    Child,
+    Owner,
+}
+
+fn enqueue_window_message(queue: &mut std::collections::VecDeque<[u32; 7]>, message: [u32; 7]) {
+    if message[1] == 0x0005 {
+        // 같은 창의 대기 중인 WM_SIZE는 마지막 크기만 의미가 있으므로 최신 항목만 남깁니다.
+        queue.retain(|queued| !(queued[0] == message[0] && queued[1] == 0x0005));
+    }
+    queue.push_back(message);
+}
 
 #[derive(Clone, Copy)]
 struct HostWindowStyle {
@@ -53,9 +67,13 @@ struct HostWindowStyle {
 
 impl HostWindowStyle {
     fn from_guest(style: u32, ex_style: u32, use_native_frame: bool) -> Self {
-        let decorations = use_native_frame && (style & WS_POPUP) == 0 && (style & WS_CAPTION) != 0;
+        // WS_POPUP 자체가 프레임을 금지하는 것은 아니므로,
+        // 실제 장식 여부는 캡션/프레임 비트와 호스트 네이티브 프레임 사용 여부로만 결정합니다.
+        let framing_bits = WS_CAPTION | WS_BORDER | WS_DLGFRAME | WS_THICKFRAME;
+        let is_shaped_popup = (style & WS_POPUP) != 0 && (style & framing_bits) == 0;
+        let decorations = use_native_frame && (style & WS_CAPTION) != 0;
         let resizable = use_native_frame && (style & WS_THICKFRAME) != 0;
-        let transparent = (ex_style & WS_EX_LAYERED) != 0;
+        let transparent = (ex_style & WS_EX_LAYERED) != 0 || is_shaped_popup;
         let topmost = (ex_style & WS_EX_TOPMOST) != 0;
         #[cfg(target_os = "windows")]
         let skip_taskbar = (ex_style & WS_EX_TOOLWINDOW) != 0 && (ex_style & WS_EX_APPWINDOW) == 0;
@@ -107,6 +125,18 @@ struct CursorAnimState {
     last_switch: std::time::Instant,
 }
 
+/// 실제 호스트 창에 적용할 커서 동작입니다.
+enum CursorAction {
+    Animated {
+        cursor: winit::window::CustomCursor,
+        frame_count: usize,
+        interval: std::time::Duration,
+    },
+    Static(winit::window::CustomCursor),
+    SystemIcon(winit::window::CursorIcon),
+    Default,
+}
+
 /// 윈도우 애플리케이션 핸들러
 /// 모든 winit 윈도우와 Painter를 관리함
 pub struct WinFrame {
@@ -122,6 +152,8 @@ pub struct WinFrame {
     id_to_hwnd: HashMap<WindowId, u32>,
     /// 가상 HWND -> 호스트 네이티브 프레임 사용 여부
     hwnd_native_frame: HashMap<u32, bool>,
+    /// 첫 번째 게스트 최상위 창 HWND
+    main_guest_hwnd: Option<u32>,
 
     /// softbuffer 컨텍스트
     sb_context: Option<SoftContext<DisplayHandle<'static>>>,
@@ -135,13 +167,119 @@ pub struct WinFrame {
     cursor_anim: Option<CursorAnimState>,
     /// 현재 적용된 커서 핸들과 윈도우 ID (중복 적용 방지용)
     current_cursor: Option<(WindowId, u32)>,
+    /// 포인터가 현재 올라간 호스트 윈도우 ID
+    hovered_window_id: Option<WindowId>,
+    /// 포커스를 가진 호스트 윈도우 ID
+    focused_window_id: Option<WindowId>,
+    /// 윈도우별 마지막 guest 요청 커서 핸들 캐시
+    window_cursor_cache: HashMap<WindowId, u32>,
     /// 마지막으로 마우스 이벤트가 처리된 시간 (스로틀링용)
-    last_cursor_moved: Option<std::time::Instant>,
-    /// 마지막으로 게스트에게 전송된 마우스 좌표 (스로틀링 누락 감지용)
-    last_sent_mouse_pos: Option<(u32, u32)>,
+    last_cursor_moved: Option<(u32, std::time::Instant)>,
+    /// 마지막으로 게스트에게 전송된 마우스 좌표 (윈도우별 스로틀링 누락 감지용)
+    last_sent_mouse_pos: Option<(u32, u32, u32)>,
 }
 
 impl WinFrame {
+    fn activation_hwnds_in_order(&self, root_hwnd: u32) -> Vec<u32> {
+        fn collect(
+            windows: &HashMap<u32, crate::dll::win32::WindowState>,
+            hwnd: u32,
+            out: &mut Vec<u32>,
+        ) {
+            let Some(_) = windows.get(&hwnd) else {
+                return;
+            };
+
+            out.push(hwnd);
+
+            let mut children = windows
+                .iter()
+                .filter_map(|(&child_hwnd, state)| {
+                    (state.parent == hwnd).then_some((child_hwnd, state.z_order))
+                })
+                .collect::<Vec<_>>();
+            children.sort_unstable_by_key(|&(child_hwnd, z_order)| (z_order, child_hwnd));
+
+            for (child_hwnd, _) in children {
+                collect(windows, child_hwnd, out);
+            }
+        }
+
+        let windows = {
+            let win_event = self.emu_context.win_event.lock().unwrap();
+            win_event.windows.clone()
+        };
+        let mut order = Vec::new();
+        collect(&windows, root_hwnd, &mut order);
+        order
+    }
+
+    fn activate_window_tree(&self, root_hwnd: u32) {
+        for hwnd in self.activation_hwnds_in_order(root_hwnd) {
+            if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                && let Some(window) = self.get_window(id)
+            {
+                window.focus_window();
+            }
+        }
+    }
+
+    fn host_parent_link(parent: u32, style: u32) -> HostParentLink {
+        if parent == 0 {
+            HostParentLink::None
+        } else if (style & WS_CHILD) != 0 {
+            HostParentLink::Child
+        } else {
+            HostParentLink::Owner
+        }
+    }
+
+    fn apply_host_parent_link(
+        &self,
+        mut attributes: WindowAttributes,
+        parent: u32,
+        style: u32,
+    ) -> WindowAttributes {
+        let host_parent_link = Self::host_parent_link(parent, style);
+        if host_parent_link == HostParentLink::None {
+            return attributes;
+        }
+
+        let Some(parent_id) = self.hwnd_to_id.get(&parent) else {
+            return attributes;
+        };
+        let Some(parent_window) = self.get_window(parent_id) else {
+            return attributes;
+        };
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(parent_handle) = parent_window.window_handle() {
+                let raw = parent_handle.as_raw();
+                match host_parent_link {
+                    HostParentLink::None => return attributes,
+                    HostParentLink::Child => {
+                        return unsafe { attributes.with_parent_window(Some(raw)) };
+                    }
+                    HostParentLink::Owner => {
+                        if let RawWindowHandle::Win32(handle) = raw {
+                            return attributes.with_owner_window(handle.hwnd.get() as _);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Ok(parent_handle) = parent_window.window_handle() {
+                attributes = unsafe { attributes.with_parent_window(Some(parent_handle.as_raw())) };
+            }
+        }
+
+        attributes
+    }
+
     pub fn new(
         ui_rx: Receiver<UiCommand>,
         initial_painters: Vec<Box<dyn Painter>>,
@@ -154,11 +292,15 @@ impl WinFrame {
             hwnd_to_id: HashMap::new(),
             id_to_hwnd: HashMap::new(),
             hwnd_native_frame: HashMap::new(),
+            main_guest_hwnd: None,
             sb_context: None,
             emu_context: context,
             initial_painters,
             cursor_anim: None,
             current_cursor: None,
+            hovered_window_id: None,
+            focused_window_id: None,
+            window_cursor_cache: HashMap::new(),
             last_cursor_moved: None,
             last_sent_mouse_pos: None,
         }
@@ -166,6 +308,55 @@ impl WinFrame {
 
     fn get_window(&self, id: &WindowId) -> Option<&Window> {
         self.surfaces.get(id).map(|s| s.window())
+    }
+
+    /// 첫 번째 게스트 최상위 창을 메인 창으로 기록합니다.
+    fn register_main_guest_window(&mut self, hwnd: u32, style: u32) {
+        if (style & WS_CHILD) == 0 && self.main_guest_hwnd.is_none() {
+            self.main_guest_hwnd = Some(hwnd);
+        }
+    }
+
+    /// 파괴 대상 HWND가 메인 게스트 창이면 종료 대상으로 판정하고 기록을 비웁니다.
+    fn take_main_guest_window_close(&mut self, hwnd: u32) -> bool {
+        if self.main_guest_hwnd == Some(hwnd) {
+            self.main_guest_hwnd = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 가상 아이콘 핸들을 호스트 윈도우 아이콘으로 변환합니다.
+    fn host_window_icon(&self, hicon: u32) -> Option<Icon> {
+        if hicon == 0 {
+            return None;
+        }
+
+        let frame = {
+            let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
+            match gdi_objects.get(&hicon) {
+                Some(GdiObject::Icon { frames, .. }) => frames
+                    .iter()
+                    .max_by_key(|frame| frame.width.saturating_mul(frame.height))
+                    .cloned(),
+                _ => None,
+            }
+        }?;
+
+        let rgba = frame
+            .pixels
+            .iter()
+            .flat_map(|pixel| {
+                let a = ((pixel >> 24) & 0xFF) as u8;
+                let r = ((pixel >> 16) & 0xFF) as u8;
+                let g = ((pixel >> 8) & 0xFF) as u8;
+                let b = (pixel & 0xFF) as u8;
+                [r, g, b, a]
+            })
+            .collect::<Vec<u8>>();
+
+        Icon::from_rgba(rgba, frame.width, frame.height).ok()
     }
 
     /// 창을 제거하고 관련 상태(커서 애니메이션 포함)를 정리합니다.
@@ -176,14 +367,16 @@ impl WinFrame {
             self.hwnd_to_id.remove(&hwnd);
             self.hwnd_native_frame.remove(&hwnd);
         }
+        self.window_cursor_cache.remove(&id);
+        if self.hovered_window_id == Some(id) {
+            self.hovered_window_id = None;
+        }
+        if self.focused_window_id == Some(id) {
+            self.focused_window_id = None;
+        }
 
         // 창이 파괴되면 해당 창과 연결된 커서 상태도 정리합니다.
-        if self.current_cursor.as_ref().map(|(cid, _)| *cid) == Some(id) {
-            self.current_cursor = None;
-        }
-        if self.cursor_anim.as_ref().map(|a| a.window_id) == Some(id) {
-            self.cursor_anim = None;
-        }
+        self.clear_cursor_state_for_window(id);
     }
 
     /// 지정된 HWND와 그 자손에 해당하는 호스트 창을 모두 제거합니다.
@@ -202,6 +395,7 @@ impl WinFrame {
         subtree
     }
 
+    #[allow(dead_code)]
     pub fn get_painter_mut<T: Painter + 'static>(
         &mut self,
         id: winit::window::WindowId,
@@ -211,6 +405,222 @@ impl WinFrame {
             .and_then(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// 현재 커서 적용 규칙에 따른 소유 창을 계산합니다.
+    fn current_cursor_owner(&self) -> Option<WindowId> {
+        self.hovered_window_id.or(self.focused_window_id)
+    }
+
+    /// 지정된 창에 연결된 커서 적용 상태를 무효화합니다.
+    fn clear_cursor_state_for_window(&mut self, id: WindowId) {
+        if self.current_cursor.as_ref().map(|(cid, _)| *cid) == Some(id) {
+            self.current_cursor = None;
+        }
+        if self.cursor_anim.as_ref().map(|anim| anim.window_id) == Some(id) {
+            self.cursor_anim = None;
+        }
+    }
+
+    /// 호버 중인 창을 갱신합니다.
+    fn set_hovered_window(&mut self, next: Option<WindowId>) -> bool {
+        if self.hovered_window_id == next {
+            return false;
+        }
+
+        if let Some(prev) = self.hovered_window_id
+            && Some(prev) != next
+        {
+            self.clear_cursor_state_for_window(prev);
+        }
+
+        self.hovered_window_id = next;
+        true
+    }
+
+    /// 포커스된 창을 갱신합니다.
+    fn set_focused_window(&mut self, next: Option<WindowId>) -> bool {
+        if self.focused_window_id == next {
+            return false;
+        }
+
+        if self.hovered_window_id.is_none()
+            && let Some(prev) = self.focused_window_id
+            && Some(prev) != next
+        {
+            self.clear_cursor_state_for_window(prev);
+        }
+
+        self.focused_window_id = next;
+        true
+    }
+
+    /// 지정된 창이 현재 커서 즉시 적용 대상인지 반환합니다.
+    fn is_cursor_owner(&self, id: WindowId) -> bool {
+        self.current_cursor_owner() == Some(id)
+    }
+
+    /// 윈도우별 마지막 guest 커서 핸들을 저장합니다.
+    fn cache_window_cursor(&mut self, id: WindowId, hcursor: u32) {
+        self.window_cursor_cache.insert(id, hcursor);
+    }
+
+    /// 지정된 창에 대해 실제로 적용해야 할 커서 핸들을 계산합니다.
+    fn effective_cursor_handle_for_window(&self, id: WindowId) -> u32 {
+        if let Some(&hcursor) = self.window_cursor_cache.get(&id) {
+            return hcursor;
+        }
+
+        let Some(hwnd) = self.id_to_hwnd.get(&id).copied() else {
+            return 0;
+        };
+
+        self.emu_context
+            .win_event
+            .lock()
+            .unwrap()
+            .windows
+            .get(&hwnd)
+            .map(|window| window.class_cursor)
+            .unwrap_or(0)
+    }
+
+    /// 시스템 커서 리소스 ID를 winit 커서 아이콘으로 변환합니다.
+    fn system_cursor_icon(resource_id: u32) -> winit::window::CursorIcon {
+        match resource_id {
+            32512 => winit::window::CursorIcon::Default,
+            32513 => winit::window::CursorIcon::Text,
+            32514 => winit::window::CursorIcon::Wait,
+            32515 => winit::window::CursorIcon::Crosshair,
+            32516 => winit::window::CursorIcon::NResize,
+            32642 => winit::window::CursorIcon::NwseResize,
+            32643 => winit::window::CursorIcon::NeswResize,
+            32644 => winit::window::CursorIcon::EwResize,
+            32645 => winit::window::CursorIcon::NsResize,
+            32646 => winit::window::CursorIcon::Move,
+            32648 => winit::window::CursorIcon::NotAllowed,
+            32649 => winit::window::CursorIcon::Pointer,
+            32650 => winit::window::CursorIcon::Progress,
+            32651 => winit::window::CursorIcon::Help,
+            _ => winit::window::CursorIcon::Default,
+        }
+    }
+
+    /// 커서 핸들을 실제 호스트 커서 동작으로 변환합니다.
+    fn resolve_cursor_action(&self, hcursor: u32, event_loop: &ActiveEventLoop) -> CursorAction {
+        if hcursor == 0 {
+            return CursorAction::Default;
+        }
+
+        let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
+        if let Some(GdiObject::Cursor {
+            resource_id,
+            frames,
+            is_animated,
+            display_rate_jiffies,
+            ..
+        }) = gdi_objects.get(&hcursor)
+        {
+            if *is_animated && frames.len() > 1 {
+                if let Some(custom) = Self::create_custom_cursor_from_frame(&frames[0], event_loop)
+                {
+                    let rate = (*display_rate_jiffies / 2u32).max(1);
+                    let ms = (rate as u64) * 1000 / 60;
+                    return CursorAction::Animated {
+                        cursor: custom,
+                        frame_count: frames.len(),
+                        interval: std::time::Duration::from_millis(ms),
+                    };
+                }
+                return CursorAction::Default;
+            }
+
+            if let Some(frame) = frames.first()
+                && !frame.pixels.is_empty()
+            {
+                if let Some(custom) = Self::create_custom_cursor_from_frame(frame, event_loop) {
+                    return CursorAction::Static(custom);
+                }
+                return CursorAction::Default;
+            }
+
+            return CursorAction::SystemIcon(Self::system_cursor_icon(*resource_id));
+        }
+
+        CursorAction::Default
+    }
+
+    /// 계산된 커서 동작을 호스트 창에 반영합니다.
+    fn apply_cursor_action(window: &Window, action: &CursorAction) {
+        match action {
+            CursorAction::Animated { cursor, .. } => {
+                window.set_cursor(cursor.clone());
+            }
+            CursorAction::Static(cursor) => {
+                window.set_cursor(cursor.clone());
+            }
+            CursorAction::SystemIcon(icon) => {
+                window.set_cursor(*icon);
+            }
+            CursorAction::Default => {
+                window.set_cursor(winit::window::CursorIcon::Default);
+            }
+        }
+    }
+
+    /// 지정된 창의 현재 유효 커서를 계산해 즉시 적용합니다.
+    fn apply_effective_cursor_for_window(
+        &mut self,
+        id: WindowId,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        let hcursor = self.effective_cursor_handle_for_window(id);
+        if self.current_cursor == Some((id, hcursor)) {
+            return false;
+        }
+
+        let action = self.resolve_cursor_action(hcursor, event_loop);
+        {
+            let Some(window) = self.get_window(&id) else {
+                self.clear_cursor_state_for_window(id);
+                return false;
+            };
+            Self::apply_cursor_action(window, &action);
+        }
+        self.current_cursor = Some((id, hcursor));
+
+        match action {
+            CursorAction::Animated {
+                frame_count,
+                interval,
+                ..
+            } => {
+                self.cursor_anim = Some(CursorAnimState {
+                    hcursor,
+                    window_id: id,
+                    frame_index: 0,
+                    frame_count,
+                    interval,
+                    last_switch: std::time::Instant::now(),
+                });
+            }
+            _ => {
+                self.cursor_anim = None;
+            }
+        }
+
+        true
+    }
+
+    /// 현재 커서 소유 규칙에 맞는 창으로 호스트 커서를 다시 맞춥니다.
+    fn reapply_cursor_for_current_owner(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if let Some(id) = self.current_cursor_owner() {
+            self.apply_effective_cursor_for_window(id, event_loop)
+        } else {
+            self.current_cursor = None;
+            self.cursor_anim = None;
+            false
+        }
+    }
+
     /// 에뮬레이터 스레드를 즉시 깨워 새 메시지를 처리하도록 합니다.
     /// main_resume_time을 클리어하여 메인 스레드가 즉시 실행되게 합니다.
     fn wake_emulator(&self) {
@@ -218,10 +628,10 @@ impl WinFrame {
         if let Ok(mut guard) = self.emu_context.main_resume_time.try_lock() {
             *guard = None;
         }
-        if let Ok(guard) = self.emu_context.emu_thread.try_lock() {
-            if let Some(thread) = guard.as_ref() {
-                thread.unpark();
-            }
+        if let Ok(guard) = self.emu_context.emu_thread.try_lock()
+            && let Some(thread) = guard.as_ref()
+        {
+            thread.unpark();
         }
     }
 
@@ -282,6 +692,7 @@ impl WinFrame {
                     title,
                     x,
                     y,
+                    position_mode,
                     width,
                     height,
                     style,
@@ -290,32 +701,39 @@ impl WinFrame {
                     visible,
                     use_native_frame,
                     surface_bitmap,
+                    ..
                 } => {
-                    // 자식 윈도우는 별도 호스트 OS 창으로 만들지 않고 guest 상태만 유지합니다.
-                    // 그렇지 않으면 컨트롤/헬퍼 창마다 예기치 않은 활성화/크기 이벤트가 발생합니다.
-                    if (style & WS_CHILD) != 0 {
-                        crate::emu_log!(
-                            "[UI] host create skipped for child HWND {:#x} parent={:#x} visible={} size={}x{} style={:#x}",
-                            hwnd,
-                            parent,
-                            visible,
-                            width,
-                            height,
-                            style
-                        );
-                        let _ = parent;
-                        continue;
-                    }
-
                     let mut attributes = Window::default_attributes()
-                        .with_title(title)
                         // 게스트가 다루는 좌표계는 픽셀 기반이므로 backing store 크기와 1:1로 맞춥니다.
-                        .with_inner_size(winit::dpi::PhysicalSize::new(width, height))
+                        .with_title(title)
+                        .with_inner_size(PhysicalSize::new(width, height))
+                        .with_min_inner_size(PhysicalSize::new(width, height))
                         .with_visible(visible);
+                    attributes = apply_platform_window_attributes(attributes);
+                    attributes = self.apply_host_parent_link(attributes, parent, style);
+
+                    let class_icon = {
+                        let win_event = self.emu_context.win_event.lock().unwrap();
+                        win_event.windows.get(&hwnd).map(|state| {
+                            if state.small_icon != 0 {
+                                state.small_icon
+                            } else if state.big_icon != 0 {
+                                state.big_icon
+                            } else {
+                                state.class_icon
+                            }
+                        })
+                    }
+                    .unwrap_or(0);
+                    attributes = attributes.with_window_icon(self.host_window_icon(class_icon));
 
                     if x != CW_USEDEFAULT && y != CW_USEDEFAULT {
-                        attributes =
-                            attributes.with_position(winit::dpi::PhysicalPosition::new(x, y));
+                        let position = winit::dpi::PhysicalPosition::new(x, y);
+                        attributes = match position_mode {
+                            WindowPositionMode::Screen | WindowPositionMode::ParentClient => {
+                                attributes.with_position(position)
+                            }
+                        };
                     }
 
                     attributes = Self::apply_guest_window_attributes(
@@ -327,6 +745,9 @@ impl WinFrame {
 
                     let window = event_loop.create_window(attributes).unwrap();
                     let id = window.id();
+                    if parent == 0 {
+                        self.register_main_guest_window(hwnd, style);
+                    }
                     crate::emu_log!(
                         "[UI] host window created HWND {:#x} visible={} size={}x{} style={:#x} ex_style={:#x} parent={:#x}",
                         hwnd,
@@ -345,8 +766,6 @@ impl WinFrame {
                         hwnd,
                         surface_bitmap,
                         emu_context: self.emu_context.clone(),
-                        cached_windows: HashMap::new(),
-                        cached_generation: u64::MAX, // 첫 paint에서 반드시 갱신되도록
                     };
                     self.painters.insert(id, Box::new(painter));
                     let context = self
@@ -375,8 +794,12 @@ impl WinFrame {
                 }
 
                 UiCommand::DestroyWindow { hwnd } => {
+                    let should_exit = self.take_main_guest_window_close(hwnd);
                     if let Some(id) = self.hwnd_to_id.get(&hwnd).copied() {
                         self.remove_window(id);
+                    }
+                    if should_exit {
+                        event_loop.exit();
                     }
                 }
 
@@ -406,13 +829,19 @@ impl WinFrame {
                     hwnd,
                     x,
                     y,
+                    position_mode,
                     width,
                     height,
                 } => {
                     if let Some(id) = self.hwnd_to_id.get(&hwnd)
                         && let Some(window) = self.get_window(id)
                     {
-                        window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                        let position = winit::dpi::PhysicalPosition::new(x, y);
+                        match position_mode {
+                            WindowPositionMode::Screen | WindowPositionMode::ParentClient => {
+                                window.set_outer_position(position);
+                            }
+                        }
                         let _ =
                             window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
                     }
@@ -426,6 +855,14 @@ impl WinFrame {
                     }
                 }
 
+                UiCommand::SetWindowIcon { hwnd, hicon } => {
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                        && let Some(window) = self.get_window(id)
+                    {
+                        window.set_window_icon(self.host_window_icon(hicon));
+                    }
+                }
+
                 UiCommand::UpdateWindow { hwnd } => {
                     if let Some(id) = self.hwnd_to_id.get(&hwnd)
                         && let Some(window) = self.get_window(id)
@@ -435,11 +872,7 @@ impl WinFrame {
                 }
 
                 UiCommand::ActivateWindow { hwnd } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
-                        && let Some(window) = self.get_window(id)
-                    {
-                        window.focus_window();
-                    }
+                    self.activate_window_tree(hwnd);
                 }
 
                 UiCommand::EnableWindow { hwnd, enabled } => {
@@ -495,11 +928,11 @@ impl WinFrame {
 
                 UiCommand::DragWindow { hwnd } => {
                     let window_id = self.hwnd_to_id.get(&hwnd).copied();
-                    if let Some(id) = window_id {
-                        if let Some(window) = self.get_window(&id) {
-                            crate::emu_log!("[UI] DragWindow called for HWND {:#x}", hwnd);
-                            let _ = window.drag_window();
-                        }
+                    if let Some(id) = window_id
+                        && let Some(window) = self.get_window(&id)
+                    {
+                        crate::emu_log!("[UI] DragWindow called for HWND {:#x}", hwnd);
+                        let _ = window.drag_window();
                     }
                 }
 
@@ -540,122 +973,9 @@ impl WinFrame {
                 UiCommand::SetCursor { hwnd, hcursor } => {
                     let window_id = self.hwnd_to_id.get(&hwnd).copied();
                     if let Some(id) = window_id {
-                        // 이미 같은 커서가 같은 윈도우에 적용되어 있다면 무시합니다.
-                        // 이를 통해 마우스 이동 시 발생하는 수많은 WM_SETCURSOR가 애니메이션을 리셋하는 것을 방지합니다.
-                        if self.current_cursor == Some((id, hcursor)) {
-                            continue;
-                        }
-                        self.current_cursor = Some((id, hcursor));
-
-                        // GDI 오브젝트에서 커서 정보를 먼저 추출 (어떤 커서를 적용할지 결정)
-                        enum CursorAction {
-                            Animated {
-                                cursor: winit::window::CustomCursor,
-                                frame_count: usize,
-                                interval: std::time::Duration,
-                            },
-                            Static(winit::window::CustomCursor),
-                            SystemIcon(winit::window::CursorIcon),
-                            Default,
-                        }
-
-                        let action = {
-                            let gdi_objects = self.emu_context.gdi_objects.lock().unwrap();
-                            if let Some(GdiObject::Cursor {
-                                resource_id,
-                                frames,
-                                is_animated,
-                                display_rate_jiffies,
-                                ..
-                            }) = gdi_objects.get(&hcursor)
-                            {
-                                if *is_animated && frames.len() > 1 {
-                                    if let Some(custom) = Self::create_custom_cursor_from_frame(
-                                        &frames[0], event_loop,
-                                    ) {
-                                        let rate = (*display_rate_jiffies / 2u32).max(1);
-                                        let ms = (rate as u64) * 1000 / 60;
-                                        CursorAction::Animated {
-                                            cursor: custom,
-                                            frame_count: frames.len(),
-                                            interval: std::time::Duration::from_millis(ms),
-                                        }
-                                    } else {
-                                        CursorAction::Default
-                                    }
-                                } else if let Some(frame) = frames.first()
-                                    && !frame.pixels.is_empty()
-                                {
-                                    if let Some(custom) =
-                                        Self::create_custom_cursor_from_frame(frame, event_loop)
-                                    {
-                                        CursorAction::Static(custom)
-                                    } else {
-                                        CursorAction::Default
-                                    }
-                                } else {
-                                    // 시스템 커서 폴백 (resource_id 기반)
-                                    let icon = match *resource_id {
-                                        32512 => winit::window::CursorIcon::Default,
-                                        32513 => winit::window::CursorIcon::Text,
-                                        32514 => winit::window::CursorIcon::Wait,
-                                        32515 => winit::window::CursorIcon::Crosshair,
-                                        32516 => winit::window::CursorIcon::NResize,
-                                        32642 => winit::window::CursorIcon::NwseResize,
-                                        32643 => winit::window::CursorIcon::NeswResize,
-                                        32644 => winit::window::CursorIcon::EwResize,
-                                        32645 => winit::window::CursorIcon::NsResize,
-                                        32646 => winit::window::CursorIcon::Move,
-                                        32648 => winit::window::CursorIcon::NotAllowed,
-                                        32649 => winit::window::CursorIcon::Pointer,
-                                        32650 => winit::window::CursorIcon::Progress,
-                                        32651 => winit::window::CursorIcon::Help,
-                                        _ => winit::window::CursorIcon::Default,
-                                    };
-                                    CursorAction::SystemIcon(icon)
-                                }
-                            } else {
-                                CursorAction::Default
-                            }
-                        };
-
-                        // 결정된 커서를 윈도우에 적용하고 애니메이션 상태 갱신
-                        if let Some(window) = self.get_window(&id) {
-                            match &action {
-                                CursorAction::Animated { cursor, .. } => {
-                                    window.set_cursor(cursor.clone());
-                                }
-                                CursorAction::Static(cursor) => {
-                                    window.set_cursor(cursor.clone());
-                                }
-                                CursorAction::SystemIcon(icon) => {
-                                    window.set_cursor(*icon);
-                                }
-                                CursorAction::Default => {
-                                    window.set_cursor(winit::window::CursorIcon::Default);
-                                }
-                            }
-                        }
-
-                        // window 참조 해제 후 cursor_anim 갱신
-                        match action {
-                            CursorAction::Animated {
-                                frame_count,
-                                interval,
-                                ..
-                            } => {
-                                self.cursor_anim = Some(CursorAnimState {
-                                    hcursor,
-                                    window_id: id,
-                                    frame_index: 0,
-                                    frame_count,
-                                    interval,
-                                    last_switch: std::time::Instant::now(),
-                                });
-                            }
-                            _ => {
-                                self.cursor_anim = None;
-                            }
+                        self.cache_window_cursor(id, hcursor);
+                        if self.is_cursor_owner(id) {
+                            self.apply_effective_cursor_for_window(id, event_loop);
                         }
                     }
                 }
@@ -726,10 +1046,10 @@ impl WinFrame {
         };
 
         if let Some(frame) = frame_data {
-            if let Some(window) = self.get_window(&window_id) {
-                if let Some(custom) = Self::create_custom_cursor_from_frame(&frame, event_loop) {
-                    window.set_cursor(custom);
-                }
+            if let Some(window) = self.get_window(&window_id)
+                && let Some(custom) = Self::create_custom_cursor_from_frame(&frame, event_loop)
+            {
+                window.set_cursor(custom);
             }
         } else {
             self.cursor_anim = None;
@@ -767,6 +1087,18 @@ impl ApplicationHandler<()> for WinFrame {
                 )
             };
             self.sb_context = Some(SoftContext::new(display_handle).unwrap());
+        }
+
+        if let Some(monitor) = event_loop.primary_monitor() {
+            let position = monitor.position();
+            let size = monitor.size();
+            // 게스트 좌표계가 실제 화면 배치와 최대한 일치하도록 기본 작업 영역을 초기화합니다.
+            self.emu_context.set_work_area(
+                position.x,
+                position.y,
+                position.x + size.width as i32,
+                position.y + size.height as i32,
+            );
         }
 
         // 초기 페인터들을 위한 창 생성
@@ -841,10 +1173,8 @@ impl ApplicationHandler<()> for WinFrame {
             (false, false)
         };
 
-        if handled {
-            if let Some(window) = self.get_window(&id) {
-                window.request_redraw();
-            }
+        if handled && let Some(window) = self.get_window(&id) {
+            window.request_redraw();
         }
 
         match event {
@@ -864,10 +1194,10 @@ impl ApplicationHandler<()> for WinFrame {
                         let mut buffer = surface.buffer_mut().unwrap();
                         buffer.fill(0);
 
-                        if let Some(painter) = self.painters.get_mut(&id) {
-                            if painter.paint(&mut buffer, width, height) {
-                                buffer.present().unwrap();
-                            }
+                        if let Some(painter) = self.painters.get_mut(&id)
+                            && painter.paint(&mut buffer, width, height)
+                        {
+                            buffer.present().unwrap();
                         }
                     }
                 }
@@ -881,6 +1211,9 @@ impl ApplicationHandler<()> for WinFrame {
                 self.wake_emulator();
 
                 let hwnd = self.id_to_hwnd.get(&id).copied();
+                let should_exit_main = hwnd
+                    .map(|handle| self.take_main_guest_window_close(handle))
+                    .unwrap_or(false);
 
                 if quit_on_close {
                     event_loop.exit();
@@ -893,14 +1226,27 @@ impl ApplicationHandler<()> for WinFrame {
                         }
                     }
                     self.wake_emulator();
+                    if should_exit_main {
+                        event_loop.exit();
+                    }
+                }
+            }
+
+            WindowEvent::CursorEntered { .. } => {
+                if self.set_hovered_window(Some(id)) {
+                    self.reapply_cursor_for_current_owner(event_loop);
                 }
             }
 
             WindowEvent::CursorMoved { position, .. } => {
+                if self.set_hovered_window(Some(id)) {
+                    self.reapply_cursor_for_current_owner(event_loop);
+                }
+
                 let x = position.x as u32;
                 let y = position.y as u32;
 
-                if let Some(&top_hwnd) = self.id_to_hwnd.get(&id) {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
                     self.emu_context
                         .mouse_x
                         .store(x, std::sync::atomic::Ordering::SeqCst);
@@ -909,38 +1255,17 @@ impl ApplicationHandler<()> for WinFrame {
                         .store(y, std::sync::atomic::Ordering::SeqCst);
 
                     let now = std::time::Instant::now();
-                    if let Some(last) = self.last_cursor_moved {
-                        if now.duration_since(last).as_millis() < 16 {
-                            return; // 16ms 이내 스로틀링
-                        }
+                    if let Some((last_hwnd, last)) = self.last_cursor_moved
+                        && last_hwnd == hwnd
+                        && now.duration_since(last).as_millis() < 16
+                    {
+                        return; // 16ms 이내 스로틀링
                     }
-                    self.last_cursor_moved = Some(now);
-
-                    let (target_hwnd, target_x, target_y) = {
-                        let win_event = self.emu_context.win_event.lock().unwrap();
-                        let target =
-                            win_event.child_window_from_point(top_hwnd, x as i32, y as i32);
-                        if target != top_hwnd {
-                            if let Some((origin_x, origin_y)) =
-                                win_event.window_client_origin_in_host(target)
-                            {
-                                (
-                                    target,
-                                    (x as i32 - origin_x) as u32,
-                                    (y as i32 - origin_y) as u32,
-                                )
-                            } else {
-                                (top_hwnd, x, y)
-                            }
-                        } else {
-                            (top_hwnd, x, y)
-                        }
-                    };
-
-                    self.last_sent_mouse_pos = Some((x, y));
+                    self.last_cursor_moved = Some((hwnd, now));
+                    self.last_sent_mouse_pos = Some((hwnd, x, y));
 
                     let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                    let lparam = (target_y << 16) | (target_x & 0xFFFF);
+                    let lparam = (y << 16) | (x & 0xFFFF);
                     let capture_hwnd = self
                         .emu_context
                         .capture_hwnd
@@ -951,7 +1276,7 @@ impl ApplicationHandler<()> for WinFrame {
                     let mut setcursor_idx = None;
                     let mut mousemove_idx = None;
                     for (i, m) in q.iter().enumerate() {
-                        if m[0] == target_hwnd {
+                        if m[0] == hwnd {
                             if m[1] == 0x0020 && setcursor_idx.is_none() {
                                 setcursor_idx = Some(i);
                             } else if m[1] == 0x0200 && mousemove_idx.is_none() {
@@ -967,23 +1292,16 @@ impl ApplicationHandler<()> for WinFrame {
                         let setcursor_lparam = (0x0200u32 << 16) | 0x0001; // WM_MOUSEMOVE | HTCLIENT
                         if let Some(idx) = setcursor_idx {
                             if let Some(message) = q.get_mut(idx) {
-                                message[0] = target_hwnd;
-                                message[2] = target_hwnd;
+                                message[0] = hwnd;
+                                message[2] = hwnd;
                                 message[3] = setcursor_lparam;
                                 message[4] = time;
-                                message[5] = target_x;
-                                message[6] = target_y;
+                                message[5] = x;
+                                message[6] = y;
                             }
                         } else {
-                            let setcursor_message = [
-                                target_hwnd,
-                                0x0020,
-                                target_hwnd,
-                                setcursor_lparam,
-                                time,
-                                target_x,
-                                target_y,
-                            ];
+                            let setcursor_message =
+                                [hwnd, 0x0020, hwnd, setcursor_lparam, time, x, y];
                             if let Some(idx) = mousemove_idx {
                                 q.insert(idx, setcursor_message);
                                 // insert가 mousemove_idx를 1칸 밀었으므로 보정
@@ -997,46 +1315,52 @@ impl ApplicationHandler<()> for WinFrame {
                     // WM_MOUSEMOVE(0x0200) 중복 제거: 이미 큐에 있으면 위치만 업데이트
                     if let Some(idx) = mousemove_idx {
                         if let Some(message) = q.get_mut(idx) {
-                            message[0] = target_hwnd;
+                            message[0] = hwnd;
                             message[3] = lparam;
                             message[4] = time;
-                            message[5] = target_x;
-                            message[6] = target_y;
+                            message[5] = x;
+                            message[6] = y;
                         }
                     } else {
-                        q.push_back([target_hwnd, 0x0200, 0, lparam, time, target_x, target_y]);
+                        q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
                     }
 
                     // 마우스 트래킹 (TrackMouseEvent) 처리
                     let mut track_opt = self.emu_context.track_mouse_event.lock().unwrap();
-                    if let Some(track) = track_opt.as_ref() {
-                        if track.hwnd != top_hwnd && (track.flags & 0x00000002 != 0) {
-                            let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                            q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
-                            *track_opt = None;
-                        }
+                    if let Some(track) = track_opt.as_ref()
+                        && track.hwnd != hwnd
+                        && (track.flags & 0x00000002 != 0)
+                    {
+                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
+                        *track_opt = None;
                     }
                     self.wake_emulator();
                 }
             }
 
             WindowEvent::CursorLeft { .. } => {
+                if self.hovered_window_id == Some(id) && self.set_hovered_window(None) {
+                    self.reapply_cursor_for_current_owner(event_loop);
+                }
+
                 if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
                     let mut track_opt = self.emu_context.track_mouse_event.lock().unwrap();
-                    if let Some(track) = track_opt.clone() {
-                        if track.hwnd == hwnd && (track.flags & 0x00000002 != 0) {
-                            let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                            let mut q = self.emu_context.message_queue.lock().unwrap();
-                            q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
-                            *track_opt = None;
-                            self.wake_emulator();
-                        }
+                    if let Some(track) = track_opt.clone()
+                        && track.hwnd == hwnd
+                        && (track.flags & 0x00000002 != 0)
+                    {
+                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        let mut q = self.emu_context.message_queue.lock().unwrap();
+                        q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
+                        *track_opt = None;
+                        self.wake_emulator();
                     }
                 }
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(&top_hwnd) = self.id_to_hwnd.get(&id) {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
                     let x = self
                         .emu_context
                         .mouse_x
@@ -1048,37 +1372,15 @@ impl ApplicationHandler<()> for WinFrame {
 
                     // 스로틀링으로 인해 WM_MOUSEMOVE가 생략되었을 수 있으므로,
                     // 클릭 직전 현재 위치에 대한 이동 메시지 전송을 보장합니다.
-                    if self.last_sent_mouse_pos != Some((x, y)) {
+                    if self.last_sent_mouse_pos != Some((hwnd, x, y)) {
                         let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                         let lparam = (y << 16) | (x & 0xFFFF);
                         let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([top_hwnd, 0x0200, 0, lparam, time, x, y]);
-                        self.last_sent_mouse_pos = Some((x, y));
+                        q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
+                        self.last_sent_mouse_pos = Some((hwnd, x, y));
                     }
 
-                    // 실제 클릭이 발생한 자식 창 찾기
-                    let (target_hwnd, target_x, target_y) = {
-                        let win_event = self.emu_context.win_event.lock().unwrap();
-                        let target =
-                            win_event.child_window_from_point(top_hwnd, x as i32, y as i32);
-                        if target != top_hwnd {
-                            if let Some((origin_x, origin_y)) =
-                                win_event.window_client_origin_in_host(target)
-                            {
-                                (
-                                    target,
-                                    (x as i32 - origin_x) as u32,
-                                    (y as i32 - origin_y) as u32,
-                                )
-                            } else {
-                                (top_hwnd, x, y)
-                            }
-                        } else {
-                            (top_hwnd, x, y)
-                        }
-                    };
-
-                    let lparam = (target_y << 16) | (target_x & 0xFFFF);
+                    let lparam = (y << 16) | (x & 0xFFFF);
                     let mut wparam = 0;
 
                     // wparam에 버튼 상태 플래그 설정 (표준 Win32 behavior)
@@ -1102,7 +1404,7 @@ impl ApplicationHandler<()> for WinFrame {
                     if msg != 0 {
                         let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                         let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([target_hwnd, msg, wparam, lparam, time, target_x, target_y]);
+                        q.push_back([hwnd, msg, wparam, lparam, time, x, y]);
                         drop(q);
                         self.wake_emulator();
                     }
@@ -1155,6 +1457,17 @@ impl ApplicationHandler<()> for WinFrame {
             }
 
             WindowEvent::Focused(focused) => {
+                if focused {
+                    if self.set_focused_window(Some(id)) && self.hovered_window_id.is_none() {
+                        self.reapply_cursor_for_current_owner(event_loop);
+                    }
+                } else if self.focused_window_id == Some(id)
+                    && self.set_focused_window(None)
+                    && self.hovered_window_id.is_none()
+                {
+                    self.reapply_cursor_for_current_owner(event_loop);
+                }
+
                 if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
                     let mut q = self.emu_context.message_queue.lock().unwrap();
                     let wparam = if focused { 1 } else { 0 }; // WA_ACTIVE, WA_INACTIVE
@@ -1167,6 +1480,10 @@ impl ApplicationHandler<()> for WinFrame {
                         self.emu_context
                             .active_hwnd
                             .store(hwnd, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    drop(q);
+                    if focused {
+                        self.activate_window_tree(hwnd);
                     }
                     self.wake_emulator();
                 }
@@ -1207,7 +1524,7 @@ impl ApplicationHandler<()> for WinFrame {
                     self.emu_context.sync_window_surface_bitmap(hwnd);
 
                     let mut q = self.emu_context.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
+                    enqueue_window_message(&mut q, [hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
                     drop(q);
                     self.wake_emulator();
                 }
@@ -1223,43 +1540,42 @@ pub struct DefaultEmulatorPainter {
     hwnd: u32,
     surface_bitmap: u32,
     emu_context: Win32Context,
-    /// 캐시된 윈도우 스냅샷 및 세대 카운터 (변경 시에만 재복제)
-    cached_windows: HashMap<u32, crate::dll::win32::WindowState>,
-    cached_generation: u64,
 }
 
 impl DefaultEmulatorPainter {
-    /// 현재 호스트 창에 속한 자식 창들을 생성 순서에 가까운 핸들 순서로 반환합니다.
-    fn child_windows(
-        windows: &HashMap<u32, crate::dll::win32::WindowState>,
-        parent: u32,
-    ) -> Vec<u32> {
-        let mut children = windows
-            .iter()
-            .filter_map(|(hwnd, state)| {
-                (state.parent == parent && (state.style & WS_CHILD) != 0)
-                    .then_some((*hwnd, state.z_order))
-            })
-            .collect::<Vec<_>>();
-        children.sort_unstable_by_key(|&(hwnd, z_order)| (z_order, hwnd));
-        children.into_iter().map(|(hwnd, _)| hwnd).collect()
+    /// 윈도우 영역(SetWindowRgn) 외부의 픽셀을 0(검정/투명)으로 마스킹합니다.
+    /// 호스트 native frame이 alpha=0을 투명으로 처리하지 못하더라도,
+    /// 최소한 영역 외부에는 그리지 않도록 보장합니다.
+    fn apply_window_rgn_mask(
+        buffer: &mut [u32],
+        width: u32,
+        height: u32,
+        rects: &[(i32, i32, i32, i32)],
+    ) {
+        for y in 0..height as i32 {
+            let row_offset = (y as u32 * width) as usize;
+            for x in 0..width as i32 {
+                if !crate::ui::gdi_renderer::GdiRenderer::point_in_clip_rects(rects, x, y) {
+                    let idx = row_offset + x as usize;
+                    if idx < buffer.len() {
+                        buffer[idx] = 0;
+                    }
+                }
+            }
+        }
     }
 
-    /// 비트맵 하나를 대상 버퍼에 잘라서 복사합니다.
+    /// 비트맵 하나를 현재 윈도우 버퍼에 그대로 복사합니다.
     fn blit_bitmap(
         buffer: &mut [u32],
         buffer_width: u32,
         buffer_height: u32,
-        dest_x: i32,
-        dest_y: i32,
         pixels: &[u32],
         src_width: u32,
         src_height: u32,
-        clip_rects: &[(i32, i32, i32, i32)],
-        exclusion_rects: &[(i32, i32, i32, i32)],
     ) {
         for src_y in 0..src_height as i32 {
-            let dst_y = dest_y + src_y;
+            let dst_y = src_y;
             if dst_y < 0 || dst_y >= buffer_height as i32 {
                 continue;
             }
@@ -1268,253 +1584,17 @@ impl DefaultEmulatorPainter {
             let dst_row_offset = (dst_y as u32 * buffer_width) as usize;
 
             for src_x in 0..src_width as i32 {
-                let dst_x = dest_x + src_x;
+                let dst_x = src_x;
                 if dst_x < 0 || dst_x >= buffer_width as i32 {
-                    continue;
-                }
-
-                // Inclusion 클리핑 체크
-                let mut included = false;
-                for (cl, ct, cr, cb) in clip_rects {
-                    if src_x >= *cl && src_x < *cr && src_y >= *ct && src_y < *cb {
-                        included = true;
-                        break;
-                    }
-                }
-                if !included {
-                    continue;
-                }
-
-                let mut excluded = false;
-                for (ex_l, ex_t, ex_r, ex_b) in exclusion_rects {
-                    if src_x >= *ex_l && src_x < *ex_r && src_y >= *ex_t && src_y < *ex_b {
-                        excluded = true;
-                        break;
-                    }
-                }
-                if excluded {
                     continue;
                 }
 
                 let dst_idx = dst_row_offset + dst_x as usize;
                 let src_idx = src_row_offset + src_x as usize;
                 if src_idx < pixels.len() && dst_idx < buffer.len() {
-                    let p = pixels[src_idx];
-                    // Lime Engine 투명도 키 (0x00FF00)는 이미 그려진 부모 배경을 유지해야 합니다.
-                    if (p & 0x00FFFFFF) != 0x0000FF00 {
-                        buffer[dst_idx] = p;
-                    }
+                    buffer[dst_idx] = pixels[src_idx];
                 }
             }
-        }
-    }
-
-    /// 루트 창과 모든 자식 창 표면을 하나의 호스트 버퍼로 합성합니다.
-    /// gdi_objects 락을 한 번만 잡고 재귀 전체에서 재사용합니다.
-    fn composite_window_tree(
-        &self,
-        buffer: &mut [u32],
-        buffer_width: u32,
-        buffer_height: u32,
-        windows: &HashMap<u32, crate::dll::win32::WindowState>,
-        gdi_objects: &HashMap<u32, GdiObject>,
-        hwnd: u32,
-        dest_x: i32,
-        dest_y: i32,
-        is_root: bool,
-    ) {
-        let Some(state) = windows.get(&hwnd) else {
-            return;
-        };
-
-        if !is_root && !state.visible {
-            return;
-        }
-
-        let bitmap = gdi_objects.get(&state.surface_bitmap).and_then(|obj| {
-            if let GdiObject::Bitmap {
-                pixels,
-                width,
-                height,
-                ..
-            } = obj
-            {
-                Some((pixels.clone(), *width, *height))
-            } else {
-                None
-            }
-        });
-
-        let clip_rects = if state.window_rgn != 0 {
-            gdi_objects.get(&state.window_rgn).and_then(|obj| {
-                if let GdiObject::Region { rects } = obj {
-                    Some(rects.as_slice())
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
-
-        let mut sibling_exclusion_rects = Vec::new();
-        if !is_root && (state.style & WS_CLIPSIBLINGS) != 0 {
-            let siblings = Self::child_windows(windows, state.parent);
-            let my_pos = siblings.iter().position(|&h| h == hwnd).unwrap_or(0);
-
-            // 부모 배경은 그대로 두되, 형제 창끼리는 위에 있는 창의 영역을 침범하지 않게 막습니다.
-            for &sibling_hwnd in &siblings[my_pos + 1..] {
-                let Some(sibling_state) = windows.get(&sibling_hwnd) else {
-                    continue;
-                };
-                if !sibling_state.visible {
-                    continue;
-                }
-
-                if sibling_state.window_rgn != 0 {
-                    if let Some(GdiObject::Region { rects }) =
-                        gdi_objects.get(&sibling_state.window_rgn)
-                    {
-                        for rect in rects {
-                            sibling_exclusion_rects.push((
-                                sibling_state.x - state.x + rect.0,
-                                sibling_state.y - state.y + rect.1,
-                                sibling_state.x - state.x + rect.2,
-                                sibling_state.y - state.y + rect.3,
-                            ));
-                        }
-                        continue;
-                    }
-                }
-
-                sibling_exclusion_rects.push((
-                    sibling_state.x - state.x,
-                    sibling_state.y - state.y,
-                    sibling_state.x - state.x + sibling_state.width,
-                    sibling_state.y - state.y + sibling_state.height,
-                ));
-            }
-        }
-
-        if let Some((pixels, src_width, src_height)) = bitmap {
-            let pixels = pixels.lock().unwrap();
-            let final_dest_x = if is_root { 0 } else { dest_x };
-            let final_dest_y = if is_root { 0 } else { dest_y };
-            let default_clip = [(0, 0, src_width as i32, src_height as i32)];
-            let clip_rects = clip_rects.unwrap_or(&default_clip);
-
-            // 부모는 전체 배경을 먼저 남겨서 투명 키가 부모 배경을 드러내게 하고,
-            // 형제 창끼리만 상위 z-order 영역을 제외해 픽셀 침범을 막습니다.
-            Self::blit_bitmap(
-                buffer,
-                buffer_width,
-                buffer_height,
-                final_dest_x,
-                final_dest_y,
-                &pixels,
-                src_width,
-                src_height,
-                clip_rects,
-                &sibling_exclusion_rects,
-            );
-
-            // WS_BORDER 처리: 검은색 1px 테두리
-            if (state.style & WS_BORDER) != 0 {
-                GdiRenderer::draw_rect(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    final_dest_x,
-                    final_dest_y,
-                    final_dest_x + src_width as i32,
-                    final_dest_y + src_height as i32,
-                    Some(0xFF000000), // Black
-                    None,
-                );
-            }
-
-            // WS_DLGFRAME / WS_SIZEBOX (WS_THICKFRAME) 처리: 3D 테두리
-            if !state.use_native_frame {
-                if (state.style & WS_DLGFRAME) != 0 || (state.style & WS_SIZEBOX) != 0 {
-                    GdiRenderer::draw_edge(
-                        buffer,
-                        buffer_width,
-                        buffer_height,
-                        final_dest_x,
-                        final_dest_y,
-                        final_dest_x + src_width as i32,
-                        final_dest_y + src_height as i32,
-                        false, // Raised
-                    );
-                }
-            }
-
-            // WS_HSCROLL 처리: 하단 가로 스크롤바 (단순 플레이스홀더)
-            if (state.style & WS_HSCROLL) != 0 {
-                let scroll_h = 16i32;
-                let top = (final_dest_y + src_height as i32 - scroll_h).max(final_dest_y);
-                GdiRenderer::draw_rect(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    final_dest_x,
-                    top,
-                    final_dest_x + src_width as i32,
-                    final_dest_y + src_height as i32,
-                    Some(0xFF808080), // Gray Pen
-                    Some(0xFFC0C0C0), // Face Brush
-                );
-                // 양쪽 버튼
-                GdiRenderer::draw_edge(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    final_dest_x,
-                    top,
-                    final_dest_x + 16,
-                    final_dest_y + src_height as i32,
-                    false,
-                );
-                GdiRenderer::draw_edge(
-                    buffer,
-                    buffer_width,
-                    buffer_height,
-                    final_dest_x + src_width as i32 - 16,
-                    top,
-                    final_dest_x + src_width as i32,
-                    final_dest_y + src_height as i32,
-                    false,
-                );
-            }
-        }
-
-        for child_hwnd in Self::child_windows(windows, hwnd) {
-            let Some(child_state) = windows.get(&child_hwnd) else {
-                continue;
-            };
-
-            let child_x = if is_root {
-                child_state.x
-            } else {
-                dest_x + child_state.x
-            };
-            let child_y = if is_root {
-                child_state.y
-            } else {
-                dest_y + child_state.y
-            };
-
-            self.composite_window_tree(
-                buffer,
-                buffer_width,
-                buffer_height,
-                windows,
-                gdi_objects,
-                child_hwnd,
-                child_x,
-                child_y,
-                false,
-            );
         }
     }
 }
@@ -1532,37 +1612,30 @@ impl Painter for DefaultEmulatorPainter {
     }
 
     fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) -> bool {
-        // 세대 카운터가 변경된 경우에만 윈도우 상태를 재복제합니다.
-        {
-            let win_event = match self.emu_context.win_event.try_lock() {
-                Ok(event) => event,
-                Err(_) => return false,
-            };
-            if win_event.generation != self.cached_generation {
-                self.cached_windows = win_event.windows.clone();
-                self.cached_generation = win_event.generation;
-            }
-        }
+        // 윈도우에 SetWindowRgn으로 비직사각형 영역이 설정되어 있으면 해당 rect 목록을 미리 복사한다.
+        // gdi_objects 락과 win_event 락을 동시에 보유하지 않도록 먼저 win_event에서 rect 리스트만 추출.
+        let rgn_handle: u32 = match self.emu_context.win_event.try_lock() {
+            Ok(win_event) => win_event
+                .windows
+                .get(&self.hwnd)
+                .map(|w| w.window_rgn)
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
 
         let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
             Ok(g) => g,
-            Err(_) => return false, // 락 획 실패 시 이번 프레임은 건너뜀 (데드락 방지)
+            Err(_) => return false, // 락 획득 실패 시 이번 프레임은 건너뜀 (데드락 방지)
         };
 
-        if self.cached_windows.contains_key(&self.hwnd) {
-            self.composite_window_tree(
-                buffer,
-                width,
-                height,
-                &self.cached_windows,
-                &gdi_objects,
-                self.hwnd,
-                0,
-                0,
-                true,
-            );
-            return true;
-        }
+        let region_rects: Option<Vec<(i32, i32, i32, i32)>> = if rgn_handle != 0 {
+            match gdi_objects.get(&rgn_handle) {
+                Some(GdiObject::Region { rects }) => Some(rects.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         if let Some(GdiObject::Bitmap {
             pixels: p,
@@ -1572,19 +1645,13 @@ impl Painter for DefaultEmulatorPainter {
         }) = gdi_objects.get(&self.surface_bitmap)
         {
             let p = p.lock().unwrap();
-            let default_clip = [(0, 0, *sw as i32, *sh as i32)];
-            Self::blit_bitmap(
-                buffer,
-                width,
-                height,
-                0,
-                0,
-                &p,
-                *sw,
-                *sh,
-                &default_clip,
-                &[],
-            );
+            Self::blit_bitmap(buffer, width, height, &p, *sw, *sh);
+        }
+
+        drop(gdi_objects);
+
+        if let Some(rects) = region_rects {
+            Self::apply_window_rgn_mask(buffer, width, height, &rects);
         }
 
         true
@@ -1607,5 +1674,206 @@ impl Painter for DefaultEmulatorPainter {
     }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        HostWindowStyle, WS_CAPTION, WS_POPUP, WS_SYSMENU, WinFrame, enqueue_window_message,
+    };
+    use crate::dll::win32::{Win32Context, WindowState};
+    use winit::window::{WindowButtons, WindowId};
+
+    #[test]
+    fn duplicated_resize_messages_keep_only_latest_one() {
+        let mut queue = std::collections::VecDeque::from([
+            [0x1001, 0x0005, 0, 0x0010_0020, 0, 0, 0],
+            [0x1001, 0x000F, 0, 0, 0, 0, 0],
+            [0x1001, 0x0005, 0, 0x0030_0040, 0, 0, 0],
+        ]);
+
+        enqueue_window_message(&mut queue, [0x1001, 0x0005, 0, 0x0050_0060, 0, 0, 0]);
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0][1], 0x000F);
+        assert_eq!(queue[1][1], 0x0005);
+        assert_eq!(queue[1][3], 0x0050_0060);
+    }
+
+    fn sample_window_state(parent: u32, z_order: u32) -> WindowState {
+        WindowState {
+            class_name: "TEST".to_string(),
+            class_icon: 0,
+            big_icon: 0,
+            small_icon: 0,
+            class_hbr_background: 0,
+            title: "test".to_string(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            style: 0,
+            ex_style: 0,
+            parent,
+            id: 0,
+            visible: true,
+            enabled: true,
+            zoomed: false,
+            iconic: false,
+            wnd_proc: 0,
+            class_cursor: 0,
+            user_data: 0,
+            use_native_frame: true,
+            surface_bitmap: 0,
+            window_rgn: 0,
+            guest_frame_left: 0,
+            guest_frame_top: 0,
+            guest_frame_right: 0,
+            guest_frame_bottom: 0,
+            needs_paint: false,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order,
+        }
+    }
+
+    fn dummy_window_id(raw: u64) -> WindowId {
+        WindowId::from(raw)
+    }
+
+    #[test]
+    fn activation_order_visits_children_from_lower_z_to_higher_z() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let context = Win32Context::new(None);
+        {
+            let mut win_event = context.win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state(0, 0));
+            win_event.create_window(0x1001, sample_window_state(0x1000, 2));
+            win_event.create_window(0x1002, sample_window_state(0x1000, 1));
+            win_event.create_window(0x1003, sample_window_state(0x1002, 0));
+        }
+
+        let frame = WinFrame::new(rx, Vec::new(), context);
+        assert_eq!(
+            frame.activation_hwnds_in_order(0x1000),
+            vec![0x1000, 0x1002, 0x1003, 0x1001]
+        );
+    }
+
+    #[test]
+    fn hovered_window_overrides_focused_window_for_cursor_owner() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let context = Win32Context::new(None);
+        let mut frame = WinFrame::new(rx, Vec::new(), context);
+        let hovered = dummy_window_id(1);
+        let focused = dummy_window_id(2);
+
+        assert!(frame.set_focused_window(Some(focused)));
+        assert_eq!(frame.current_cursor_owner(), Some(focused));
+
+        assert!(frame.set_hovered_window(Some(hovered)));
+        assert_eq!(frame.current_cursor_owner(), Some(hovered));
+
+        assert!(frame.set_hovered_window(None));
+        assert_eq!(frame.current_cursor_owner(), Some(focused));
+    }
+
+    #[test]
+    fn focus_only_drives_cursor_owner_when_no_window_is_hovered() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let context = Win32Context::new(None);
+        let mut frame = WinFrame::new(rx, Vec::new(), context);
+        let hovered = dummy_window_id(3);
+        let focused = dummy_window_id(4);
+
+        frame.set_hovered_window(Some(hovered));
+        frame.set_focused_window(Some(focused));
+
+        assert_eq!(frame.current_cursor_owner(), Some(hovered));
+        assert!(!frame.is_cursor_owner(focused));
+        assert!(frame.is_cursor_owner(hovered));
+    }
+
+    #[test]
+    fn cached_cursor_is_isolated_per_window() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let context = Win32Context::new(None);
+        let mut frame = WinFrame::new(rx, Vec::new(), context.clone());
+        let first = dummy_window_id(5);
+        let second = dummy_window_id(6);
+
+        frame.id_to_hwnd.insert(first, 0x1001);
+        frame.id_to_hwnd.insert(second, 0x1002);
+        frame.hwnd_to_id.insert(0x1001, first);
+        frame.hwnd_to_id.insert(0x1002, second);
+
+        let mut second_window = sample_window_state(0, 0);
+        second_window.class_cursor = 0x2222;
+        {
+            let mut win_event = context.win_event.lock().unwrap();
+            win_event.create_window(0x1001, sample_window_state(0, 0));
+            win_event.create_window(0x1002, second_window);
+        }
+
+        frame.cache_window_cursor(first, 0x1111);
+
+        assert_eq!(frame.effective_cursor_handle_for_window(first), 0x1111);
+        assert_eq!(frame.effective_cursor_handle_for_window(second), 0x2222);
+    }
+
+    #[test]
+    fn leaving_window_clears_hover_and_stale_cursor_animation() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let context = Win32Context::new(None);
+        let mut frame = WinFrame::new(rx, Vec::new(), context);
+        let hovered = dummy_window_id(7);
+
+        frame.hovered_window_id = Some(hovered);
+        frame.current_cursor = Some((hovered, 0x1234));
+        frame.cursor_anim = Some(super::CursorAnimState {
+            hcursor: 0x1234,
+            window_id: hovered,
+            frame_index: 0,
+            frame_count: 2,
+            interval: std::time::Duration::from_millis(100),
+            last_switch: std::time::Instant::now(),
+        });
+
+        assert!(frame.set_hovered_window(None));
+        assert_eq!(frame.hovered_window_id, None);
+        assert_eq!(frame.current_cursor, None);
+        assert_eq!(frame.cursor_anim.as_ref().map(|anim| anim.window_id), None);
+    }
+
+    #[test]
+    fn framed_popup_keeps_native_decorations() {
+        let host_style =
+            HostWindowStyle::from_guest(0x8000_0000 | WS_CAPTION | WS_SYSMENU, 0, true);
+
+        assert!(host_style.decorations);
+        assert!(host_style.enabled_buttons.contains(WindowButtons::CLOSE));
+    }
+
+    #[test]
+    fn plain_popup_stays_undecorated() {
+        let host_style = HostWindowStyle::from_guest(0x8000_0000, 0, true);
+
+        assert!(!host_style.decorations);
+        assert!(host_style.enabled_buttons.is_empty());
+    }
+
+    #[test]
+    fn plain_popup_is_transparent_for_region_clipping() {
+        let host_style = HostWindowStyle::from_guest(WS_POPUP, 0, true);
+
+        assert!(host_style.transparent);
+    }
+
+    #[test]
+    fn framed_popup_stays_opaque() {
+        let host_style = HostWindowStyle::from_guest(WS_POPUP | WS_CAPTION, 0, true);
+
+        assert!(!host_style.transparent);
     }
 }

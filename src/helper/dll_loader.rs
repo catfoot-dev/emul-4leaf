@@ -260,11 +260,11 @@ pub(crate) fn resolve_imports_impl(
                     let context = uc.get_data();
                     let dll_modules = context.dll_modules.lock().unwrap();
                     for (name, dll) in dll_modules.iter() {
-                        if name.eq_ignore_ascii_case(&dll_name) {
-                            if let Some(real_addr) = dll.exports.get(&func_name) {
-                                final_addr = *real_addr;
-                                break;
-                            }
+                        if name.eq_ignore_ascii_case(&dll_name)
+                            && let Some(real_addr) = dll.exports.get(&func_name)
+                        {
+                            final_addr = *real_addr;
+                            break;
                         }
                     }
                 }
@@ -344,7 +344,7 @@ pub(crate) fn run_dll_entry_impl(
         dll.entry_point
     );
 
-    if let Err(e) = uc.emu_start(dll.entry_point, EXIT_ADDRESS as u64, 0, 0) {
+    if let Err(e) = uc.emu_start(dll.entry_point, EXIT_ADDRESS, 0, 0) {
         crate::emu_log!("[!] DllMain for {} failed: {:?}", dll.name, e);
     } else {
         crate::emu_log!("[*] DllMain for {} finished successfully.", dll.name);

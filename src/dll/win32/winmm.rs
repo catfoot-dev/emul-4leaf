@@ -4,6 +4,7 @@ use unicorn_engine::Unicorn;
 /// `WINMM.dll` 프록시 구현 모듈
 ///
 /// 윈도우 멀티미디어 API (밀리초 정밀도 시간 측정 등) 호출에 대해 가벼운 목(Mock) 환경을 구성
+#[allow(clippy::upper_case_acronyms)]
 pub struct WINMM;
 
 impl WINMM {
@@ -11,7 +12,7 @@ impl WINMM {
     // 역할: 시스템 시간이 시작된 후 경과된 시간을 밀리초 단위로 검색
     pub fn time_get_time(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let elapsed = uc.get_data().start_time.elapsed().as_millis() as u32;
-        crate::emu_log!("[WINMM] timeGetTime() -> DWORD {}", elapsed);
+        // crate::emu_log!("[WINMM] timeGetTime() -> DWORD {}", elapsed);
         Some(ApiHookResult::callee(0, Some(elapsed as i32)))
     }
 

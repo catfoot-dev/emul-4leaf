@@ -43,6 +43,7 @@ fn stack_cleanup_final_esp(esp: u64, cleanup: StackCleanup) -> u64 {
 /// Unicorn 객체에 추가할 메소드 목록 정의
 ///
 /// Unicorn 엔진을 확장하여 Win32 에뮬레이션에 필요한 메모리 조작, 스택 제어, DLL 로딩 등을 지원하는 헬퍼 트레잇
+#[allow(dead_code)]
 pub trait UnicornHelper {
     /// 에뮬레이터의 초기 환경을 구성
     /// 스택, 힙, 통신 채널 등을 설정하고 기본적인 API 후킹 준비를 완료

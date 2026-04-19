@@ -3,8 +3,21 @@ pub mod splash;
 pub mod win_event;
 pub mod win_frame;
 
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
+use winit::window::WindowAttributes;
+
 /// 내장 폰트 데이터 (gulim.ttf)
 pub const GULIM_FONT_DATA: &[u8] = include_bytes!("../../gulim.ttf");
+
+/// 호스트 창 위치 좌표가 어떤 기준을 따르는지 나타냅니다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowPositionMode {
+    /// 화면 절대 좌표를 사용합니다.
+    Screen,
+    /// 부모 클라이언트 영역 기준 좌표를 사용합니다.
+    ParentClient,
+}
 
 /// 에뮬레이터 코어(Win32 API)가 UI 스레드에 요청하는 창 조작 커맨드
 pub enum UiCommand {
@@ -14,10 +27,12 @@ pub enum UiCommand {
         hwnd: u32,
         /// 창 제목
         title: String,
-        /// 초기 X 위치
+        /// 위치 좌표계 기준 X 위치
         x: i32,
-        /// 초기 Y 위치
+        /// 위치 좌표계 기준 Y 위치
         y: i32,
+        /// `x`, `y`가 따르는 위치 좌표계
+        position_mode: WindowPositionMode,
         /// 너비
         width: u32,
         /// 높이
@@ -26,7 +41,7 @@ pub enum UiCommand {
         style: u32,
         /// 확장 스타일 (WS_EX_*)
         ex_style: u32,
-        /// 부모 HWND
+        /// guest 논리 부모 HWND
         parent: u32,
         /// 초기 표시 여부
         visible: bool,
@@ -54,13 +69,19 @@ pub enum UiCommand {
     /// 윈도우 위치/크기 변경 요청
     MoveWindow {
         hwnd: u32,
+        /// 위치 좌표계 기준 X 위치
         x: i32,
+        /// 위치 좌표계 기준 Y 위치
         y: i32,
+        /// `x`, `y`가 따르는 위치 좌표계
+        position_mode: WindowPositionMode,
         width: u32,
         height: u32,
     },
     /// 윈도우 제목 변경 요청
     SetWindowText { hwnd: u32, text: String },
+    /// 윈도우 아이콘 변경 요청
+    SetWindowIcon { hwnd: u32, hicon: u32 },
     /// 윈도우 강제 렌더링(업데이트) 요청
     UpdateWindow { hwnd: u32 },
     /// 윈도우 활성화(포커스) 요청
@@ -93,7 +114,28 @@ pub enum UiCommand {
     RestoreWindow { hwnd: u32 },
 }
 
+/// 플랫폼별 기본 창 속성을 적용합니다.
+pub(crate) fn apply_platform_window_attributes(attributes: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::{platform::macos::OptionAsAlt, window::WindowButtons};
+
+        return attributes
+            .with_enabled_buttons(WindowButtons::empty())
+            .with_title_hidden(true)
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_option_as_alt(OptionAsAlt::Both)
+            .with_borderless_game(true)
+            .with_active(true);
+    }
+
+    #[allow(unreachable_code)]
+    attributes
+}
+
 /// 윈도우 콘텐츠를 그리는 인터페이스
+#[allow(dead_code)]
 pub trait Painter: std::any::Any {
     fn create_window(
         &self,

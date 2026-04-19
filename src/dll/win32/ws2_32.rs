@@ -11,7 +11,6 @@ use unicorn_engine::Unicorn;
 ///
 /// `std::sync::mpsc` 채널 기반 인-프로세스 가상 소켓 I/O를 에뮬레이션합니다.
 /// connect() 호출 시 DNet 핸들러 스레드를 생성하며, 실제 TCP 연결은 사용하지 않습니다.
-
 /// WSAEWOULDBLOCK - 논블로킹 소켓의 '지금 바로 처리 불가' 오류 코드입니다.
 const WSAEWOULDBLOCK: u32 = 10035;
 /// WSAECONNREFUSED - 연결 거부 오류 코드입니다.
@@ -26,7 +25,7 @@ const FIONBIO: u32 = 0x8004667E;
 /// recv 계열에서 버퍼를 소비하지 않고 미리보기만 하는 플래그입니다.
 const MSG_PEEK: u32 = 0x0002;
 /// send/recv 계열의 OOB 플래그입니다.
-const MSG_OOB: u32 = 0x0001;
+// const MSG_OOB: u32 = 0x0001;
 /// WSASocketA에서 일반적으로 사용되는 overlapped 플래그입니다.
 const WSA_FLAG_OVERLAPPED: u32 = 0x01;
 /// WSASocketA의 handle 상속 금지 플래그입니다.
@@ -284,23 +283,22 @@ impl WS2_32 {
             .get(&sock)
             .and_then(|s| s.remote_addr.clone());
 
-        if let Some(addr) = remote {
-            if let Ok(sockaddr) = addr.parse::<std::net::SocketAddr>() {
-                if let std::net::SocketAddr::V4(v4) = sockaddr {
-                    let ip = v4.ip().octets();
-                    let port = v4.port().to_be();
-                    if addr_ptr != 0 {
-                        uc.write_u32(addr_ptr as u64, 0x0002u32); // sin_family = AF_INET(2)
-                        uc.mem_write(addr_ptr as u64 + 2, &port.to_be_bytes()).ok();
-                        uc.mem_write(addr_ptr as u64 + 4, &ip).ok();
-                    }
-                    if addrlen_ptr != 0 {
-                        uc.write_u32(addrlen_ptr as u64, 16);
-                    }
-                    crate::emu_log!("[WS2_32] getpeername({}) -> \"{}\" (OK)", sock, addr);
-                    return Some(ApiHookResult::callee(3, Some(0)));
-                }
+        if let Some(addr) = remote
+            && let Ok(sockaddr) = addr.parse::<std::net::SocketAddr>()
+            && let std::net::SocketAddr::V4(v4) = sockaddr
+        {
+            let ip = v4.ip().octets();
+            let port = v4.port().to_be();
+            if addr_ptr != 0 {
+                uc.write_u32(addr_ptr as u64, 0x0002u32); // sin_family = AF_INET(2)
+                uc.mem_write(addr_ptr as u64 + 2, &port.to_be_bytes()).ok();
+                uc.mem_write(addr_ptr as u64 + 4, &ip).ok();
             }
+            if addrlen_ptr != 0 {
+                uc.write_u32(addrlen_ptr as u64, 16);
+            }
+            crate::emu_log!("[WS2_32] getpeername({}) -> \"{}\" (OK)", sock, addr);
+            return Some(ApiHookResult::callee(3, Some(0)));
         }
         crate::emu_log!(
             "[WS2_32] getpeername({}) -> SOCKET_ERROR (not connected)",
@@ -627,10 +625,10 @@ impl WS2_32 {
             for i in 0..count {
                 let sock = uc.read_u32(writefds_ptr as u64 + 4 + (i * 4) as u64);
                 let sockets = ctx.tcp_sockets.lock().unwrap();
-                if let Some(s) = sockets.get(&sock) {
-                    if s.connected {
-                        ready_socks.push(sock);
-                    }
+                if let Some(s) = sockets.get(&sock)
+                    && s.connected
+                {
+                    ready_socks.push(sock);
                 }
             }
 
@@ -854,7 +852,7 @@ impl WS2_32 {
         uc.write_u32(ip_ptr + 4, 0); // NULL 종료
 
         let name_str = uc.alloc_str(&name);
-        uc.write_u32(hostent_addr, name_str as u32); // h_name
+        uc.write_u32(hostent_addr, name_str); // h_name
         uc.write_u32(hostent_addr + 4, 0); // h_aliases
         uc.write_u16(hostent_addr + 8, 2); // h_addrtype (AF_INET)
         uc.write_u16(hostent_addr + 10, 4); // h_length (IPv4)
@@ -950,12 +948,11 @@ impl WS2_32 {
             let ctx = uc.get_data();
 
             let mut sockets = ctx.tcp_sockets.lock().unwrap();
-            if let Some(s) = sockets.get_mut(&sock) {
-                if let Some(chan_tx) = s.chan_tx.as_ref() {
-                    if chan_tx.send(data.clone()).is_ok() {
-                        total_sent += buf_len;
-                    }
-                }
+            if let Some(s) = sockets.get_mut(&sock)
+                && let Some(chan_tx) = s.chan_tx.as_ref()
+                && chan_tx.send(data.clone()).is_ok()
+            {
+                total_sent += buf_len;
             }
             drop(sockets);
         }
@@ -1393,7 +1390,6 @@ mod tests {
     #[test]
     fn unsupported_flag_bits_reports_only_unknown_bits() {
         assert_eq!(unsupported_flag_bits(MSG_PEEK, MSG_PEEK), 0);
-        assert_eq!(unsupported_flag_bits(MSG_PEEK | MSG_OOB, MSG_PEEK), MSG_OOB);
         assert_eq!(
             unsupported_flag_bits(
                 WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT,

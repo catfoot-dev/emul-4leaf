@@ -152,14 +152,14 @@ pub(super) fn fread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     }
 
     let actual_count = (bytes_read as u32 / size) as i32;
-    crate::emu_log!(
-        "[MSVCRT] fread({:#x}, {:#x}, {:#x}, {:#x}) -> size_t {:#x}",
-        stream_handle,
-        size,
-        count,
-        buffer_addr,
-        actual_count
-    );
+    // crate::emu_log!(
+    //     "[MSVCRT] fread({:#x}, {:#x}, {:#x}, {:#x}) -> size_t {:#x}",
+    //     stream_handle,
+    //     size,
+    //     count,
+    //     buffer_addr,
+    //     actual_count
+    // );
     Some(ApiHookResult::callee(4, Some(actual_count)))
 }
 

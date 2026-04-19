@@ -15,9 +15,10 @@ fn get_ttf_font() -> Option<&'static TtfFont<'static>> {
 /// GDI 렌더링 엔진 (소프트웨어 래스터라이저)
 pub struct GdiRenderer;
 
+#[allow(dead_code, clippy::too_many_arguments)]
 impl GdiRenderer {
     /// 좌표가 클리핑 사각형 목록 안에 포함되는지 확인합니다.
-    fn point_in_clip_rects(clip_rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> bool {
+    pub(crate) fn point_in_clip_rects(clip_rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> bool {
         clip_rects
             .iter()
             .any(|&(left, top, right, bottom)| x >= left && x < right && y >= top && y < bottom)
@@ -142,7 +143,7 @@ impl GdiRenderer {
                 if top >= 0 && top < height as i32 {
                     pixels[(top * width as i32 + x) as usize] = color;
                 }
-                if bottom - 1 >= 0 && bottom - 1 < height as i32 {
+                if bottom > 0 && bottom - 1 < height as i32 {
                     pixels[((bottom - 1) * width as i32 + x) as usize] = color;
                 }
             }
@@ -151,7 +152,7 @@ impl GdiRenderer {
                 if left >= 0 && left < width as i32 {
                     pixels[(y * width as i32 + left) as usize] = color;
                 }
-                if right - 1 >= 0 && right - 1 < width as i32 {
+                if right > 0 && right - 1 < width as i32 {
                     pixels[(y * width as i32 + (right - 1)) as usize] = color;
                 }
             }
@@ -277,8 +278,11 @@ impl GdiRenderer {
                         // SRCINVERT: dst = dst ^ src
                         dest_pixels[dst_idx] ^= src_val;
                     }
-                    0x00CC0020 | _ => {
+                    0x00CC0020 => {
                         // SRCCOPY: dst = src
+                        dest_pixels[dst_idx] = src_val;
+                    }
+                    _ => {
                         dest_pixels[dst_idx] = src_val;
                     }
                 }
@@ -470,150 +474,5 @@ impl GdiRenderer {
         let ascent = v.ascent.ceil() as i32;
         let descent = (-v.descent).ceil() as i32;
         (height, ascent, descent)
-    }
-
-    /// Win32 DrawEdge 스타일의 3D 테두리를 그립니다.
-    pub fn draw_edge(
-        pixels: &mut [u32],
-        width: u32,
-        height: u32,
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-        is_sunken: bool,
-    ) {
-        let color_light = 0xFFFFFFFF; // 흰색
-        let color_shadow = 0xFF808080; // 회색
-        let color_dark = 0xFF000000; // 검은색
-        // let color_face = 0xFFC0C0C0; // 배경색 (밝은 회색)
-
-        if is_sunken {
-            // Sunken (눌린 효과)
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left,
-                top,
-                right - 1,
-                top,
-                color_shadow,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left,
-                top,
-                left,
-                bottom - 1,
-                color_shadow,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left + 1,
-                top + 1,
-                right - 2,
-                top + 1,
-                color_dark,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left + 1,
-                top + 1,
-                left + 1,
-                bottom - 2,
-                color_dark,
-            );
-
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left,
-                bottom - 1,
-                right - 1,
-                bottom - 1,
-                color_light,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                right - 1,
-                top,
-                right - 1,
-                bottom - 1,
-                color_light,
-            );
-        } else {
-            // Raised (튀어나온 효과)
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left,
-                top,
-                right - 2,
-                top,
-                color_light,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left,
-                top,
-                left,
-                bottom - 2,
-                color_light,
-            );
-
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left,
-                bottom - 1,
-                right - 1,
-                bottom - 1,
-                color_dark,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                right - 1,
-                top,
-                right - 1,
-                bottom - 1,
-                color_dark,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                left + 1,
-                bottom - 2,
-                right - 2,
-                bottom - 2,
-                color_shadow,
-            );
-            Self::draw_line(
-                pixels,
-                width,
-                height,
-                right - 2,
-                top + 1,
-                right - 2,
-                bottom - 2,
-                color_shadow,
-            );
-        }
     }
 }

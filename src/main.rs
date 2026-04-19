@@ -3,6 +3,8 @@
 //! 이 모듈은 에뮬레이터의 생명주기를 관리하며, UI 스레드, 에뮬레이션 스레드,
 //! 그리고 서버 스레드 간의 조율을 담당합니다.
 
+#![windows_subsystem = "windows"]
+
 mod boot;
 mod debug;
 mod dll;
@@ -47,9 +49,7 @@ macro_rules! emu_log {
         if $crate::debug::should_send_debug_messages() {
             let index = $crate::INDEX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let msg = std::format!("[{:#08x}] {}", index, std::format!($($arg)*)).replace("\r", "\\r").replace("\n", "\\n");
-            // if msg.contains("[UI]") || msg.contains("CreateWindowExA") {
-                $crate::push_log(msg)
-            // }
+            $crate::push_log(msg)
         }
     }};
 }
@@ -107,7 +107,7 @@ fn main() {
                 "emu.log",
                 &format!("[BOOT] headless emu_4leaf error: {:?}", e),
             );
-            eprintln!("[4leaf Emulator Error] {:?}", e);
+            println!("[4leaf Emulator Error] {:?}", e);
         }
         append_capture_line("emu.log", "[BOOT] headless emu_4leaf() returned");
         return;
@@ -128,7 +128,7 @@ fn main() {
                 "emu.log",
                 &format!("[BOOT] emulation thread error: {:?}", e),
             );
-            eprintln!("[4leaf Emulator Error] {:?}", e);
+            println!("[4leaf Emulator Error] {:?}", e);
         }
         append_capture_line("emu.log", "[BOOT] emulation thread finished");
     });

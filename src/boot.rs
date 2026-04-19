@@ -33,12 +33,12 @@ pub fn detect_resource_dir() {
         let mut v = Vec::new();
 
         // 실행 파일 위치 기준 후보
-        if let Ok(exe) = env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                v.push(exe_dir.to_path_buf());
-                v.push(exe_dir.join("Resources"));
-                v.push(exe_dir.join("../4Leaf"));
-            }
+        if let Ok(exe) = env::current_exe()
+            && let Some(exe_dir) = exe.parent()
+        {
+            v.push(exe_dir.to_path_buf());
+            v.push(exe_dir.join("Resources"));
+            v.push(exe_dir.join("../4Leaf"));
         }
 
         // 현재 작업 디렉토리 기준 후보
@@ -65,7 +65,7 @@ pub fn detect_resource_dir() {
             let resolved = candidate
                 .canonicalize()
                 .unwrap_or_else(|_| candidate.clone());
-            eprintln!("[BOOT] Resource directory: {}", resolved.display());
+            println!("[BOOT] Resource directory: {}", resolved.display());
             let _ = RESOURCE_DIR.set(resolved);
             return;
         }
@@ -79,9 +79,9 @@ pub fn detect_resource_dir() {
         .copied()
         .collect();
     if missing.is_empty() {
-        eprintln!("[BOOT] Resource directory (fallback): ./Resources");
+        println!("[BOOT] Resource directory (fallback): ./Resources");
     } else {
-        eprintln!(
+        println!(
             "[BOOT] Resource directory not found! Missing files: {}",
             missing.join(", ")
         );

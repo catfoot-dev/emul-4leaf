@@ -14,6 +14,7 @@ use unicorn_engine::Unicorn;
 /// `MSVCRT.dll` 프록시 구현 모듈
 ///
 /// C 런타임 라이브러리(CRT) 함수를 우회/구현하며 메모리 할당(malloc), 문자열 포맷팅, 예외 처리 등을 담당
+#[allow(clippy::upper_case_acronyms)]
 pub struct MSVCRT;
 
 impl MSVCRT {
@@ -30,11 +31,12 @@ impl MSVCRT {
         let is_thiscall = func_name.contains("@QAE") || func_name.contains("@IAE");
         let is_stdcall = func_name.contains("@YG") || func_name == "__CxxFrameHandler";
 
-        if !is_thiscall && !is_stdcall {
-            if let Some(mut r) = result {
-                r.cleanup = StackCleanup::Caller;
-                return Some(r);
-            }
+        if !is_thiscall
+            && !is_stdcall
+            && let Some(mut r) = result
+        {
+            r.cleanup = StackCleanup::Caller;
+            return Some(r);
         }
         result
     }

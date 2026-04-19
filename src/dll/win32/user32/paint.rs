@@ -5,20 +5,250 @@ use crate::{
 };
 use unicorn_engine::Unicorn;
 
+const WS_CHILD: u32 = 0x4000_0000;
+const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
+const WS_CLIPCHILDREN: u32 = 0x0200_0000;
+
+const WHITE_BRUSH: u32 = 0;
+const LTGRAY_BRUSH: u32 = 1;
+const GRAY_BRUSH: u32 = 2;
+const DKGRAY_BRUSH: u32 = 3;
+const BLACK_BRUSH: u32 = 4;
+const NULL_BRUSH: u32 = 5;
+
+fn system_color_to_rgb(index: u32) -> u32 {
+    match index {
+        5 => 0x00FF_FFFF,  // COLOR_WINDOW
+        8 => 0x0000_0000,  // COLOR_WINDOWTEXT
+        15 => 0x00C0_C0C0, // COLOR_BTNFACE
+        _ => 0x00C0_C0C0,
+    }
+}
+
+fn stock_brush_to_rgb(index: u32) -> Option<u32> {
+    match index {
+        WHITE_BRUSH => Some(0x00FF_FFFF),
+        LTGRAY_BRUSH => Some(0x00C0_C0C0),
+        GRAY_BRUSH => Some(0x0080_8080),
+        DKGRAY_BRUSH => Some(0x0040_4040),
+        BLACK_BRUSH => Some(0x0000_0000),
+        NULL_BRUSH => None,
+        _ => None,
+    }
+}
+
+fn normalize_rect(rect: (i32, i32, i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    let (left, top, right, bottom) = rect;
+    (left < right && top < bottom).then_some((left, top, right, bottom))
+}
+
+/// 창 표면 내부에서 클라이언트 영역 사각형을 계산합니다.
+fn window_client_rect(ctx: &Win32Context, hwnd: u32) -> Option<(i32, i32, i32, i32, u32, u32)> {
+    let win_event = ctx.win_event.lock().unwrap();
+    let state = win_event.windows.get(&hwnd)?;
+    let metrics = crate::dll::win32::user32::USER32::get_window_frame_metrics(state);
+    let left = metrics.left;
+    let top = metrics.top;
+    let mut right = state.width.max(0);
+    let mut bottom = state.height.max(0);
+
+    right -= metrics.right;
+    bottom -= metrics.bottom;
+
+    right = right.max(left);
+    bottom = bottom.max(top);
+    Some((
+        left,
+        top,
+        right,
+        bottom,
+        state.surface_bitmap,
+        u32::try_from(state.width.max(0)).ok()?,
+    ))
+}
+
+/// 윈도우 스타일과 Z 순서를 고려해 클라이언트 클리핑 사각형 목록을 계산합니다.
+fn build_client_clip_rects(ctx: &Win32Context, hwnd: u32) -> Option<Vec<(i32, i32, i32, i32)>> {
+    let win_event = ctx.win_event.lock().unwrap();
+    let state = win_event.windows.get(&hwnd)?;
+    let metrics = crate::dll::win32::user32::USER32::get_window_frame_metrics(state);
+    let base_rect = normalize_rect((
+        metrics.left,
+        metrics.top,
+        (state.width.max(0) - metrics.right).max(metrics.left),
+        (state.height.max(0) - metrics.bottom).max(metrics.top),
+    ))?;
+
+    let mut subtractors = Vec::new();
+
+    if (state.style & WS_CLIPCHILDREN) != 0 {
+        for (&child_hwnd, child) in &win_event.windows {
+            if child_hwnd == hwnd
+                || child.parent != hwnd
+                || !child.visible
+                || (child.style & WS_CHILD) == 0
+            {
+                continue;
+            }
+
+            if let Some(rect) = normalize_rect((
+                metrics.left + child.x,
+                metrics.top + child.y,
+                metrics.left + child.x + child.width.max(0),
+                metrics.top + child.y + child.height.max(0),
+            )) {
+                subtractors.push(rect);
+            }
+        }
+    }
+
+    if state.parent != 0 && (state.style & WS_CHILD) != 0 && (state.style & WS_CLIPSIBLINGS) != 0 {
+        for (&sibling_hwnd, sibling) in &win_event.windows {
+            if sibling_hwnd == hwnd
+                || sibling.parent != state.parent
+                || !sibling.visible
+                || (sibling.style & WS_CHILD) == 0
+                || sibling.z_order <= state.z_order
+            {
+                continue;
+            }
+
+            if let Some(rect) = normalize_rect((
+                sibling.x - state.x,
+                sibling.y - state.y,
+                sibling.x - state.x + sibling.width.max(0),
+                sibling.y - state.y + sibling.height.max(0),
+            )) {
+                subtractors.push(rect);
+            }
+        }
+    }
+
+    Some(GDI32::subtract_region_rects(&[base_rect], &subtractors))
+}
+
+/// 클라이언트 영역용 임시 클리핑 리전을 생성합니다.
+fn create_client_clip_region(ctx: &Win32Context, hwnd: u32) -> u32 {
+    let Some(rects) = build_client_clip_rects(ctx, hwnd) else {
+        return 0;
+    };
+    let hrgn = ctx.alloc_handle();
+    ctx.gdi_objects
+        .lock()
+        .unwrap()
+        .insert(hrgn, GdiObject::Region { rects });
+    hrgn
+}
+
+/// 브러시 핸들 또는 `COLOR_xxx + 1` 값을 실제 RGB 색상으로 풉니다.
+pub(super) fn resolve_brush_color(ctx: &Win32Context, hbrush: u32) -> Option<u32> {
+    if hbrush == 0 {
+        return None;
+    }
+
+    if hbrush <= 0x1_0000 {
+        return Some(system_color_to_rgb(hbrush.saturating_sub(1)));
+    }
+
+    let gdi = ctx.gdi_objects.lock().unwrap();
+    match gdi.get(&hbrush) {
+        Some(GdiObject::Brush { color }) => Some(*color),
+        Some(GdiObject::StockObject(index)) => stock_brush_to_rgb(*index),
+        _ => None,
+    }
+}
+
+/// 창 클래스에 등록된 배경 브러시로 전체 클라이언트 영역을 지웁니다.
+pub(super) fn erase_window_background(uc: &mut Unicorn<Win32Context>, hwnd: u32) -> bool {
+    let (left, top, right, bottom, hbmp, hbr_background, clip_rects) = {
+        let ctx = uc.get_data();
+        let client_rect = window_client_rect(ctx, hwnd);
+        let clip_rects = build_client_clip_rects(ctx, hwnd);
+        let win_event = ctx.win_event.lock().unwrap();
+        win_event
+            .windows
+            .get(&hwnd)
+            .and_then(|state| {
+                client_rect.map(|(left, top, right, bottom, surface_bitmap, _)| {
+                    (
+                        left,
+                        top,
+                        right,
+                        bottom,
+                        surface_bitmap,
+                        state.class_hbr_background,
+                        clip_rects.unwrap_or_else(|| vec![(left, top, right, bottom)]),
+                    )
+                })
+            })
+            .unwrap_or((0, 0, 0, 0, 0, 0, Vec::new()))
+    };
+
+    if hbmp == 0 {
+        return false;
+    }
+
+    let Some(color) = resolve_brush_color(uc.get_data(), hbr_background) else {
+        return false;
+    };
+
+    GDI32::sync_dib_pixels(uc, hbmp);
+
+    let gdi = uc.get_data().gdi_objects.lock().unwrap();
+    let Some(GdiObject::Bitmap {
+        width,
+        height,
+        pixels,
+        ..
+    }) = gdi.get(&hbmp)
+    else {
+        return false;
+    };
+
+    let mut pixels = pixels.lock().unwrap();
+    GdiRenderer::draw_rect_clipped(
+        &mut pixels,
+        *width,
+        *height,
+        left,
+        top,
+        right,
+        bottom,
+        None,
+        Some(color),
+        &clip_rects,
+    );
+    drop(pixels);
+    if GDI32::should_trace_wallpaper() {
+        crate::append_capture_line(
+            "wallpaper.log",
+            &format!(
+                "stage=erase_background hwnd={hwnd:#x} rect=({}, {}, {}, {}) color={:#08x} hbr={:#x}",
+                left, top, right, bottom, color, hbr_background
+            ),
+        );
+    }
+    true
+}
+
 // API: HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint)
 // 역할: 그리기를 준비하고 PAINTSTRUCT를 채움. WM_PAINT 처리 시 사용됨.
 pub(super) fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hwnd = uc.read_arg(0);
     let lp_paint = uc.read_arg(1);
 
-    let (width, height, surface_bitmap, hdc) = {
+    let selected_region = create_client_clip_region(uc.get_data(), hwnd);
+    let (width, height, origin_x, origin_y, surface_bitmap, hdc) = {
         let ctx = uc.get_data();
         let mut win_event = ctx.win_event.lock().unwrap();
         if let Some(state) = win_event.windows.get_mut(&hwnd) {
             state.needs_paint = false; // 그리기 시작했으므로 무효 영역 해제
+            let metrics = crate::dll::win32::user32::USER32::get_window_frame_metrics(state);
             (
-                state.width as u32,
-                state.height as u32,
+                (state.width - metrics.left - metrics.right).max(0) as u32,
+                (state.height - metrics.top - metrics.bottom).max(0) as u32,
+                metrics.left,
+                metrics.top,
                 state.surface_bitmap,
                 ctx.alloc_handle(),
             )
@@ -27,6 +257,12 @@ pub(super) fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
         }
     };
 
+    // 실제 Win32의 BeginPaint는 무조건 배경을 다시 칠하지 않습니다.
+    // guest가 GetDC로 먼저 그려 둔 wallpaper/background가 있는데 여기서 강제로 지우면
+    // WM_PAINT 시점에 다시 복원하지 않는 창은 검은 client 영역만 남게 됩니다.
+    // 배경 지우기는 WM_ERASEBKGND 처리 경로에만 맡기고, BeginPaint는 DC 준비만 수행합니다.
+    let erased = false;
+
     // WM_PAINT 경로에서도 일반 GetDC와 동일하게 창 표면에 연결된 DC를 제공합니다.
     uc.get_data().gdi_objects.lock().unwrap().insert(
         hdc,
@@ -34,11 +270,13 @@ pub(super) fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
             associated_window: hwnd,
             width: width as i32,
             height: height as i32,
+            origin_x,
+            origin_y,
             selected_bitmap: surface_bitmap,
             selected_font: 0,
             selected_brush: 0,
             selected_pen: 0,
-            selected_region: 0,
+            selected_region,
             selected_palette: 0,
             bk_mode: 0,
             bk_color: 0,
@@ -50,8 +288,8 @@ pub(super) fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
     );
 
     // PAINTSTRUCT 채우기
-    uc.write_u32(lp_paint as u64 + 0, hdc); // hdc
-    uc.write_u32(lp_paint as u64 + 4, 0); // fErase
+    uc.write_u32(lp_paint as u64, hdc); // hdc
+    uc.write_u32(lp_paint as u64 + 4, if erased { 1 } else { 0 }); // fErase
     uc.write_u32(lp_paint as u64 + 8, 0); // rcPaint.left
     uc.write_u32(lp_paint as u64 + 12, 0); // rcPaint.top
     uc.write_u32(lp_paint as u64 + 16, width); // rcPaint.right
@@ -204,6 +442,8 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
             bk_color,
             bk_mode,
             associated_window,
+            origin_x,
+            origin_y,
             ..
         }) = gdi_objects.get(&hdc)
         {
@@ -219,6 +459,8 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                 *bk_color,
                 *bk_mode,
                 *associated_window,
+                *origin_x,
+                *origin_y,
                 font_height,
             ))
         } else {
@@ -226,7 +468,9 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
         }
     };
 
-    let Some((hbmp, text_color, bk_color, bk_mode, hwnd, font_height)) = draw_params else {
+    let Some((hbmp, text_color, bk_color, bk_mode, hwnd, origin_x, origin_y, font_height)) =
+        draw_params
+    else {
         crate::emu_log!(
             "[USER32] DrawTextA({:#x}, \"{}\", {}, {:#x}, {:#x}) -> int 0",
             hdc,
@@ -348,8 +592,8 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                     &mut pixels,
                     width,
                     height,
-                    draw_x,
-                    draw_y,
+                    draw_x + origin_x,
+                    draw_y + origin_y,
                     line,
                     font_size,
                     text_color,
@@ -394,6 +638,7 @@ pub(super) fn fill_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
     let top = uc.read_i32(lprc as u64 + 4);
     let right = uc.read_i32(lprc as u64 + 8);
     let bottom = uc.read_i32(lprc as u64 + 12);
+    let brush_color = resolve_brush_color(uc.get_data(), hbr);
 
     let mut draw_params = None;
     {
@@ -401,57 +646,61 @@ pub(super) fn fill_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
         if let Some(GdiObject::Dc {
             selected_bitmap,
             associated_window,
+            origin_x,
+            origin_y,
             ..
         }) = gdi.get(&hdc)
         {
-            let mut brush_color = None;
-            if hbr <= 0x1_0000 {
-                // Stock brush 또는 System Color index (COLOR_xxx + 1)
-                // 간단히 Light Gray 또는 흰색으로 기본처리
-                brush_color = Some(0x00C0C0C0);
-            } else if let Some(GdiObject::Brush { color }) = gdi.get(&hbr) {
-                brush_color = Some(*color);
-            }
-            draw_params = Some((*selected_bitmap, brush_color, *associated_window));
+            draw_params = Some((
+                *selected_bitmap,
+                brush_color,
+                *associated_window,
+                *origin_x,
+                *origin_y,
+            ));
         }
     }
 
-    if let Some((hbmp, Some(color), hwnd)) = draw_params {
-        if hbmp != 0 {
-            GDI32::sync_dib_pixels(uc, hbmp);
-            let clip_rects = GDI32::clip_rects_for_hdc(uc, hdc);
-            let gdi = uc.get_data().gdi_objects.lock().unwrap();
-            if let Some(GdiObject::Bitmap {
-                width,
-                height,
-                pixels,
-                ..
-            }) = gdi.get(&hbmp)
-            {
-                let width = *width;
-                let height = *height;
-                let mut pixels = pixels.lock().unwrap();
-                for (left, top, right, bottom) in
-                    GDI32::intersect_rect_with_clip_rects(&clip_rects, left, top, right, bottom)
-                {
-                    GdiRenderer::draw_rect(
-                        &mut pixels,
-                        width,
-                        height,
-                        left,
-                        top,
-                        right,
-                        bottom,
-                        None,
-                        Some(color),
-                    );
-                }
-                drop(pixels);
-                drop(gdi);
-                GDI32::flush_dib_pixels_to_memory(uc, hbmp);
-                if hwnd != 0 {
-                    uc.get_data().win_event.lock().unwrap().update_window(hwnd);
-                }
+    if let Some((hbmp, Some(color), hwnd, origin_x, origin_y)) = draw_params
+        && hbmp != 0
+    {
+        GDI32::sync_dib_pixels(uc, hbmp);
+        let clip_rects = GDI32::clip_rects_for_hdc(uc, hdc);
+        let gdi = uc.get_data().gdi_objects.lock().unwrap();
+        if let Some(GdiObject::Bitmap {
+            width,
+            height,
+            pixels,
+            ..
+        }) = gdi.get(&hbmp)
+        {
+            let width = *width;
+            let height = *height;
+            let mut pixels = pixels.lock().unwrap();
+            for (left, top, right, bottom) in GDI32::intersect_rect_with_clip_rects(
+                &clip_rects,
+                left + origin_x,
+                top + origin_y,
+                right + origin_x,
+                bottom + origin_y,
+            ) {
+                GdiRenderer::draw_rect(
+                    &mut pixels,
+                    width,
+                    height,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    None,
+                    Some(color),
+                );
+            }
+            drop(pixels);
+            drop(gdi);
+            GDI32::flush_dib_pixels_to_memory(uc, hbmp);
+            if hwnd != 0 {
+                uc.get_data().win_event.lock().unwrap().update_window(hwnd);
             }
         }
     }
@@ -471,25 +720,38 @@ pub(super) fn get_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hwnd = uc.read_arg(0);
     let ctx = uc.get_data();
     let hdc = ctx.alloc_handle();
-    let (w, h, surface_bitmap) = {
+    let (w, h, origin_x, origin_y, surface_bitmap) = {
         let win_event = ctx.win_event.lock().unwrap();
         win_event
             .windows
             .get(&hwnd)
-            .map(|win| (win.width, win.height, win.surface_bitmap))
-            .unwrap_or((640, 480, 0))
+            .map(|win| {
+                let metrics = crate::dll::win32::user32::USER32::get_window_frame_metrics(win);
+                (
+                    (win.width - metrics.left - metrics.right).max(0),
+                    (win.height - metrics.top - metrics.bottom).max(0),
+                    metrics.left,
+                    metrics.top,
+                    win.surface_bitmap,
+                )
+            })
+            .unwrap_or((640, 480, 0, 0, 0))
     };
+    // client clip 생성은 `win_event` 락을 푼 뒤에 수행해야 재귀 락으로 막히지 않습니다.
+    let selected_region = create_client_clip_region(ctx, hwnd);
     ctx.gdi_objects.lock().unwrap().insert(
         hdc,
         GdiObject::Dc {
             associated_window: hwnd,
-            width: w as i32,
-            height: h as i32,
+            width: w,
+            height: h,
+            origin_x,
+            origin_y,
             selected_bitmap: surface_bitmap,
             selected_font: 0,
             selected_brush: 0,
             selected_pen: 0,
-            selected_region: 0,
+            selected_region,
             selected_palette: 0,
             bk_mode: 0,
             bk_color: 0,
@@ -521,8 +783,10 @@ pub(super) fn get_window_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         hdc,
         GdiObject::Dc {
             associated_window: hwnd,
-            width: w as i32,
-            height: h as i32,
+            width: w,
+            height: h,
+            origin_x: 0,
+            origin_y: 0,
             selected_bitmap: surface_bitmap,
             selected_font: 0,
             selected_brush: 0,
@@ -601,4 +865,213 @@ pub(super) fn kill_timer(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
 
     crate::emu_log!("[USER32] KillTimer({:#x}, {:#x}) -> {}", hwnd, id, removed);
     Some(ApiHookResult::callee(2, Some(if removed { 1 } else { 0 })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dll::win32::{GdiObject, WindowState};
+    use crate::helper::UnicornHelper;
+    use unicorn_engine::{Arch, Mode, RegisterX86, Unicorn};
+
+    fn new_test_uc() -> Unicorn<'static, Win32Context> {
+        let mut uc =
+            Unicorn::new_with_data(Arch::X86, Mode::MODE_32, Win32Context::new(None)).unwrap();
+        uc.setup(None, None).unwrap();
+        uc
+    }
+
+    fn write_call_frame(uc: &mut Unicorn<Win32Context>, args: &[u32]) {
+        let esp = uc.reg_read(RegisterX86::ESP).unwrap() as u32;
+        uc.write_u32(esp as u64, 0xDEAD_BEEF);
+        for (index, value) in args.iter().enumerate() {
+            uc.write_u32(esp as u64 + 4 + (index as u64 * 4), *value);
+        }
+    }
+
+    fn sample_window_state(style: u32, parent: u32, z_order: u32) -> WindowState {
+        WindowState {
+            class_name: "TEST".to_string(),
+            class_icon: 0,
+            big_icon: 0,
+            small_icon: 0,
+            class_hbr_background: 0,
+            title: "test".to_string(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            style,
+            ex_style: 0,
+            parent,
+            id: 0,
+            visible: true,
+            enabled: true,
+            zoomed: false,
+            iconic: false,
+            wnd_proc: 0,
+            class_cursor: 0,
+            user_data: 0,
+            use_native_frame: false,
+            surface_bitmap: 0,
+            window_rgn: 0,
+            guest_frame_left: 0,
+            guest_frame_top: 0,
+            guest_frame_right: 0,
+            guest_frame_bottom: 0,
+            needs_paint: false,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order,
+        }
+    }
+
+    #[test]
+    fn clipchildren_excludes_visible_child_rectangles() {
+        let ctx = Win32Context::new(None);
+        {
+            let mut win_event = ctx.win_event.lock().unwrap();
+            let mut parent = sample_window_state(WS_CLIPCHILDREN, 0, 0);
+            parent.width = 200;
+            parent.height = 120;
+            win_event.create_window(0x1000, parent);
+
+            let mut child = sample_window_state(WS_CHILD, 0x1000, 0);
+            child.x = 10;
+            child.y = 20;
+            child.width = 40;
+            child.height = 30;
+            win_event.create_window(0x1001, child);
+        }
+
+        let hrgn = create_client_clip_region(&ctx, 0x1000);
+        let rects = {
+            let gdi = ctx.gdi_objects.lock().unwrap();
+            match gdi.get(&hrgn) {
+                Some(GdiObject::Region { rects }) => rects.clone(),
+                other => panic!("expected region, got {:?}", other),
+            }
+        };
+
+        assert_eq!(
+            rects,
+            vec![
+                (0, 0, 200, 20),
+                (0, 50, 200, 120),
+                (0, 20, 10, 50),
+                (50, 20, 200, 50)
+            ]
+        );
+    }
+
+    #[test]
+    fn clipchildren_does_not_exclude_owned_popup_rectangles() {
+        let ctx = Win32Context::new(None);
+        {
+            let mut win_event = ctx.win_event.lock().unwrap();
+            let mut parent = sample_window_state(WS_CLIPCHILDREN, 0, 0);
+            parent.width = 200;
+            parent.height = 120;
+            win_event.create_window(0x1000, parent);
+
+            let mut popup = sample_window_state(0x8000_0000, 0x1000, 0);
+            popup.x = 10;
+            popup.y = 20;
+            popup.width = 40;
+            popup.height = 30;
+            win_event.create_window(0x1001, popup);
+        }
+
+        let hrgn = create_client_clip_region(&ctx, 0x1000);
+        let rects = {
+            let gdi = ctx.gdi_objects.lock().unwrap();
+            match gdi.get(&hrgn) {
+                Some(GdiObject::Region { rects }) => rects.clone(),
+                other => panic!("expected region, got {:?}", other),
+            }
+        };
+
+        assert_eq!(rects, vec![(0, 0, 200, 120)]);
+    }
+
+    #[test]
+    fn clipsiblings_excludes_higher_z_sibling_overlap() {
+        let ctx = Win32Context::new(None);
+        {
+            let mut win_event = ctx.win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state(0, 0, 0));
+
+            let mut child = sample_window_state(WS_CHILD | WS_CLIPSIBLINGS, 0x1000, 0);
+            child.x = 10;
+            child.y = 10;
+            child.width = 100;
+            child.height = 80;
+            win_event.create_window(0x1001, child);
+
+            let mut sibling = sample_window_state(WS_CHILD, 0x1000, 1);
+            sibling.x = 60;
+            sibling.y = 40;
+            sibling.width = 100;
+            sibling.height = 80;
+            win_event.create_window(0x1002, sibling);
+        }
+
+        let hrgn = create_client_clip_region(&ctx, 0x1001);
+        let rects = {
+            let gdi = ctx.gdi_objects.lock().unwrap();
+            match gdi.get(&hrgn) {
+                Some(GdiObject::Region { rects }) => rects.clone(),
+                other => panic!("expected region, got {:?}", other),
+            }
+        };
+
+        assert_eq!(rects, vec![(0, 0, 100, 30), (0, 30, 50, 80)]);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn get_dc_applies_client_clip_for_non_native_frame_windows() {
+        let mut uc = new_test_uc();
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            let mut state = sample_window_state(0, 0, 0);
+            state.width = 100;
+            state.height = 80;
+            win_event.create_window(0x1000, state);
+        }
+        write_call_frame(&mut uc, &[0x1000]);
+
+        let result = get_dc(&mut uc).expect("get_dc result");
+        let hdc = result.return_value.expect("hdc") as u32;
+
+        assert_eq!(
+            GDI32::clip_rects_for_hdc(&uc, hdc),
+            Some(vec![(0, 0, 100, 80)])
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn get_window_dc_keeps_full_window_unclipped() {
+        let mut uc = new_test_uc();
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            let mut state = sample_window_state(0, 0, 0);
+            state.width = 100;
+            state.height = 80;
+            win_event.create_window(0x1000, state);
+        }
+        write_call_frame(&mut uc, &[0x1000]);
+
+        let result = get_window_dc(&mut uc).expect("get_window_dc result");
+        let hdc = result.return_value.expect("hdc") as u32;
+
+        assert_eq!(GDI32::clip_rects_for_hdc(&uc, hdc), None);
+    }
 }

@@ -40,6 +40,7 @@ pub struct KERNEL32 {}
 
 impl KERNEL32 {
     /// 종료된 가상 스레드 엔트리와 해당 TLS 슬롯을 정리합니다.
+    #[allow(dead_code)]
     fn cleanup_finished_threads(ctx: &Win32Context) {
         thread::cleanup_finished_threads_impl(ctx);
     }
@@ -218,10 +219,14 @@ mod tests {
     #[test]
     fn cleanup_finished_threads_prunes_dead_entries_and_tls() {
         let ctx = Win32Context::new(None);
+        let finished_stack = ctx.alloc_heap_block(0x1000).unwrap();
         {
             let mut threads = ctx.threads.lock().unwrap();
             threads.push(sample_thread(0x2001, true));
-            threads.push(sample_thread(0x2002, false));
+            let mut finished = sample_thread(0x2002, false);
+            finished.stack_alloc = finished_stack;
+            finished.stack_size = 0x1000;
+            threads.push(finished);
         }
         {
             let mut tls_slots = ctx.tls_slots.lock().unwrap();
@@ -239,6 +244,10 @@ mod tests {
         let tls_slots = ctx.tls_slots.lock().unwrap();
         assert!(tls_slots.contains_key(&0x2001));
         assert!(!tls_slots.contains_key(&0x2002));
+        drop(tls_slots);
+
+        let reused_stack = ctx.alloc_heap_block(0x800).unwrap();
+        assert_eq!(reused_stack, finished_stack);
     }
 
     #[test]

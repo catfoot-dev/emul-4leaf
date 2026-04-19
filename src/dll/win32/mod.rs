@@ -8,7 +8,7 @@ mod msvcrt;
 mod ole32;
 mod shell32;
 pub mod types;
-mod user32;
+pub(crate) mod user32;
 mod winmm;
 mod ws2_32;
 
@@ -18,12 +18,21 @@ use crate::{
     dll::{
         rare::{Rare, RareAudioEngine, RareContextState, RareSoundState},
         win32::{
-            advapi32::ADVAPI32, comctl32::COMCTL32, gdi32::GDI32, imm32::IMM32, kernel32::KERNEL32,
-            msvcp60::MSVCP60, msvcrt::MSVCRT, ole32::Ole32, shell32::SHELL32, user32::USER32,
-            winmm::WINMM, ws2_32::WS2_32,
+            advapi32::ADVAPI32,
+            comctl32::COMCTL32,
+            gdi32::{BPP, GDI32, aligned_stride},
+            imm32::IMM32,
+            kernel32::KERNEL32,
+            msvcp60::MSVCP60,
+            msvcrt::MSVCRT,
+            ole32::Ole32,
+            shell32::SHELL32,
+            user32::USER32,
+            winmm::WINMM,
+            ws2_32::WS2_32,
         },
     },
-    helper::{FAKE_IMPORT_BASE, HEAP_BASE},
+    helper::{FAKE_IMPORT_BASE, HEAP_BASE, HEAP_SIZE},
     server::packet_logger::PacketLogger,
     ui::{UiCommand, win_event::WinEvent},
 };
@@ -40,9 +49,17 @@ use unicorn_engine::Unicorn;
 
 /// Unicorn 엔진의 `User Data`에 적재되어, 모든 Win32 가상 OS 환경의 전역 상태를
 /// 관리하고 유지하는 핵심 컨텍스트 블록입니다.
+#[derive(Default)]
+struct HeapBookkeeping {
+    allocations: HashMap<u32, u32>,
+    free_list: Vec<(u32, u32)>,
+}
+
 pub struct Win32Context {
     /// 가상 힙(Heap) 메모리 할당을 위한 현재 포인터입니다. (단순 증가형)
     pub heap_cursor: AtomicU32,
+    /// 가상 힙의 할당/해제 블록 메타데이터입니다.
+    heap_blocks: Arc<Mutex<HeapBookkeeping>>,
     /// Fake API(Import) 주소 할당을 위한 카운터입니다.
     pub import_address: AtomicU32,
 
@@ -115,8 +132,12 @@ pub struct Win32Context {
     pub tm_struct_ptr: AtomicU32,
     /// 데스크톱 창의 가상 핸들
     pub desktop_hwnd: AtomicU32,
+    /// `SPI_GETWORKAREA` 등에 사용할 가상 작업 영역 좌표 `(left, top, right, bottom)`
+    pub work_area: Arc<Mutex<(i32, i32, i32, i32)>>,
     /// 현재 표시되는 커서의 핸들
     pub current_cursor: AtomicU32,
+    /// 현재 중첩된 wndproc 호출 스택의 `(hwnd, msg)` 목록
+    pub cursor_dispatch_stack: Arc<Mutex<Vec<(u32, u32)>>>,
     /// 마우스 현재 X 좌표
     pub mouse_x: Arc<AtomicU32>,
     /// 마우스 현재 Y 좌표
@@ -151,6 +172,7 @@ impl Win32Context {
     pub fn new(ui_tx: Option<Sender<UiCommand>>) -> Self {
         let ctx = Win32Context {
             heap_cursor: AtomicU32::new(HEAP_BASE as u32),
+            heap_blocks: Arc::new(Mutex::new(HeapBookkeeping::default())),
             import_address: AtomicU32::new(FAKE_IMPORT_BASE as u32),
             dll_modules: Arc::new(Mutex::new(HashMap::new())),
             address_map: Arc::new(Mutex::new(HashMap::new())),
@@ -191,7 +213,9 @@ impl Win32Context {
             clipboard_open: AtomicU32::new(0),
             tm_struct_ptr: AtomicU32::new(0),
             desktop_hwnd: AtomicU32::new(0),
+            work_area: Arc::new(Mutex::new((0, 0, 800, 600))),
             current_cursor: AtomicU32::new(0),
+            cursor_dispatch_stack: Arc::new(Mutex::new(Vec::new())),
             mouse_x: Arc::new(AtomicU32::new(320)),
             mouse_y: Arc::new(AtomicU32::new(240)),
             onexit_handlers: Arc::new(Mutex::new(Vec::new())),
@@ -217,6 +241,77 @@ impl Win32Context {
         self.handle_counter.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// 가상 힙에서 지정한 크기의 블록을 할당합니다.
+    pub(crate) fn alloc_heap_block(&self, size: usize) -> Option<u32> {
+        let aligned_size = align_heap_size(size)?;
+        let mut heap_blocks = self.heap_blocks.lock().unwrap();
+
+        if let Some((index, addr, block_size)) = heap_blocks
+            .free_list
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, block_size))| *block_size >= aligned_size)
+            .min_by_key(|(_, (_, block_size))| *block_size)
+            .map(|(index, (addr, block_size))| (index, *addr, *block_size))
+        {
+            heap_blocks.free_list.swap_remove(index);
+            if block_size > aligned_size {
+                push_free_block(
+                    &mut heap_blocks.free_list,
+                    addr + aligned_size,
+                    block_size - aligned_size,
+                );
+            }
+            heap_blocks.allocations.insert(addr, aligned_size);
+            return Some(addr);
+        }
+
+        let addr = self.heap_cursor.load(Ordering::SeqCst);
+        let end = addr.checked_add(aligned_size)?;
+        if (end as u64) > (HEAP_BASE + HEAP_SIZE) {
+            return None;
+        }
+
+        self.heap_cursor.store(end, Ordering::SeqCst);
+        heap_blocks.allocations.insert(addr, aligned_size);
+        Some(addr)
+    }
+
+    /// 가상 힙 블록을 해제하여 재사용 가능 상태로 되돌립니다.
+    pub(crate) fn free_heap_block(&self, addr: u32) -> bool {
+        if addr < HEAP_BASE as u32 {
+            return false;
+        }
+
+        let mut heap_blocks = self.heap_blocks.lock().unwrap();
+        let Some(size) = heap_blocks.allocations.remove(&addr) else {
+            return false;
+        };
+
+        push_free_block(&mut heap_blocks.free_list, addr, size);
+        true
+    }
+
+    /// 가상 힙 블록의 현재 추적 크기를 반환합니다.
+    pub(crate) fn heap_block_size(&self, addr: u32) -> Option<u32> {
+        self.heap_blocks
+            .lock()
+            .unwrap()
+            .allocations
+            .get(&addr)
+            .copied()
+    }
+
+    /// 가상 데스크톱 작업 영역 좌표를 갱신합니다.
+    pub(crate) fn set_work_area(&self, left: i32, top: i32, right: i32, bottom: i32) {
+        *self.work_area.lock().unwrap() = (left, top, right, bottom);
+    }
+
+    /// 현재 가상 데스크톱 작업 영역 좌표를 반환합니다.
+    pub(crate) fn work_area_rect(&self) -> (i32, i32, i32, i32) {
+        *self.work_area.lock().unwrap()
+    }
+
     /// 윈도우용 표면(Surface) 비트맵을 생성하고 GDI 오브젝트로 등록합니다.
     ///
     /// # 인자
@@ -227,7 +322,14 @@ impl Win32Context {
     /// * `u32`: 생성된 비트맵의 가상 핸들
     pub fn create_surface_bitmap(&self, width: u32, height: u32) -> u32 {
         let hbmp = self.alloc_handle();
-        let pixels = Arc::new(Mutex::new(vec![0u32; (width * height) as usize]));
+        let pixel_count = (width as usize).saturating_mul(height as usize);
+        let pixels_vec = vec![0u32; pixel_count];
+        debug_assert_eq!(
+            pixels_vec.len(),
+            pixel_count,
+            "surface bitmap pixel buffer length must equal width*height"
+        );
+        let pixels = Arc::new(Mutex::new(pixels_vec));
         self.gdi_objects.lock().unwrap().insert(
             hbmp,
             GdiObject::Bitmap {
@@ -235,8 +337,14 @@ impl Win32Context {
                 height,
                 pixels,
                 bits_addr: None,
-                bpp: 24,
+                stride: aligned_stride(width, BPP as u16),
+                bit_count: BPP as u16,
                 top_down: false,
+                palette: Vec::new(),
+                red_mask: 0,
+                green_mask: 0,
+                blue_mask: 0,
+                alpha_mask: 0,
             },
         );
         hbmp
@@ -260,6 +368,7 @@ impl Win32Context {
             width,
             height,
             pixels,
+            stride,
             ..
         }) = gdi_objects.get_mut(&surface_bitmap)
         else {
@@ -288,9 +397,15 @@ impl Win32Context {
                 .copy_from_slice(&pixels_guard[src_row..src_row + copy_width]);
         }
 
+        debug_assert_eq!(
+            resized_pixels.len(),
+            (new_width).saturating_mul(new_height),
+            "resized surface bitmap buffer length must equal new_width*new_height"
+        );
         *pixels_guard = resized_pixels;
         *width = target_width;
         *height = target_height;
+        *stride = aligned_stride(target_width, BPP as u16);
     }
 
     /// DLL 이름과 함수 이름을 기반으로 적절한 Win32 API 핸들러로 분기합니다.
@@ -347,6 +462,7 @@ impl Clone for Win32Context {
     fn clone(&self) -> Self {
         Self {
             heap_cursor: AtomicU32::new(self.heap_cursor.load(Ordering::SeqCst)),
+            heap_blocks: self.heap_blocks.clone(),
             import_address: AtomicU32::new(self.import_address.load(Ordering::SeqCst)),
             dll_modules: self.dll_modules.clone(),
             address_map: self.address_map.clone(),
@@ -380,7 +496,9 @@ impl Clone for Win32Context {
             clipboard_open: AtomicU32::new(self.clipboard_open.load(Ordering::SeqCst)),
             tm_struct_ptr: AtomicU32::new(self.tm_struct_ptr.load(Ordering::SeqCst)),
             desktop_hwnd: AtomicU32::new(self.desktop_hwnd.load(Ordering::SeqCst)),
+            work_area: self.work_area.clone(),
             current_cursor: AtomicU32::new(self.current_cursor.load(Ordering::SeqCst)),
+            cursor_dispatch_stack: self.cursor_dispatch_stack.clone(),
             mouse_x: self.mouse_x.clone(),
             mouse_y: self.mouse_y.clone(),
             onexit_handlers: self.onexit_handlers.clone(),
@@ -394,5 +512,68 @@ impl Clone for Win32Context {
             rare_contexts: self.rare_contexts.clone(),
             rare_sounds: self.rare_sounds.clone(),
         }
+    }
+}
+
+fn align_heap_size(size: usize) -> Option<u32> {
+    let base = u32::try_from(size.max(1)).ok()?;
+    base.checked_add(3).map(|value| value & !3)
+}
+
+fn push_free_block(free_list: &mut Vec<(u32, u32)>, addr: u32, size: u32) {
+    if size == 0 {
+        return;
+    }
+
+    free_list.push((addr, size));
+    free_list.sort_unstable_by_key(|(block_addr, _)| *block_addr);
+
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(free_list.len());
+    for (block_addr, block_size) in free_list.drain(..) {
+        if let Some((prev_addr, prev_size)) = merged.last_mut() {
+            let prev_end = prev_addr.saturating_add(*prev_size);
+            if prev_end >= block_addr {
+                let block_end = block_addr.saturating_add(block_size);
+                *prev_size = block_end.max(prev_end).saturating_sub(*prev_addr);
+                continue;
+            }
+        }
+        merged.push((block_addr, block_size));
+    }
+    *free_list = merged;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heap_block_is_reused_after_free() {
+        let ctx = Win32Context::new(None);
+
+        let first = ctx.alloc_heap_block(16).unwrap();
+        let second = ctx.alloc_heap_block(32).unwrap();
+
+        assert_eq!(first, HEAP_BASE as u32);
+        assert_eq!(second, first + 16);
+
+        assert!(ctx.free_heap_block(first));
+        let reused = ctx.alloc_heap_block(8).unwrap();
+
+        assert_eq!(reused, first);
+    }
+
+    #[test]
+    fn adjacent_free_blocks_are_merged() {
+        let ctx = Win32Context::new(None);
+
+        let first = ctx.alloc_heap_block(16).unwrap();
+        let second = ctx.alloc_heap_block(16).unwrap();
+
+        assert!(ctx.free_heap_block(first));
+        assert!(ctx.free_heap_block(second));
+
+        let merged = ctx.alloc_heap_block(24).unwrap();
+        assert_eq!(merged, first);
     }
 }
