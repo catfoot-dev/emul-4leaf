@@ -9,14 +9,27 @@ use std::sync::OnceLock;
 /// 실행 시 결정된 리소스 디렉토리 경로를 전역 캐시합니다.
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+pub const EXECUTABLE_NAME: &str = "4Leaf.exe";
+pub const LIBLARY_4LEAF: &str = "4Leaf.dll";
+pub const LIBLARY_CORE: &str = "Core.dll";
+pub const LIBLARY_WINCORE: &str = "WinCore.dll";
+pub const LIBLARY_DNET: &str = "DNet.dll";
+pub const LIBLARY_LIME: &str = "Lime.dll";
+pub const LIBLARY_DICE: &str = "Dice.dll";
+
+const RESOURCES_NAME: &str = "Resources";
+const RESOURCES_DIR: &str = "./Resources";
+const APPLICATION_DIR: &str = "../4Leaf";
+
 /// 리소스 디렉토리로 인정하기 위해 반드시 존재해야 하는 파일 목록입니다.
 const REQUIRED_RESOURCE_FILES: &[&str] = &[
-    "4Leaf.exe",
-    "4Leaf.dll",
-    "Core.dll",
-    "WinCore.dll",
-    "DNet.dll",
-    "Lime.dll",
+    EXECUTABLE_NAME,
+    LIBLARY_4LEAF,
+    LIBLARY_CORE,
+    LIBLARY_WINCORE,
+    LIBLARY_DNET,
+    LIBLARY_LIME,
+    LIBLARY_DICE,
 ];
 
 /// 리소스 디렉토리를 동적으로 탐색하여 확정합니다.
@@ -37,18 +50,18 @@ pub fn detect_resource_dir() {
             && let Some(exe_dir) = exe.parent()
         {
             v.push(exe_dir.to_path_buf());
-            v.push(exe_dir.join("Resources"));
-            v.push(exe_dir.join("../4Leaf"));
+            v.push(exe_dir.join(RESOURCES_NAME));
+            v.push(exe_dir.join(APPLICATION_DIR));
         }
 
         // 현재 작업 디렉토리 기준 후보
         if let Ok(cwd) = env::current_dir() {
             v.push(cwd.clone());
-            v.push(cwd.join("Resources"));
-            v.push(cwd.join("../4Leaf"));
+            v.push(cwd.join(RESOURCES_NAME));
+            v.push(cwd.join(APPLICATION_DIR));
         } else {
-            v.push(PathBuf::from("./Resources"));
-            v.push(PathBuf::from("../4Leaf"));
+            v.push(PathBuf::from(RESOURCES_DIR));
+            v.push(PathBuf::from(APPLICATION_DIR));
         }
 
         v
@@ -72,7 +85,7 @@ pub fn detect_resource_dir() {
     }
 
     // fallback — 필수 파일이 없더라도 기존 동작을 유지
-    let fallback = PathBuf::from("./Resources");
+    let fallback = PathBuf::from(RESOURCES_DIR);
     let missing: Vec<&str> = REQUIRED_RESOURCE_FILES
         .iter()
         .filter(|f| !fallback.join(f).is_file())
@@ -94,5 +107,5 @@ pub fn resource_dir() -> &'static Path {
     RESOURCE_DIR
         .get()
         .map(|p| p.as_path())
-        .unwrap_or(Path::new("./Resources"))
+        .unwrap_or(Path::new(RESOURCES_DIR))
 }

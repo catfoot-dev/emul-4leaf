@@ -33,6 +33,9 @@ use unicorn_engine::{
     unicorn_const::{Arch, Mode},
 };
 
+use crate::boot::{
+    LIBLARY_4LEAF, LIBLARY_CORE, LIBLARY_DICE, LIBLARY_DNET, LIBLARY_LIME, LIBLARY_WINCORE,
+};
 use crate::debug::common::{CpuContext, DebugCommand};
 use crate::ui::UiCommand;
 
@@ -188,13 +191,13 @@ fn emu_4leaf(
         "[BOOT] emu_4leaf() registering Rare.dll metadata",
     );
     unicorn.get_data().dll_modules.lock().unwrap().insert(
-        "Rare.dll".to_string(),
+        LIBLARY_CORE.to_string(),
         LoadedDll {
             name: resource_dir()
-                .join("Rare.dll")
+                .join(LIBLARY_CORE)
                 .to_string_lossy()
                 .to_string(),
-            base_addr: 0x3400_0000,
+            base_addr: 0x4000_0000,
             size: 0,
             entry_point: 0,
             exports: HashMap::new(),
@@ -203,11 +206,12 @@ fn emu_4leaf(
 
     // 어플리케이션 구동에 필요한 핵심 DLL 목록
     let dll_list = [
-        ("Core.dll", 0x3000_0000u64),
-        ("WinCore.dll", 0x3100_0000u64),
-        ("DNet.dll", 0x3200_0000u64),
-        ("Lime.dll", 0x3300_0000u64),
-        ("4Leaf.dll", 0x3500_0000u64),
+        (LIBLARY_CORE, 0x3000_0000u64),
+        (LIBLARY_WINCORE, 0x3200_0000u64),
+        (LIBLARY_DNET, 0x3400_0000u64),
+        (LIBLARY_LIME, 0x3600_0000u64),
+        (LIBLARY_DICE, 0x3800_0000u64),
+        (LIBLARY_4LEAF, 0x4200_0000u64),
     ];
 
     for (dll_name, target_base) in dll_list {
@@ -264,9 +268,6 @@ fn run_4leaf_main(
     state_tx: Option<Sender<CpuContext>>,
     cmd_rx: Option<Receiver<DebugCommand>>,
 ) {
-    let dll_name = "4Leaf.dll";
-    let func_name = "Main";
-
     // Main(NULL, NULL, SHARED_MEM_BASE, "127.0.0.1") 형식으로 호출
     let args: Vec<Box<dyn Any>> = vec![
         Box::new(0u32),
@@ -276,6 +277,6 @@ fn run_4leaf_main(
     ];
 
     append_capture_line("emu.log", "[BOOT] invoking 4Leaf.dll!Main");
-    uc.run_emulator(dll_name, func_name, args, state_tx, cmd_rx);
+    uc.run_emulator(LIBLARY_4LEAF, "Main", args, state_tx, cmd_rx);
     append_capture_line("emu.log", "[BOOT] 4Leaf.dll!Main finished");
 }
