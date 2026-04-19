@@ -55,13 +55,13 @@ impl DNetPacket {
 ///
 /// 포맷: [main_type: u8][sub_type: u8][payload...]
 #[derive(Debug, Clone)]
-pub struct ProtocolPacket {
+pub struct ChannelPacket {
     pub main_type: u8,
     pub sub_type: u8,
     pub payload: Vec<u8>,
 }
 
-impl ProtocolPacket {
+impl ChannelPacket {
     /// DNet 본문 바이트에서 파싱합니다.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 2 {
@@ -75,18 +75,18 @@ impl ProtocolPacket {
     }
 }
 
-/// MainFrame 채널 1 전용 패킷입니다.
+/// Auth(채널 1) 전용 패킷입니다.
 ///
 /// 회원가입/로그인 구간의 채널 1 본문은 `[u32 code][u32 control][payload...]`
 /// 구조를 사용하므로, 일반 `main/sub` 패킷과 분리해서 다룹니다.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MainFramePacket {
+pub struct AuthPacket {
     pub code: u32,
     pub control: u32,
     pub payload: Vec<u8>,
 }
 
-impl MainFramePacket {
+impl AuthPacket {
     /// 채널 1 본문 바이트에서 `[code][control][payload]`를 파싱합니다.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 8 {
@@ -118,12 +118,12 @@ pub const CTRL_CLOSE: u16 = 4; // 양방향: 채널 종료 통지
 ///
 /// 와이어 포맷: [msg_type: u16 LE][channel_id: u16 LE]
 #[derive(Debug, Clone)]
-pub struct ControlMessage {
+pub struct ControlPacket {
     pub msg_type: u16,   // CTRL_OPEN / CTRL_OPEN_OK / CTRL_REJECT_OR_ABORT / CTRL_CLOSE
     pub channel_id: u16, // 대상 채널 번호 (1-15)
 }
 
-impl ControlMessage {
+impl ControlPacket {
     /// 채널 0 본문 4바이트에서 파싱합니다.
     pub fn from_bytes(body: &[u8]) -> Option<Self> {
         if body.len() < 4 {
@@ -150,7 +150,7 @@ impl ControlMessage {
 
 /// 제어 메시지 생성 헬퍼
 pub fn create_control_message(msg_type: u16, channel_id: u16) -> Vec<u8> {
-    ControlMessage {
+    ControlPacket {
         msg_type,
         channel_id,
     }
@@ -225,14 +225,13 @@ mod tests {
 
     #[test]
     fn mainframe_packet_parser_extracts_code_control_and_payload() {
-        let pkt = MainFramePacket::from_bytes(&[
-            0x24, 0x80, 0x26, 0x20, 0x03, 0x00, 0x00, 0x00, 0xaa, 0xbb,
-        ])
-        .unwrap();
+        let pkt =
+            AuthPacket::from_bytes(&[0x24, 0x80, 0x26, 0x20, 0x03, 0x00, 0x00, 0x00, 0xaa, 0xbb])
+                .unwrap();
 
         assert_eq!(
             pkt,
-            MainFramePacket {
+            AuthPacket {
                 code: 0x2026_8024,
                 control: 3,
                 payload: vec![0xaa, 0xbb],

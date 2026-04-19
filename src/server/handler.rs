@@ -10,7 +10,7 @@ use crate::server::{
         should_parse_as_raw_stage_packet, should_promote_open_to_mainframe_stage,
     },
     domain,
-    protocol::{self, ControlMessage, DNetPacket, MainFramePacket, ProtocolPacket},
+    protocol::{self, AuthPacket, ChannelPacket, ControlPacket, DNetPacket},
     state::GameState,
 };
 
@@ -88,7 +88,7 @@ impl ServerRuntime {
     fn handle_control_message(&mut self, server_tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) -> bool {
         crate::emu_socket_log!("[SERVER] body: {}", hex::encode(body));
 
-        let ctrl = match ControlMessage::from_bytes(body) {
+        let ctrl = match ControlPacket::from_bytes(body) {
             Some(ctrl) => ctrl,
             None => {
                 crate::emu_socket_log!("[DNet] Malformed control body: {}", hex::encode(body));
@@ -183,7 +183,7 @@ impl ServerRuntime {
         }
 
         if channel_id == 1 {
-            let pkt = match MainFramePacket::from_bytes(body) {
+            let pkt = match AuthPacket::from_bytes(body) {
                 Some(pkt) => pkt,
                 None => {
                     crate::emu_socket_log!(
@@ -215,8 +215,7 @@ impl ServerRuntime {
                 .analysis_states
                 .get(&channel_id)
                 .map(|state| state.phase);
-            let outcome =
-                domain::main_frame::handle_main_frame(&pkt, channel_id, &mut self.game_state);
+            let outcome = domain::auth::handle_auth(&pkt, channel_id, &mut self.game_state);
             let current_phase =
                 self.apply_phase_update(channel_id, previous_phase, outcome.phase_update);
 
@@ -239,7 +238,7 @@ impl ServerRuntime {
             return self.send_packets(server_tx, "APP", outcome.responses);
         }
 
-        let pkt = match ProtocolPacket::from_bytes(body) {
+        let pkt = match ChannelPacket::from_bytes(body) {
             Some(pkt) => pkt,
             None => {
                 crate::emu_socket_log!(
@@ -468,9 +467,8 @@ fn build_stage_open_acceptance_responses(channel_id: u16) -> Vec<Vec<u8>> {
     )];
 
     if channel_id == 2 {
-        responses.push(
-            domain::main_frame::build_provisional_worldmap_stage_bootstrap_response(channel_id),
-        );
+        responses
+            .push(domain::control::build_provisional_worldmap_stage_bootstrap_response(channel_id));
     }
 
     responses

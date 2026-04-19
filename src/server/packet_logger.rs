@@ -1,5 +1,5 @@
 use crate::emu_socket_log;
-use crate::server::protocol::{ControlMessage, DNetPacket, MainFramePacket, ProtocolPacket};
+use crate::server::protocol::{AuthPacket, ChannelPacket, ControlPacket, DNetPacket};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
@@ -124,7 +124,7 @@ impl PacketLogger {
             return None;
         }
 
-        let packet = ProtocolPacket::from_bytes(body)?;
+        let packet = ChannelPacket::from_bytes(body)?;
         Some(ParsedAppFrame {
             channel_id,
             main_type: packet.main_type,
@@ -159,7 +159,7 @@ impl PacketLogger {
 
             let body = &data[cursor + 4..cursor + frame_len];
             if channel_id == 0 {
-                if let Some(ctrl) = ControlMessage::from_bytes(body) {
+                if let Some(ctrl) = ControlPacket::from_bytes(body) {
                     parts.push(format!("ctrl msg={} ch={}", ctrl.msg_type, ctrl.channel_id));
                 } else {
                     parts.push(format!("ctrl malformed len={}", body.len()));
@@ -183,7 +183,7 @@ impl PacketLogger {
                     hex::encode(&body[4..])
                 ));
             } else if channel_id == 1 {
-                if let Some(packet) = MainFramePacket::from_bytes(body) {
+                if let Some(packet) = AuthPacket::from_bytes(body) {
                     parts.push(format!(
                         "mainframe ch={} code={:#x} control={} payload={}B {}",
                         channel_id,
@@ -199,7 +199,7 @@ impl PacketLogger {
                         body.len()
                     ));
                 }
-            } else if let Some(packet) = ProtocolPacket::from_bytes(body) {
+            } else if let Some(packet) = ChannelPacket::from_bytes(body) {
                 parts.push(format!(
                     "app ch={} main=0x{:02x} sub=0x{:02x} payload={}B {}",
                     channel_id,
