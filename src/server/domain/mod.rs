@@ -16,17 +16,13 @@ pub(crate) fn dispatch_packet(
     state: &mut GameState,
 ) -> HandlerOutcome {
     match pkt.main_type {
-        0xE0 | 0x60 => main_frame::handle_main_frame(pkt, channel_id, state),
-        0x80 => echo::handle_inventory(pkt, channel_id),
-        0xD4 => echo::handle_main_type_d4(pkt, channel_id),
-        // `0x70` 요청은 클라이언트가 이미 처리하는 기존 약관 응답 MainType `0xA4`로 브리지합니다.
-        0x70 => auth::handle_terms_dialog_request(pkt, channel_id),
-        0x64 => system::handle_system(pkt, channel_id, state),
-        0x68 => echo::handle_ping(pkt, channel_id),
         0x0A => world::handle_world_map(pkt, channel_id),
         0x0B => chat::handle_chat_town_main(pkt, channel_id),
         0x0C => chat::handle_chat_town_sub(pkt, channel_id),
-        // 0xA4 => auth::handle_terms_dialog_request(pkt, channel_id, 0xA4),
+        0x80 => echo::handle_inventory(pkt, channel_id),
+        0xD4 => echo::handle_main_type_d4(pkt, channel_id),
+        0x64 => system::handle_system(pkt, channel_id, state),
+        0x68 => echo::handle_ping(pkt, channel_id),
         other => {
             crate::emu_socket_log!("[WARN] 미구현 MainType=0x{:02x}", other);
             HandlerOutcome {

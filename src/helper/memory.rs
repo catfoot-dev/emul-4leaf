@@ -6,7 +6,7 @@ pub const HEAP_BASE: u64 = 0x2000_0000;
 pub const HEAP_SIZE: u64 = 256 * 1024 * 1024;
 
 pub const STACK_BASE: u64 = 0x5000_0000;
-pub const STACK_SIZE: u64 = 1024 * 1024;
+pub const STACK_SIZE: u64 = 10 * 1024 * 1024;
 pub const STACK_TOP: u64 = STACK_BASE + STACK_SIZE;
 
 pub const SHARED_MEM_BASE: u64 = 0x7000_0000;
@@ -160,6 +160,10 @@ pub(crate) fn write_mem_impl(uc: &mut Unicorn<Win32Context>, addr: u64, data: &[
 
 pub(crate) fn resolve_address_impl(uc: &Unicorn<Win32Context>, addr: u32) -> String {
     let ctx = uc.get_data();
+    if let Some(import_name) = ctx.address_map.lock().unwrap().get(&(addr as u64)).cloned() {
+        return import_name;
+    }
+
     let dll_modules = ctx.dll_modules.lock().unwrap();
     for dll in dll_modules.values() {
         let base = dll.base_addr as u32;

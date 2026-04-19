@@ -6,6 +6,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use crate::emu_log;
+
 /// 실행 시 결정된 리소스 디렉토리 경로를 전역 캐시합니다.
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -78,7 +80,7 @@ pub fn detect_resource_dir() {
             let resolved = candidate
                 .canonicalize()
                 .unwrap_or_else(|_| candidate.clone());
-            println!("[BOOT] Resource directory: {}", resolved.display());
+            emu_log!("[BOOT] Resource directory: {}", resolved.display());
             let _ = RESOURCE_DIR.set(resolved);
             return;
         }
@@ -92,9 +94,9 @@ pub fn detect_resource_dir() {
         .copied()
         .collect();
     if missing.is_empty() {
-        println!("[BOOT] Resource directory (fallback): ./Resources");
+        emu_log!("[BOOT] Resource directory (fallback): ./Resources");
     } else {
-        println!(
+        emu_log!(
             "[BOOT] Resource directory not found! Missing files: {}",
             missing.join(", ")
         );

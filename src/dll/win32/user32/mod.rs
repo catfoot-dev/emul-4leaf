@@ -496,6 +496,7 @@ impl USER32 {
         let saved_ebp = uc.reg_read(RegisterX86::EBP).unwrap_or(0);
         let saved_esi = uc.reg_read(RegisterX86::ESI).unwrap_or(0);
         let saved_edi = uc.reg_read(RegisterX86::EDI).unwrap_or(0);
+        let wnd_proc_info = uc.resolve_address(wnd_proc);
 
         // Call Wnd assignment: HWND, UINT, WPARAM, LPARAM
         uc.push_u32(lparam);
@@ -511,7 +512,6 @@ impl USER32 {
         if let Err(e) = run_nested_guest_until_exit(uc, wnd_proc as u64) {
             let fault_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(wnd_proc as u64) as u32;
             let fault_info = uc.resolve_address(fault_eip);
-            let wnd_proc_info = uc.resolve_address(wnd_proc);
             crate::emu_log!(
                 "[USER32] dispatch_to_wndproc: execution failed at {:#x} ({}) while dispatching {:#x} ({}) (msg={:#x}): {:?}",
                 fault_eip,
@@ -528,6 +528,7 @@ impl USER32 {
         Self::pop_cursor_dispatch_target(uc.get_data());
 
         let ret = uc.reg_read(RegisterX86::EAX).unwrap() as i32;
+
         let _ = uc.reg_write(RegisterX86::ESP, saved_esp);
         let _ = uc.reg_write(RegisterX86::EBX, saved_ebx);
         let _ = uc.reg_write(RegisterX86::EBP, saved_ebp);

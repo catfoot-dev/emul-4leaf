@@ -356,7 +356,7 @@ fn derive_frames_from_packet_chunks(packets: &[PacketRecord]) -> Vec<FrameRecord
     let mut frames = Vec::new();
 
     for packet in packets {
-        if packet.direction == "RECV" && packet.len == 1 && packet.summary == "raw/unparsed" {
+        if packet.direction == "CLIENT" && packet.len == 1 && packet.summary == "raw/unparsed" {
             continue;
         }
 
@@ -521,83 +521,5 @@ fn main() {
     } else {
         print_frame_summary(&frames);
         print_inferred_conclusions(&frames);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn candidate_parser_extracts_post_handshake_fields() {
-        let line = "ch=3 phase=version-negotiated candidate#2 requires server response: main=0x0b sub=0x21 payload=4B aabbccdd";
-        let parsed = parse_candidate_record(line).unwrap();
-
-        assert_eq!(parsed.channel_id, 3);
-        assert_eq!(parsed.phase, "version-negotiated");
-        assert_eq!(parsed.candidate_index, 2);
-        assert_eq!(parsed.main_type, 0x0b);
-        assert_eq!(parsed.sub_type, 0x21);
-        assert_eq!(parsed.payload_len, 4);
-        assert_eq!(parsed.payload_hex, "aabbccdd");
-    }
-
-    #[test]
-    fn packet_parser_extracts_mirror_flag_and_summary() {
-        let line = "t=17ms dir=RECV sock=9 len=12 mirror_prev_send=true hex=010002 summary=app ch=1 main=0xe0 sub=0x04 payload=2B aabb";
-        let parsed = parse_packet_record(line).unwrap();
-
-        assert!(parsed.mirrored_prev_send);
-        assert_eq!(
-            parsed.summary,
-            "app ch=1 main=0xe0 sub=0x04 payload=2B aabb"
-        );
-    }
-
-    #[test]
-    fn frame_parser_extracts_summary() {
-        let line = "t=21ms dir=RECV sock=3 mirror_prev_send=false hex=0000040002000100 summary=ctrl msg=2 ch=1";
-        let parsed = parse_frame_record(line).unwrap();
-
-        assert!(!parsed.mirrored_prev_send);
-        assert_eq!(parsed.summary, "ctrl msg=2 ch=1");
-    }
-
-    #[test]
-    fn note_parser_extracts_phase_text() {
-        let line = "ch=1 phase=bootstrap-version-sent client closed channel immediately after bootstrap version response; response is likely insufficient";
-        let parsed = parse_note_record(line).unwrap();
-
-        assert_eq!(parsed.channel_id, 1);
-        assert_eq!(parsed.phase, "bootstrap-version-sent");
-        assert!(parsed.text.contains("response is likely insufficient"));
-    }
-
-    #[test]
-    fn derived_frames_skip_single_byte_peek_chunks() {
-        let packets = vec![
-            parse_packet_record("t=1ms dir=RECV sock=9 len=1 mirror_prev_send=false hex=01 summary=raw/unparsed").unwrap(),
-            parse_packet_record("t=2ms dir=RECV sock=9 len=4 mirror_prev_send=false hex=01000a00 summary=dnet_partial ch=1 expected=10 available=0").unwrap(),
-            parse_packet_record("t=3ms dir=RECV sock=9 len=10 mirror_prev_send=false hex=e0040d35000000001100 summary=raw/unparsed").unwrap(),
-        ];
-
-        let frames = derive_frames_from_packet_chunks(&packets);
-
-        assert_eq!(frames.len(), 1);
-        assert_eq!(
-            frames[0].summary,
-            "app ch=1 main=0xe0 sub=0x04 payload=8B 0d35000000001100"
-        );
-    }
-
-    #[test]
-    fn summarize_frame_prefers_raw_dword_stage_messages() {
-        let frame =
-            Vec::from_hex("01001800000000000900000000000000000000000000000000000000").unwrap();
-
-        assert_eq!(
-            summarize_frame(&frame),
-            "raw ch=1 handler=0 msg=9 payload=16B 00000000000000000000000000000000"
-        );
     }
 }

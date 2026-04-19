@@ -46,10 +46,12 @@ impl DNetPacket {
 }
 
 // =========================================================
-// 애플리케이션 계층: 채널 1-15 본문 패킷
+// 애플리케이션 계층: 채널별 본문 패킷
 // =========================================================
 
-/// 애플리케이션 계층 패킷 (DNetPacket.body 내부, 채널 1-15 전용)
+/// 일반 애플리케이션 계층 패킷입니다.
+///
+/// 채팅/월드맵처럼 `main/sub` 구조를 쓰는 채널에서 사용합니다.
 ///
 /// 포맷: [main_type: u8][sub_type: u8][payload...]
 #[derive(Debug, Clone)]
@@ -69,6 +71,32 @@ impl ProtocolPacket {
             main_type: data[0],
             sub_type: data[1],
             payload: data[2..].to_vec(),
+        })
+    }
+}
+
+/// MainFrame 채널 1 전용 패킷입니다.
+///
+/// 회원가입/로그인 구간의 채널 1 본문은 `[u32 code][u32 control][payload...]`
+/// 구조를 사용하므로, 일반 `main/sub` 패킷과 분리해서 다룹니다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainFramePacket {
+    pub code: u32,
+    pub control: u32,
+    pub payload: Vec<u8>,
+}
+
+impl MainFramePacket {
+    /// 채널 1 본문 바이트에서 `[code][control][payload]`를 파싱합니다.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 8 {
+            return None;
+        }
+
+        Some(Self {
+            code: u32::from_le_bytes(data[..4].try_into().ok()?),
+            control: u32::from_le_bytes(data[4..8].try_into().ok()?),
+            payload: data[8..].to_vec(),
         })
     }
 }
@@ -138,13 +166,29 @@ pub fn hex_dump(label: &str, data: &[u8]) -> String {
 // 애플리케이션 패킷 빌더
 // =========================================================
 
-/// DNet 채널 1-15 애플리케이션 패킷을 직렬화합니다.
+/// 일반 `main/sub` 애플리케이션 패킷을 직렬화합니다.
 ///
 /// 포맷: [channel_id: u16 LE][body_len: u16 LE][main_type: u8][sub_type: u8][payload...]
 pub fn create_app_packet(channel_id: u16, main_type: u8, sub_type: u8, payload: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(2 + payload.len());
     body.push(main_type);
     body.push(sub_type);
+    body.extend_from_slice(payload);
+    DNetPacket::new(channel_id, body).to_bytes()
+}
+
+/// MainFrame 채널 1 전용 패킷을 직렬화합니다.
+///
+/// 포맷: [channel_id: u16 LE][body_len: u16 LE][code: u32 LE][control: u32 LE][payload...]
+pub fn create_mainframe_packet(
+    channel_id: u16,
+    code: u32,
+    control: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(8 + payload.len());
+    body.extend_from_slice(&code.to_le_bytes());
+    body.extend_from_slice(&control.to_le_bytes());
     body.extend_from_slice(payload);
     DNetPacket::new(channel_id, body).to_bytes()
 }
@@ -177,6 +221,35 @@ mod tests {
         let wire = DNetPacket::new(1, vec![0xaa, 0xbb, 0xcc]).to_bytes();
 
         assert_eq!(wire, vec![0x01, 0x00, 0x03, 0x00, 0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn mainframe_packet_parser_extracts_code_control_and_payload() {
+        let pkt = MainFramePacket::from_bytes(&[
+            0x24, 0x80, 0x26, 0x20, 0x03, 0x00, 0x00, 0x00, 0xaa, 0xbb,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            pkt,
+            MainFramePacket {
+                code: 0x2026_8024,
+                control: 3,
+                payload: vec![0xaa, 0xbb],
+            }
+        );
+    }
+
+    #[test]
+    fn create_mainframe_packet_uses_code_control_body() {
+        let wire = create_mainframe_packet(1, 0x2026_8024, 3, &[0xaa, 0xbb]);
+
+        assert_eq!(
+            wire,
+            vec![
+                0x01, 0x00, 0x0a, 0x00, 0x24, 0x80, 0x26, 0x20, 0x03, 0x00, 0x00, 0x00, 0xaa, 0xbb
+            ]
+        );
     }
 
     #[test]

@@ -5,7 +5,6 @@ mod text;
 
 use crate::dll::win32::{ApiHookResult, GdiObject, Win32Context};
 use crate::helper::UnicornHelper;
-use std::sync::OnceLock;
 use unicorn_engine::Unicorn;
 
 pub const BPP: u32 = 24;
@@ -56,17 +55,6 @@ impl GDI32 {
             rects.push(rect);
         }
         rects
-    }
-
-    /// wallpaper 추적 로그를 활성화할지 여부를 반환합니다.
-    pub(crate) fn should_trace_wallpaper() -> bool {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
-        *ENABLED.get_or_init(|| {
-            std::env::var("EMUL_WALLPAPER_TRACE")
-                .ok()
-                .as_deref()
-                .is_some_and(|v| v == "1")
-        })
     }
 
     /// 지정된 DC에 선택된 클리핑 영역 사각형 목록을 반환합니다.

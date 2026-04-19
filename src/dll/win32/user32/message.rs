@@ -813,6 +813,10 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
             USER32::destroy_window_tree(ctx, hwnd);
             0
         }
+        0x0082 => {
+            // WM_NCDESTROY
+            0
+        }
         0x0011 => 1, // WM_QUERYENDSESSION
         0x0014 => {
             // WM_ERASEBKGND

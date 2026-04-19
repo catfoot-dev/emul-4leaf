@@ -50,7 +50,6 @@ pub(crate) fn is_post_initial_handshake_phase(phase: ChannelPhase) -> bool {
 /// 사람이 읽는 분석 로그와 캡처 파일에 동일한 라인을 남깁니다.
 pub(crate) fn emit_protocol_analysis(line: &str) {
     crate::emu_socket_log!("[ANALYZE] {}", line);
-    crate::append_capture_line("protocol_analysis.log", line);
 }
 
 /// raw stage 바디를 `msg_id + payload` 구조로 분해합니다.

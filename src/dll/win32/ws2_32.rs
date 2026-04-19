@@ -491,7 +491,7 @@ impl WS2_32 {
                     .last_error
                     .store(WSAEWOULDBLOCK, Ordering::SeqCst);
                 crate::emu_log!("[WS2_32] recv({}) -> SOCKET_ERROR (no socket)", sock);
-                crate::emu_socket_log!("[RECV] sock={} FAIL: no socket", sock);
+                crate::emu_socket_log!("[SERVER] sock={} FAIL: no socket", sock);
                 return Some(ApiHookResult::callee(4, Some(SOCKET_ERROR)));
             }
         };
@@ -524,12 +524,12 @@ impl WS2_32 {
                     flags,
                     take
                 );
-                crate::emu_socket_log!(
-                    "[RECV] sock={} -> {}{}",
-                    sock,
-                    take,
-                    if peek { " (peek)" } else { "" }
-                );
+                // crate::emu_socket_log!(
+                //     "[SERVER] sock={} -> {}{}",
+                //     sock,
+                //     take,
+                //     if peek { " (peek)" } else { "" }
+                // );
                 Some(ApiHookResult::callee(4, Some(take as i32)))
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -544,7 +544,7 @@ impl WS2_32 {
                     .store(WSAEWOULDBLOCK, Ordering::SeqCst);
                 KERNEL32::clear_retry_wait(uc.get_data(), tid);
                 crate::emu_log!("[WS2_32] recv({}) -> SOCKET_ERROR (WSAEWOULDBLOCK)", sock);
-                crate::emu_socket_log!("[RECV] sock={} FAIL: WouldBlock", sock);
+                crate::emu_socket_log!("[CLIENT] sock={} FAIL: WouldBlock", sock);
                 Some(ApiHookResult::callee(4, Some(SOCKET_ERROR)))
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -552,7 +552,7 @@ impl WS2_32 {
                 let tid = uc.get_data().current_thread_idx.load(Ordering::SeqCst);
                 KERNEL32::clear_retry_wait(uc.get_data(), tid);
                 crate::emu_log!("[WS2_32] recv({}) -> 0 (channel closed)", sock);
-                crate::emu_socket_log!("[RECV] sock={} channel closed (EOF)", sock);
+                crate::emu_socket_log!("[CLIENT] sock={} channel closed (EOF)", sock);
                 Some(ApiHookResult::callee(4, Some(0)))
             }
         }
@@ -702,7 +702,7 @@ impl WS2_32 {
             None => {
                 ctx.last_error.store(WSAEWOULDBLOCK, Ordering::SeqCst);
                 crate::emu_log!("[WS2_32] send({}) -> SOCKET_ERROR (no socket)", sock);
-                crate::emu_socket_log!("[SEND] sock={} FAIL: no socket", sock);
+                crate::emu_socket_log!("[CLIENT] sock={} FAIL: no socket", sock);
                 return Some(ApiHookResult::callee(4, Some(SOCKET_ERROR)));
             }
         };
@@ -713,7 +713,7 @@ impl WS2_32 {
                 drop(sockets);
                 ctx.last_error.store(WSAEWOULDBLOCK, Ordering::SeqCst);
                 crate::emu_log!("[WS2_32] send({}) -> SOCKET_ERROR (not connected)", sock);
-                crate::emu_socket_log!("[SEND] sock={} FAIL: not connected", sock);
+                crate::emu_socket_log!("[CLIENT] sock={} FAIL: not connected", sock);
                 return Some(ApiHookResult::callee(4, Some(SOCKET_ERROR)));
             }
         };
@@ -732,11 +732,11 @@ impl WS2_32 {
                 flags,
                 len
             );
-            crate::emu_socket_log!("[SEND] sock={} -> {} bytes", sock, len);
+            crate::emu_socket_log!("[CLIENT] sock={} -> {} bytes", sock, len);
             Some(ApiHookResult::callee(4, Some(len as i32)))
         } else {
             crate::emu_log!("[WS2_32] send({}) -> SOCKET_ERROR (channel closed)", sock);
-            crate::emu_socket_log!("[SEND] sock={} FAIL: channel closed", sock);
+            crate::emu_socket_log!("[CLIENT] sock={} FAIL: channel closed", sock);
             Some(ApiHookResult::callee(4, Some(SOCKET_ERROR)))
         }
     }
@@ -961,7 +961,7 @@ impl WS2_32 {
             uc.write_u32(bytes_sent_addr as u64, total_sent as u32);
         }
         crate::emu_log!("[WS2_32] WSASend({:#x}) -> {} bytes sent", sock, total_sent);
-        crate::emu_socket_log!("[SEND] sock={} -> {} bytes (WSA)", sock, total_sent);
+        crate::emu_socket_log!("[CLIENT] sock={} -> {} bytes (WSA)", sock, total_sent);
         Some(ApiHookResult::callee(
             7,
             Some(if total_sent > 0 { 0 } else { SOCKET_ERROR }),
@@ -1033,7 +1033,7 @@ impl WS2_32 {
                     .last_error
                     .store(WSAEWOULDBLOCK, Ordering::SeqCst);
                 crate::emu_log!("[WS2_32] WSARecv({}) -> SOCKET_ERROR (no socket)", sock);
-                crate::emu_socket_log!("[RECV] sock={} FAIL: no socket", sock);
+                crate::emu_socket_log!("[SERVER] sock={} FAIL: no socket", sock);
                 return Some(ApiHookResult::callee(7, Some(SOCKET_ERROR)));
             }
         };
@@ -1087,12 +1087,12 @@ impl WS2_32 {
             uc.write_u32(flags_ptr as u64, 0);
         }
 
-        crate::emu_socket_log!(
-            "[RECV] sock={} -> {} bytes (WSA Multi{})",
-            sock,
-            total_n,
-            if peek { ", peek" } else { "" }
-        );
+        // crate::emu_socket_log!(
+        //     "[SERVER] sock={} -> {} bytes (WSA Multi{})",
+        //     sock,
+        //     total_n,
+        //     if peek { ", peek" } else { "" }
+        // );
 
         Some(ApiHookResult::callee(7, Some(0)))
     }

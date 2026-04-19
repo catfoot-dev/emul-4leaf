@@ -10,13 +10,12 @@ use crate::server::{
         should_parse_as_raw_stage_packet, should_promote_open_to_mainframe_stage,
     },
     domain,
-    protocol::{self, ControlMessage, DNetPacket, ProtocolPacket},
+    protocol::{self, ControlMessage, DNetPacket, MainFramePacket, ProtocolPacket},
     state::GameState,
 };
 
 /// 게스트 DLL과 호스트 사이에서 DNet 프레임을 중계하는 메인 핸들러 루프입니다.
 pub fn run_dnet_handler(server_rx: mpsc::Receiver<Vec<u8>>, server_tx: mpsc::Sender<Vec<u8>>) {
-    crate::append_capture_line("socket.log", "[DNet] handler thread started");
     let mut runtime = ServerRuntime::new();
 
     loop {
@@ -87,7 +86,7 @@ impl ServerRuntime {
 
     /// 제어 채널 메시지를 처리합니다.
     fn handle_control_message(&mut self, server_tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) -> bool {
-        crate::emu_socket_log!("[SERVER] RECV body: {}", hex::encode(body));
+        crate::emu_socket_log!("[SERVER] body: {}", hex::encode(body));
 
         let ctrl = match ControlMessage::from_bytes(body) {
             Some(ctrl) => ctrl,
@@ -183,6 +182,63 @@ impl ServerRuntime {
             return self.handle_raw_stage_message(channel_id, body);
         }
 
+        if channel_id == 1 {
+            let pkt = match MainFramePacket::from_bytes(body) {
+                Some(pkt) => pkt,
+                None => {
+                    crate::emu_socket_log!(
+                        "[DNet] Malformed mainframe body on ch={} → sending REJECT",
+                        channel_id
+                    );
+                    return self.send_packets(
+                        server_tx,
+                        "CTRL",
+                        vec![protocol::create_control_message(
+                            protocol::CTRL_REJECT_OR_ABORT,
+                            channel_id,
+                        )],
+                    );
+                }
+            };
+
+            crate::emu_socket_log!(
+                "[SERVER] ch={} code={:#x} control={} payload={}B {}",
+                channel_id,
+                pkt.code,
+                pkt.control,
+                pkt.payload.len(),
+                hex::encode(&pkt.payload)
+            );
+
+            let post_bootstrap_probe = self.record_post_bootstrap_probe(channel_id);
+            let previous_phase = self
+                .analysis_states
+                .get(&channel_id)
+                .map(|state| state.phase);
+            let outcome =
+                domain::main_frame::handle_main_frame(&pkt, channel_id, &mut self.game_state);
+            let current_phase =
+                self.apply_phase_update(channel_id, previous_phase, outcome.phase_update);
+
+            if outcome.responses.is_empty()
+                && post_bootstrap_probe.is_some()
+                && is_post_initial_handshake_phase(current_phase)
+            {
+                emit_protocol_analysis(&format!(
+                    "ch={} phase={} candidate#{} requires server response: code={:#x} control={} payload={}B {}",
+                    channel_id,
+                    phase_label(current_phase),
+                    post_bootstrap_probe.unwrap_or(0),
+                    pkt.code,
+                    pkt.control,
+                    pkt.payload.len(),
+                    hex::encode(&pkt.payload)
+                ));
+            }
+
+            return self.send_packets(server_tx, "APP", outcome.responses);
+        }
+
         let pkt = match ProtocolPacket::from_bytes(body) {
             Some(pkt) => pkt,
             None => {
@@ -202,7 +258,7 @@ impl ServerRuntime {
         };
 
         crate::emu_socket_log!(
-            "[RECV] ch={} main=0x{:02x} sub=0x{:02x} payload={}B {}",
+            "[SERVER] ch={} main=0x{:02x} sub=0x{:02x} payload={}B {}",
             channel_id,
             pkt.main_type,
             pkt.sub_type,
@@ -246,34 +302,34 @@ impl ServerRuntime {
         };
 
         crate::emu_socket_log!(
-            "[RECV-RAW] ch={} msg={} payload={}B {}",
+            "[SERVER-RAW] ch={} msg={} payload={}B {}",
             channel_id,
             pkt.msg_id,
             pkt.payload.len(),
             hex::encode(&pkt.payload)
         );
 
-        let post_bootstrap_probe = self.record_post_bootstrap_probe(channel_id);
-        emit_protocol_analysis(&format!(
-            "ch={} phase={} note=raw-stage msg={} payload={}B {}",
-            channel_id,
-            phase_label(ChannelPhase::AwaitingMainFrameStageInfo),
-            pkt.msg_id,
-            pkt.payload.len(),
-            hex::encode(&pkt.payload)
-        ));
+        // let post_bootstrap_probe = self.record_post_bootstrap_probe(channel_id);
+        // emit_protocol_analysis(&format!(
+        //     "ch={} phase={} note=raw-stage msg={} payload={}B {}",
+        //     channel_id,
+        //     phase_label(ChannelPhase::AwaitingMainFrameStageInfo),
+        //     pkt.msg_id,
+        //     pkt.payload.len(),
+        //     hex::encode(&pkt.payload)
+        // ));
 
-        if let Some(candidate_index) = post_bootstrap_probe {
-            emit_protocol_analysis(&format!(
-                "ch={} phase={} candidate#{} requires server response: raw_msg={} payload={}B {}",
-                channel_id,
-                phase_label(ChannelPhase::AwaitingMainFrameStageInfo),
-                candidate_index,
-                pkt.msg_id,
-                pkt.payload.len(),
-                hex::encode(&pkt.payload)
-            ));
-        }
+        // if let Some(candidate_index) = post_bootstrap_probe {
+        //     emit_protocol_analysis(&format!(
+        //         "ch={} phase={} candidate#{} requires server response: raw_msg={} payload={}B {}",
+        //         channel_id,
+        //         phase_label(ChannelPhase::AwaitingMainFrameStageInfo),
+        //         candidate_index,
+        //         pkt.msg_id,
+        //         pkt.payload.len(),
+        //         hex::encode(&pkt.payload)
+        //     ));
+        // }
 
         true
     }
@@ -318,19 +374,19 @@ impl ServerRuntime {
             },
         );
 
-        if open_phase == ChannelPhase::AwaitingMainFrameStageInfo {
-            emit_protocol_analysis(&format!(
-                "ch={} phase={} control-open accepted as likely main-frame stage channel; awaiting raw stage data",
-                channel_id,
-                phase_label(open_phase)
-            ));
-        } else {
-            emit_protocol_analysis(&format!(
-                "ch={} phase={} control-open accepted; awaiting bootstrap packet",
-                channel_id,
-                phase_label(open_phase)
-            ));
-        }
+        // if open_phase == ChannelPhase::AwaitingMainFrameStageInfo {
+        //     emit_protocol_analysis(&format!(
+        //         "ch={} phase={} control-open accepted as likely main-frame stage channel; awaiting raw stage data",
+        //         channel_id,
+        //         phase_label(open_phase)
+        //     ));
+        // } else {
+        //     emit_protocol_analysis(&format!(
+        //         "ch={} phase={} control-open accepted; awaiting bootstrap packet",
+        //         channel_id,
+        //         phase_label(open_phase)
+        //     ));
+        // }
 
         build_stage_open_acceptance_responses(channel_id)
     }
@@ -370,17 +426,17 @@ impl ServerRuntime {
 
     /// bootstrap 직후 채널이 닫히는 패턴을 분석 로그에 남깁니다.
     fn emit_missing_bootstrap_response_hint(&self, channel_id: u16, message: &str) {
-        if let Some(state) = self.analysis_states.get(&channel_id)
-            && state.phase == ChannelPhase::BootstrapVersionSent
-            && state.post_bootstrap_client_packets == 0
-        {
-            emit_protocol_analysis(&format!(
-                "ch={} phase={} {}",
-                channel_id,
-                phase_label(state.phase),
-                message
-            ));
-        }
+        // if let Some(state) = self.analysis_states.get(&channel_id)
+        //     && state.phase == ChannelPhase::BootstrapVersionSent
+        //     && state.post_bootstrap_client_packets == 0
+        // {
+        //     emit_protocol_analysis(&format!(
+        //         "ch={} phase={} {}",
+        //         channel_id,
+        //         phase_label(state.phase),
+        //         message
+        //     ));
+        // }
     }
 
     /// 생성된 응답 패킷들을 공통 로깅 포맷으로 전송합니다.
@@ -427,6 +483,6 @@ fn is_supported_data_channel(channel_id: u16) -> bool {
 
 /// 공통 송신 로그를 남기고 실제 채널로 바이트를 보냅니다.
 fn send_wire(server_tx: &mpsc::Sender<Vec<u8>>, label: &str, data: Vec<u8>) -> bool {
-    crate::emu_socket_log!("[SEND] {}", protocol::hex_dump(label, &data));
+    // crate::emu_socket_log!("[SERVER] {}", protocol::hex_dump(label, &data));
     server_tx.send(data).is_ok()
 }

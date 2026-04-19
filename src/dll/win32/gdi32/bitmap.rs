@@ -684,23 +684,6 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
         header.blue_mask,
         header.alpha_mask,
     );
-    if GDI32::should_trace_wallpaper() {
-        crate::append_capture_line(
-            "wallpaper.log",
-            &format!(
-                "stage=set_dibits_to_device hdc={hdc:#x} src={}x{} scans={} x_dest={} y_dest={} dw_width={} dw_height={} bits={:#x} bmi={:#x}",
-                bmi_width,
-                c_scans,
-                c_scans,
-                x_dest,
-                y_dest,
-                dw_width,
-                dw_height,
-                lp_bits,
-                lp_bits_info
-            ),
-        );
-    }
 
     // 대상 DC → 비트맵 찾기
     let (hbmp_dest, hwnd_dest, origin_x, origin_y) = {
@@ -843,26 +826,6 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
         header.blue_mask,
         header.alpha_mask,
     );
-    if GDI32::should_trace_wallpaper() {
-        crate::append_capture_line(
-            "wallpaper.log",
-            &format!(
-                "stage=stretch_dibits hdc={hdc:#x} src={}x{} x_dest={} y_dest={} dest={}x{} x_src={} y_src={} src_rect={}x{} bits={:#x} bmi={:#x}",
-                bmi_width,
-                bmi_height,
-                x_dest,
-                y_dest,
-                n_dest_width,
-                n_dest_height,
-                x_src,
-                y_src,
-                n_src_width,
-                n_src_height,
-                lp_bits,
-                lp_bits_info
-            ),
-        );
-    }
 
     let (hbmp_dest, hwnd_dest, origin_x, origin_y) = {
         let gdi = uc.get_data().gdi_objects.lock().unwrap();

@@ -1,4 +1,5 @@
-use crate::server::protocol::{ControlMessage, DNetPacket, ProtocolPacket};
+use crate::emu_socket_log;
+use crate::server::protocol::{ControlMessage, DNetPacket, MainFramePacket, ProtocolPacket};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
@@ -50,7 +51,7 @@ impl PacketLogger {
             start_time: Instant::now(),
             packets: VecDeque::new(),
             stream_buffers: HashMap::new(),
-            enabled: crate::should_write_capture_files(),
+            enabled: true,
         }
     }
 
@@ -72,38 +73,26 @@ impl PacketLogger {
         }
 
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
-        let mirrors_previous_send =
-            direction == PacketDirection::Recv && self.mirrors_previous_send(socket_id, data);
-        if crate::debug::should_send_debug_messages() {
-            let dir_str = match direction {
-                PacketDirection::Send => "SEND",
-                PacketDirection::Recv => "RECV",
-            };
+        // let mirrors_previous_send =
+        //     direction == PacketDirection::Recv && self.mirrors_previous_send(socket_id, data);
+        // if crate::debug::should_send_debug_messages() {
+        //     let dir_str = match direction {
+        //         PacketDirection::Send => "CLIENT",
+        //         PacketDirection::Recv => "SERVER",
+        //     };
 
-            // 디버그 창이 열려 있을 때만 16진수/ASCII 덤프를 생성해 핫패스 비용을 줄입니다.
-            let hex = data
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            crate::emu_socket_log!(
-                "[{}] t={}ms sock={} len={} | {}",
-                dir_str,
-                timestamp_ms,
-                socket_id,
-                data.len(),
-                hex
-            );
-        }
+        //     // 디버그 창이 열려 있을 때만 16진수/ASCII 덤프를 생성해 핫패스 비용을 줄입니다.
+        //     crate::emu_socket_log!(
+        //         "[{}] t={}ms sock={} len={}",
+        //         dir_str,
+        //         timestamp_ms,
+        //         socket_id,
+        //         data.len()
+        //     );
+        // }
 
-        self.write_capture_line(
-            timestamp_ms,
-            direction,
-            socket_id,
-            data,
-            mirrors_previous_send,
-        );
-        self.write_frame_lines(timestamp_ms, direction, socket_id, data, advance_stream);
+        // self.write_capture_line(data, mirrors_previous_send);
+        self.write_frame_lines(direction, socket_id, data, advance_stream);
 
         // 캡처 이력은 고정 크기로 유지해 장시간 실행 시 메모리 사용량이 계속 커지지 않게 합니다.
         if self.packets.len() >= MAX_PACKET_HISTORY {
@@ -193,6 +182,23 @@ impl PacketLogger {
                     body.len() - 4,
                     hex::encode(&body[4..])
                 ));
+            } else if channel_id == 1 {
+                if let Some(packet) = MainFramePacket::from_bytes(body) {
+                    parts.push(format!(
+                        "mainframe ch={} code={:#x} control={} payload={}B {}",
+                        channel_id,
+                        packet.code,
+                        packet.control,
+                        packet.payload.len(),
+                        hex::encode(&packet.payload)
+                    ));
+                } else {
+                    parts.push(format!(
+                        "mainframe ch={} malformed len={}",
+                        channel_id,
+                        body.len()
+                    ));
+                }
             } else if let Some(packet) = ProtocolPacket::from_bytes(body) {
                 parts.push(format!(
                     "app ch={} main=0x{:02x} sub=0x{:02x} payload={}B {}",
@@ -289,69 +295,45 @@ impl PacketLogger {
 
     fn write_frame_lines(
         &mut self,
-        timestamp_ms: u64,
         direction: PacketDirection,
         socket_id: u32,
         data: &[u8],
         advance_stream: bool,
     ) {
-        if !crate::should_write_capture_files() {
-            return;
-        }
-
-        let dir = match direction {
-            PacketDirection::Send => "SEND",
-            PacketDirection::Recv => "RECV",
-        };
-
         for frame in self.drain_complete_frames(direction, socket_id, data, advance_stream) {
-            let mirror_prev_send =
-                direction == PacketDirection::Recv && self.mirrors_previous_send(socket_id, &frame);
-            crate::append_capture_line(
-                "frames.log",
-                &format!(
-                    "t={}ms dir={} sock={} mirror_prev_send={} hex={} summary={}",
-                    timestamp_ms,
-                    dir,
-                    socket_id,
-                    mirror_prev_send,
-                    hex::encode(&frame),
-                    Self::summarize_dnet_frames(&frame)
-                ),
-            );
+            // let mirror_prev_send =
+            //     direction == PacketDirection::Recv && self.mirrors_previous_send(socket_id, &frame);
+            // emu_socket_log!(
+            //     "mirror_prev_send={} summary={}",
+            //     mirror_prev_send,
+            //     Self::summarize_dnet_frames(&frame)
+            // );
+            let mut hex = String::from(format!("{:#04x} : ", 0));
+            for (i, b) in frame.iter().enumerate() {
+                if i > 0 && i % 32 == 0 {
+                    hex.push_str(&format!("\n{:#04x} : ", i));
+                }
+                hex.push_str(&format!("{:02x} ", b));
+            }
+            emu_socket_log!("{}", hex);
         }
     }
 
-    fn write_capture_line(
-        &self,
-        timestamp_ms: u64,
-        direction: PacketDirection,
-        socket_id: u32,
-        data: &[u8],
-        mirrors_previous_send: bool,
-    ) {
-        if !crate::should_write_capture_files() {
-            return;
+    fn write_capture_line(&self, data: &[u8], mirrors_previous_send: bool) {
+        // let summary = Self::summarize_dnet_frames(data);
+        // emu_socket_log!(
+        //     "mirror_prev_send={} summary={}",
+        //     mirrors_previous_send,
+        //     summary
+        // );
+        let mut hex = String::from(format!("{:#04x} : ", 0));
+        for (i, b) in data.iter().enumerate() {
+            if i > 0 && i % 32 == 0 {
+                hex.push_str(&format!("\n{:#04x} : ", i));
+            }
+            hex.push_str(&format!("{:02x} ", b));
         }
-
-        let dir = match direction {
-            PacketDirection::Send => "SEND",
-            PacketDirection::Recv => "RECV",
-        };
-        let summary = Self::summarize_dnet_frames(data);
-        crate::append_capture_line(
-            "packets.log",
-            &format!(
-                "t={}ms dir={} sock={} len={} mirror_prev_send={} hex={} summary={}",
-                timestamp_ms,
-                dir,
-                socket_id,
-                data.len(),
-                mirrors_previous_send,
-                hex::encode(data),
-                summary
-            ),
-        );
+        emu_socket_log!("{}", hex);
     }
 
     /// 현재 로거에 기록된(캡처된) 총 패킷의 개수를 반환
@@ -484,6 +466,16 @@ mod tests {
         assert_eq!(
             PacketLogger::summarize_dnet_frames(&frame),
             "raw ch=1 handler=0 msg=9 payload=16B 00000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn summary_recognizes_channel_one_mainframe_packets() {
+        let frame = protocol::create_mainframe_packet(1, 0x2026_8024, 3, &[]);
+
+        assert_eq!(
+            PacketLogger::summarize_dnet_frames(&frame),
+            "mainframe ch=1 code=0x20268024 control=3 payload=0B "
         );
     }
 }

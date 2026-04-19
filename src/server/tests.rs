@@ -17,15 +17,22 @@ use super::{
             build_provisional_main_frame_bootstrap_response,
             build_provisional_main_frame_stage_info_response,
             build_provisional_worldmap_stage_bootstrap_response,
-            build_provisional_worldmap_stage_payload, extract_control, extract_version_code,
-            get_news_title_text, handle_avatar_selection, handle_id_check,
-            handle_registration_request, handle_registration_submit,
+            build_provisional_worldmap_stage_payload, get_news_title_text, handle_avatar_selection,
+            handle_id_check, handle_registration_request, handle_registration_submit,
         },
     },
-    protocol::{self, DNetPacket, ProtocolPacket},
+    protocol::{self, DNetPacket, MainFramePacket, ProtocolPacket},
     run_dnet_handler,
     state::{GameState, SessionInfo, build_avatar_detail_data},
 };
+
+fn sample_mainframe_packet(code: u32, control: u32, payload: &[u8]) -> MainFramePacket {
+    MainFramePacket {
+        code,
+        control,
+        payload: payload.to_vec(),
+    }
+}
 
 #[test]
 fn handler_does_not_send_app_data_before_client_opens_a_channel() {
@@ -105,9 +112,13 @@ fn handler_returns_version_based_main_frame_bootstrap_packet() {
         protocol::create_control_message(protocol::CTRL_OPEN_OK, 1)
     );
 
-    let payload = [0x0d, 0x35, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00];
     to_handler_tx
-        .send(protocol::create_app_packet(1, 0xE0, 0x04, &payload))
+        .send(protocol::create_mainframe_packet(
+            1,
+            0x400d04e0,
+            0,
+            &[0x11, 0x00],
+        ))
         .unwrap();
 
     let version_resp = from_handler_rx
@@ -129,13 +140,7 @@ fn handler_returns_version_based_main_frame_bootstrap_packet() {
 
 #[test]
 fn main_frame_bootstrap_response_uses_version_file_payload() {
-    let request = ProtocolPacket {
-        main_type: 0xE0,
-        sub_type: 0x04,
-        payload: vec![0x0d, 0x35, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00],
-    };
-
-    let response = build_provisional_main_frame_bootstrap_response(&request, 3);
+    let response = build_provisional_main_frame_bootstrap_response(3);
     let mut expected_body = Vec::new();
     expected_body.extend_from_slice(&0u32.to_le_bytes());
     expected_body.extend_from_slice(&0u32.to_le_bytes());
@@ -147,13 +152,7 @@ fn main_frame_bootstrap_response_uses_version_file_payload() {
 
 #[test]
 fn main_frame_bootstrap_response_terminates_followup_text_block() {
-    let request = ProtocolPacket {
-        main_type: 0xE0,
-        sub_type: 0x04,
-        payload: vec![0x0d, 0x35, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00],
-    };
-
-    let response = build_provisional_main_frame_bootstrap_response(&request, 1);
+    let response = build_provisional_main_frame_bootstrap_response(1);
     let (channel_id, body_len) =
         DNetPacket::parse_header(response[..4].try_into().unwrap()).unwrap();
     assert_eq!(channel_id, 1);
@@ -213,9 +212,13 @@ fn stage_channel_two_open_pushes_provisional_worldmap_bootstrap() {
         protocol::create_control_message(protocol::CTRL_OPEN_OK, 1)
     );
 
-    let payload = [0x0d, 0x35, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00];
     to_handler_tx
-        .send(protocol::create_app_packet(1, 0xE0, 0x04, &payload))
+        .send(protocol::create_mainframe_packet(
+            1,
+            0x400d04e0,
+            0,
+            &[0x11, 0x00],
+        ))
         .unwrap();
     let _bootstrap = from_handler_rx
         .recv_timeout(Duration::from_secs(1))
@@ -305,35 +308,12 @@ fn awaiting_stage_channels_use_raw_parser() {
 }
 
 #[test]
-fn extract_version_code_reconstructs_original_value() {
-    let pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload: vec![0x0d, 0x40, 0x00, 0x00, 0x00, 0x00],
-    };
-    assert_eq!(extract_version_code(&pkt), 0x400d04e0);
-}
-
-#[test]
-fn extract_control_parses_from_payload_offset_two() {
-    let payload = vec![0x0d, 0x40, 0x03, 0x00, 0x00, 0x00];
-    assert_eq!(extract_control(&payload), Some(3));
-}
-
-#[test]
-fn extract_control_returns_none_for_short_payload() {
-    assert_eq!(extract_control(&[0x0d, 0x40, 0x03]), None);
-}
-
-#[test]
 fn build_agent_response_produces_correct_wire_format() {
     let wire = build_agent_response(1, 0x400d04e0, 3, &[0xaa]);
     let header = &wire[..4];
     assert_eq!(header[0..2], [0x01, 0x00]);
     let body = &wire[4..];
-    assert_eq!(body[0], 0xe0);
-    assert_eq!(body[1], 0x04);
-    assert_eq!(body[2..4], [0x0d, 0x40]);
+    assert_eq!(body[0..4], [0xe0, 0x04, 0x0d, 0x40]);
     assert_eq!(body[4..8], [0x03, 0x00, 0x00, 0x00]);
     assert_eq!(body[8], 0xaa);
 }
@@ -375,7 +355,7 @@ fn legacy_main_type_a4_keeps_terms_dialog_payload_shape() {
         payload: vec![0x00],
     };
 
-    let outcome = handle_terms_dialog_request(&pkt, 5);
+    let outcome = handle_terms_dialog_request(&pkt, 5, 0xA4);
 
     assert_eq!(outcome.responses.len(), 1);
     let wire = &outcome.responses[0];
@@ -383,6 +363,29 @@ fn legacy_main_type_a4_keeps_terms_dialog_payload_shape() {
     let body = &wire[4..];
     assert_eq!(body[0], 0xA4);
     assert_eq!(body[1], 0x01);
+    assert_eq!(u32::from_le_bytes(body[2..6].try_into().unwrap()), 1);
+    assert!(
+        body.windows(b"4Leaf Terms Agreement".len())
+            .any(|w| w == b"4Leaf Terms Agreement")
+    );
+}
+
+#[test]
+fn main_type_0x70_keeps_terms_dialog_payload_shape() {
+    let pkt = ProtocolPacket {
+        main_type: 0x70,
+        sub_type: 0x03,
+        payload: vec![0xaa, 0xbb],
+    };
+
+    let outcome = handle_terms_dialog_request(&pkt, 5, 0x70);
+
+    assert_eq!(outcome.responses.len(), 1);
+    let wire = &outcome.responses[0];
+    assert_eq!(&wire[0..2], &[0x05, 0x00]);
+    let body = &wire[4..];
+    assert_eq!(body[0], 0x70);
+    assert_eq!(body[1], 0x03);
     assert_eq!(u32::from_le_bytes(body[2..6].try_into().unwrap()), 1);
     assert!(
         body.windows(b"4Leaf Terms Agreement".len())
@@ -410,13 +413,7 @@ fn main_type_d4_handler_returns_minimal_ack() {
 #[test]
 fn id_check_reports_available_for_new_id() {
     let state = GameState::new();
-    let mut payload = vec![0x0d, 0x40, 0x04, 0x00, 0x00, 0x00];
-    payload.extend_from_slice(b"newuser\0");
-    let pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload,
-    };
+    let pkt = sample_mainframe_packet(0x400d04e0, 4, b"newuser\0");
     let outcome = handle_id_check(&pkt, 1, &state);
     assert_eq!(outcome.responses.len(), 1);
 
@@ -429,13 +426,7 @@ fn id_check_reports_available_for_new_id() {
 #[test]
 fn id_check_reports_taken_for_existing_id() {
     let state = GameState::new();
-    let mut payload = vec![0x0d, 0x40, 0x04, 0x00, 0x00, 0x00];
-    payload.extend_from_slice(b"test\0");
-    let pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload,
-    };
+    let pkt = sample_mainframe_packet(0x400d04e0, 4, b"test\0");
     let outcome = handle_id_check(&pkt, 1, &state);
     let resp = &outcome.responses[0];
     let body = &resp[4..];
@@ -446,7 +437,7 @@ fn id_check_reports_taken_for_existing_id() {
 #[test]
 fn registration_submit_creates_new_user() {
     let mut state = GameState::new();
-    let mut payload = vec![0x0d, 0x40, 0x05, 0x00, 0x00, 0x00];
+    let mut payload = Vec::new();
     let mut id_field = [0u8; 16];
     id_field[..5].copy_from_slice(b"hello");
     payload.extend_from_slice(&id_field);
@@ -454,11 +445,7 @@ fn registration_submit_creates_new_user() {
     let mut pass_field = [0u8; 16];
     pass_field[..5].copy_from_slice(b"world");
     payload.extend_from_slice(&pass_field);
-    let pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload,
-    };
+    let pkt = sample_mainframe_packet(0x400d04e0, 5, &payload);
     let outcome = handle_registration_submit(&pkt, 1, &mut state);
     assert!(!outcome.responses.is_empty());
     assert!(state.users.contains_key("hello"));
@@ -475,7 +462,7 @@ fn registration_submit_creates_new_user() {
 fn registration_submit_rejects_duplicate_user() {
     let mut state = GameState::new();
     let original_password = state.users.get("test").unwrap().password.clone();
-    let mut payload = vec![0x0d, 0x40, 0x05, 0x00, 0x00, 0x00];
+    let mut payload = Vec::new();
     let mut id_field = [0u8; 16];
     id_field[..4].copy_from_slice(b"test");
     payload.extend_from_slice(&id_field);
@@ -483,11 +470,7 @@ fn registration_submit_rejects_duplicate_user() {
     let mut pass_field = [0u8; 16];
     pass_field[..3].copy_from_slice(b"new");
     payload.extend_from_slice(&pass_field);
-    let pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload,
-    };
+    let pkt = sample_mainframe_packet(0x400d04e0, 5, &payload);
 
     let outcome = handle_registration_submit(&pkt, 1, &mut state);
     let body = &outcome.responses[0][4..];
@@ -501,7 +484,7 @@ fn registration_submit_rejects_duplicate_user() {
 #[test]
 fn registration_submit_prepares_avatar_selection_session() {
     let mut state = GameState::new();
-    let mut payload = vec![0x0d, 0x40, 0x05, 0x00, 0x00, 0x00];
+    let mut payload = Vec::new();
     let mut id_field = [0u8; 16];
     id_field[..5].copy_from_slice(b"fresh");
     payload.extend_from_slice(&id_field);
@@ -509,20 +492,11 @@ fn registration_submit_prepares_avatar_selection_session() {
     let mut pass_field = [0u8; 16];
     pass_field[..2].copy_from_slice(b"pw");
     payload.extend_from_slice(&pass_field);
-    let pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload,
-    };
+    let pkt = sample_mainframe_packet(0x400d04e0, 5, &payload);
 
     let _ = handle_registration_submit(&pkt, 1, &mut state);
 
-    let avatar_payload = vec![0x0d, 0x40, 0x07, 0x00, 0x00, 0x00, 0x02];
-    let avatar_pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload: avatar_payload,
-    };
+    let avatar_pkt = sample_mainframe_packet(0x400d04e0, 7, &[0x02]);
     let outcome = handle_avatar_selection(&avatar_pkt, 1, &mut state);
 
     assert_eq!(outcome.responses.len(), 2);
@@ -561,12 +535,7 @@ fn avatar_selection_sends_detail_and_visit_reward() {
         gp: 1000,
         fp: 0,
     });
-    let payload = vec![0x0d, 0x40, 0x07, 0x00, 0x00, 0x00, 0x01];
-    let pkt = ProtocolPacket {
-        main_type: 0xe0,
-        sub_type: 0x04,
-        payload,
-    };
+    let pkt = sample_mainframe_packet(0x400d04e0, 7, &[0x01]);
     let outcome = handle_avatar_selection(&pkt, 1, &mut state);
 
     assert_eq!(outcome.responses.len(), 2);
@@ -586,30 +555,30 @@ fn main_frame_dispatches_registration_request_on_control_three() {
         .recv_timeout(Duration::from_secs(1))
         .unwrap();
 
-    let bootstrap_payload = [0x0d, 0x40, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00];
     to_handler_tx
-        .send(protocol::create_app_packet(
+        .send(protocol::create_mainframe_packet(
             1,
-            0xE0,
-            0x04,
-            &bootstrap_payload,
+            0x400d04e0,
+            0,
+            &[0x11, 0x00],
         ))
         .unwrap();
     let _bootstrap_resp = from_handler_rx
         .recv_timeout(Duration::from_secs(1))
         .unwrap();
 
-    let reg_payload = [0x0d, 0x40, 0x03, 0x00, 0x00, 0x00];
     to_handler_tx
-        .send(protocol::create_app_packet(1, 0xE0, 0x04, &reg_payload))
+        .send(protocol::create_mainframe_packet(1, 0x400d04e0, 3, &[]))
         .unwrap();
     let reg_resp = from_handler_rx
         .recv_timeout(Duration::from_secs(1))
         .unwrap();
 
     let body = &reg_resp[4..];
-    assert_eq!(body[0], 0xe0);
-    assert_eq!(body[1], 0x04);
+    assert_eq!(
+        u32::from_le_bytes(body[0..4].try_into().unwrap()),
+        0x400d04e0
+    );
     let control = u32::from_le_bytes(body[4..8].try_into().unwrap());
     assert_eq!(control, 0);
 
@@ -707,7 +676,7 @@ fn dnet_handler_dispatches_main_type_0x70() {
         .recv_timeout(Duration::from_secs(1))
         .unwrap();
     let body = &response[4..];
-    assert_eq!(body[0], 0xA4);
+    assert_eq!(body[0], 0x70);
     assert_eq!(body[1], 0x03);
     assert_eq!(u32::from_le_bytes(body[2..6].try_into().unwrap()), 1);
 

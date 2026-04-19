@@ -219,15 +219,6 @@ pub(super) fn erase_window_background(uc: &mut Unicorn<Win32Context>, hwnd: u32)
         &clip_rects,
     );
     drop(pixels);
-    if GDI32::should_trace_wallpaper() {
-        crate::append_capture_line(
-            "wallpaper.log",
-            &format!(
-                "stage=erase_background hwnd={hwnd:#x} rect=({}, {}, {}, {}) color={:#08x} hbr={:#x}",
-                left, top, right, bottom, color, hbr_background
-            ),
-        );
-    }
     true
 }
 

@@ -110,40 +110,27 @@ pub(crate) fn setup_impl(
     _cmd_rx: Option<Receiver<DebugCommand>>,
 ) -> Result<(), ()> {
     // [1] 메모리 맵 설정
-    crate::append_capture_line("emu.log", "[SETUP] map stack begin");
     uc.mem_map(STACK_BASE, STACK_SIZE, Prot::ALL)
         .map_err(|e| crate::emu_log!("[!] Failed to map Stack: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map stack done");
     // 스택 오버플로우/경계 읽기 에러 방지 (스택 바로 뒤 4KB 추가 할당)
-    crate::append_capture_line("emu.log", "[SETUP] map stack guard begin");
     uc.mem_map(STACK_TOP, SIZE_4KB, Prot::ALL)
         .map_err(|e| crate::emu_log!("[!] Failed to map Stack Guard: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map stack guard done");
 
-    crate::append_capture_line("emu.log", "[SETUP] map heap begin");
     uc.mem_map(HEAP_BASE, HEAP_SIZE, Prot::ALL)
         .map_err(|e| crate::emu_log!("[!] Failed to map Heap: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map heap done");
-    crate::append_capture_line("emu.log", "[SETUP] map shared mem begin");
     uc.mem_map(SHARED_MEM_BASE, SIZE_4KB, Prot::ALL)
         .map_err(|e| crate::emu_log!("[!] Failed to map Shared Mem: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map shared mem done");
 
     // NULL 포인터 접근 방지 (0 ~ 128KB)
     // 읽기/쓰기만 허용하고 실행은 차단하여, EIP가 0으로 떨어졌을 때
     // FETCH_UNMAPPED 훅이 발동되어 호스트 프로세스 segfault를 방지합니다.
-    crate::append_capture_line("emu.log", "[SETUP] map null page begin");
     uc.mem_map(0, 0x2_0000, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Null Page: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map null page done");
 
     // [2] TEB (Thread Environment Block) 설정
-    crate::append_capture_line("emu.log", "[SETUP] map teb begin");
     uc.mem_map(TEB_BASE, SIZE_4KB, Prot::ALL)
         .map_err(|e| crate::emu_log!("[!] Failed to map TEB: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map teb done");
     // x86 SEH 체인의 끝은 `-1`이므로 초기 예외 리스트 헤더를 맞춰 둡니다.
-    crate::append_capture_line("emu.log", "[SETUP] init teb contents begin");
     uc.mem_write(TEB_BASE, &0xFFFF_FFFFu32.to_le_bytes())
         .map_err(|e| crate::emu_log!("[!] Failed to write TEB exception list: {:?}", e))?;
     // Self-pointer at TEB + 0x18
@@ -161,35 +148,25 @@ pub(crate) fn setup_impl(
                 e
             )
         })?;
-    crate::append_capture_line("emu.log", "[SETUP] init teb contents done");
 
     // [3] Fake Import Area (API 후킹용 실행 영역)
-    crate::append_capture_line("emu.log", "[SETUP] map fake import begin");
     uc.mem_map(FAKE_IMPORT_BASE, 1024 * 1024, Prot::ALL | Prot::EXEC)
         .map_err(|e| crate::emu_log!("[!] Failed to map Fake Import Area: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map fake import done");
     // RET (0xC3) 으로 채우기: 코드 훅이 실행된 후 자연스럽게 RET로 복귀
     let ret_fill = vec![0xC3u8; 1024 * 1024];
-    crate::append_capture_line("emu.log", "[SETUP] fill fake import begin");
     uc.mem_write(FAKE_IMPORT_BASE, &ret_fill)
         .map_err(|e| crate::emu_log!("[!] Failed to fill Fake Import Area: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] fill fake import done");
 
     // x86 세그먼트 레지스터(SS) 버그 방지를 위해 ESP를 페이지 경계에서 약간 띄움
-    crate::append_capture_line("emu.log", "[SETUP] set initial esp begin");
     uc.reg_write(RegisterX86::ESP, STACK_TOP - 0x1000)
         .map_err(|e| crate::emu_log!("[!] Failed to set initial ESP: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] set initial esp done");
 
     // EXIT_ADDRESS(0xFFFFFFFF)로 return 시의 접근 예외 방용 영역
-    crate::append_capture_line("emu.log", "[SETUP] map exit area begin");
     uc.mem_map(0xFFFF_0000, 64 * 1024, Prot::ALL | Prot::EXEC)
         .map_err(|e| crate::emu_log!("[!] Failed to map Exit Area: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] map exit area done");
 
     // [4] API Call Hook (Fake Address Range)
     // 0xF0000000 대역으로 점프 시 실행되는 훅
-    crate::append_capture_line("emu.log", "[SETUP] add fake import hook begin");
     uc.add_code_hook(
         FAKE_IMPORT_BASE,
         FAKE_IMPORT_BASE + 1024 * 1024,
@@ -304,21 +281,17 @@ pub(crate) fn setup_impl(
         },
     )
     .map_err(|e| crate::emu_log!("[!] Failed to install API hook: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] add fake import hook done");
 
     // [5] EIP=0 보호를 위한 전용 코드 훅
     // 이전에는 JIT 방지를 위해 전체 주소 범위를 훅했으나, 성능 향상을 위해
     // 실제 문제가 되는 0번지 진입만 차단하는 가벼운 훅으로 대체합니다.
-    crate::append_capture_line("emu.log", "[SETUP] add null-eip protection hook begin");
     uc.add_code_hook(0, 0, |uc: &mut Unicorn<Win32Context>, _addr, _size| {
         crate::emu_log!("[!] Execution at address 0x0 detected. Stopping.");
         uc.emu_stop().unwrap_or_default();
     })
     .map_err(|e| crate::emu_log!("[!] Failed to install null-eip hook: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] add null-eip protection hook done");
 
     // [6] Unmapped Memory Access Hook
-    crate::append_capture_line("emu.log", "[SETUP] add unmapped mem hook begin");
     uc.add_mem_hook(
         HookType::MEM_READ_UNMAPPED
             | HookType::MEM_WRITE_UNMAPPED
@@ -341,7 +314,6 @@ pub(crate) fn setup_impl(
         },
     )
     .map_err(|e| crate::emu_log!("[!] Failed to install memory hook: {:?}", e))?;
-    crate::append_capture_line("emu.log", "[SETUP] add unmapped mem hook done");
 
     Ok(())
 }
