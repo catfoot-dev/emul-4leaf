@@ -118,10 +118,9 @@ pub enum UiCommand {
 pub(crate) fn apply_platform_window_attributes(attributes: WindowAttributes) -> WindowAttributes {
     #[cfg(target_os = "macos")]
     {
-        use winit::{platform::macos::OptionAsAlt, window::WindowButtons};
+        use winit::platform::macos::OptionAsAlt;
 
         return attributes
-            .with_enabled_buttons(WindowButtons::empty())
             .with_title_hidden(true)
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)

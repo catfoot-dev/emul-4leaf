@@ -20,6 +20,23 @@ fn clear_msg_struct(uc: &mut Unicorn<Win32Context>, lp_msg: u32) {
     }
 }
 
+fn translated_char_from_vk(vk: u32) -> Option<u32> {
+    if (0x20..=0x7E).contains(&vk) || matches!(vk, 0x08 | 0x09 | 0x0D | 0x1B) {
+        Some(vk)
+    } else {
+        None
+    }
+}
+
+fn earlier_deadline(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
+    match (left, right) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 // API: LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 // 역할: 지정된 창에 메시지를 전송하고 처리가 완료될 때까지 대기
 pub(super) fn send_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -135,10 +152,8 @@ pub(super) fn post_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
     let lparam = uc.read_arg(3);
     let time = uc.get_data().start_time.elapsed().as_millis() as u32;
     let ctx = uc.get_data();
-    ctx.message_queue
-        .lock()
-        .unwrap()
-        .push_back([hwnd, msg, wparam, lparam, time, 0, 0]);
+    let target_tid = ctx.queue_message_for_window(hwnd, [hwnd, msg, wparam, lparam, time, 0, 0]);
+    ctx.wake_thread_message_wait(target_tid);
     crate::emu_log!(
         "[USER32] PostMessageA({:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
         hwnd,
@@ -190,60 +205,13 @@ pub(super) fn translate_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
 
     // WM_KEYDOWN(0x0100) 또는 WM_SYSKEYDOWN(0x0104)인 경우에만 번역 시도
     if msg == 0x100 || msg == 0x104 {
-        let mut char_code = 0;
-
-        // 단순 VK -> ASCII 매핑 (Shift 고려)
-        let shifted = {
+        // 현재 호스트 키 입력은 logical_key 기반으로 들어오므로,
+        // printable ASCII는 이미 shift/layout이 반영된 최종 문자로 취급합니다.
+        if let Some(char_code) = translated_char_from_vk(vk) {
             let ctx = uc.get_data();
-            let keys = ctx.key_states.lock().unwrap();
-            keys[0x10] // VK_SHIFT
-        };
-
-        if (0x30..=0x39).contains(&vk) {
-            // 숫자 키
-            char_code = if shifted {
-                match vk {
-                    0x30 => 0x29, // )
-                    0x31 => 0x21, // !
-                    0x32 => 0x40, // @
-                    0x33 => 0x23, // #
-                    0x34 => 0x24, // $
-                    0x35 => 0x25, // %
-                    0x36 => 0x5e, // ^
-                    0x37 => 0x26, // &
-                    0x38 => 0x2a, // *
-                    0x39 => 0x28, // (
-                    _ => vk,
-                }
-            } else {
-                vk
-            };
-        } else if (0x41..=0x5A).contains(&vk) {
-            // 알파벳 (A-Z)
-            char_code = if shifted { vk } else { vk + 0x20 }; // 대문자 or 소문자
-        } else if vk == 0x20 {
-            // Space
-            char_code = 0x20;
-        } else if vk == 0x0D {
-            // Enter
-            char_code = 0x0D;
-        } else if vk == 0x08 {
-            // Backspace
-            char_code = 0x08;
-        } else if vk == 0x09 {
-            // Tab
-            char_code = 0x09;
-        } else if vk == 0x1B {
-            // Escape
-            char_code = 0x1B;
-        }
-
-        if char_code != 0 {
-            let ctx = uc.get_data();
-            let mut q = ctx.message_queue.lock().unwrap();
             // WM_CHAR(0x0102) 또는 WM_SYSCHAR(0x0106) 추가
             let char_msg = if msg == 0x0100 { 0x0102 } else { 0x0106 };
-            q.push_back([hwnd, char_msg, char_code, l_param, 0, 0, 0]);
+            ctx.queue_message_for_window(hwnd, [hwnd, char_msg, char_code, l_param, 0, 0, 0]);
 
             crate::emu_log!(
                 "[USER32] TranslateMessage: Generated char {:#x} ('{}') for VK {:#x}",
@@ -259,6 +227,21 @@ pub(super) fn translate_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
     Some(ApiHookResult::callee(1, Some(0)))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printable_lowercase_vk_is_translated_to_char() {
+        assert_eq!(translated_char_from_vk('a' as u32), Some('a' as u32));
+    }
+
+    #[test]
+    fn printable_symbol_vk_is_translated_to_char() {
+        assert_eq!(translated_char_from_vk('!' as u32), Some('!' as u32));
+    }
+}
+
 // API: BOOL PeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
 // 역할: 메시지 큐에서 메시지를 가져옴
 pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -268,21 +251,26 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
     let msg_max = uc.read_arg(3);
     let remove_flag = uc.read_arg(4);
 
-    // 타 스레드 스케줄링 (협력적 멀티태스킹 유도)
-    KERNEL32::schedule_threads(uc);
-
     let mut cleared_paint_hwnd = 0u32;
     let msg = {
         let ctx = uc.get_data();
+        let tid = ctx.current_queue_thread_id();
 
         // 1. 타이머 체크 및 WM_TIMER 생성
         {
             let mut timers = ctx.timers.lock().unwrap();
-            let mut q = ctx.message_queue.lock().unwrap();
-            USER32::enqueue_elapsed_timer_messages(&mut timers, &mut q, std::time::Instant::now());
+            let mut queues = ctx.message_queues.lock().unwrap();
+            let queue = queues.entry(tid).or_default();
+            USER32::enqueue_elapsed_timer_messages(
+                &mut timers,
+                queue,
+                tid,
+                std::time::Instant::now(),
+            );
         }
 
-        let mut q = ctx.message_queue.lock().unwrap();
+        let mut queues = ctx.message_queues.lock().unwrap();
+        let q = queues.entry(tid).or_default();
 
         let mut found_idx = None;
         for (i, m) in q.iter().enumerate() {
@@ -314,12 +302,15 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
             }
         } else {
             // 2. WM_PAINT 합성 (큐가 비어있는 경우)
-            drop(q); // win_event 락을 잡기 위해 q 락 해제
+            let _ = q; // 큐 가변 참조를 여기서 끝내고 이후 win_event를 읽습니다.
             let mut synthesized = None;
             {
                 let ctx = uc.get_data();
                 let mut win_event = ctx.win_event.lock().unwrap();
                 for (hwnd, state) in win_event.windows.iter_mut() {
+                    if state.owner_thread_id != tid {
+                        continue;
+                    }
                     if state.needs_paint {
                         if hwnd_filter != 0 && *hwnd != hwnd_filter {
                             continue;
@@ -457,14 +448,27 @@ pub(super) fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     let mut cleared_paint_hwnd = 0u32;
     let msg = {
         let ctx = uc.get_data(); // Immutable borrow of ctx
-        let mut q = ctx.message_queue.lock().unwrap();
+        let tid = ctx.current_queue_thread_id();
+        {
+            let mut timers = ctx.timers.lock().unwrap();
+            let mut queues = ctx.message_queues.lock().unwrap();
+            let queue = queues.entry(tid).or_default();
+            USER32::enqueue_elapsed_timer_messages(
+                &mut timers,
+                queue,
+                tid,
+                std::time::Instant::now(),
+            );
+        }
+        let mut queues = ctx.message_queues.lock().unwrap();
+        let q = queues.entry(tid).or_default();
 
         if q.is_empty() {
             // Synthesize WM_PAINT if needed
             let mut paint_hwnd = 0;
             let win_event = ctx.win_event.lock().unwrap(); // Immutable borrow of win_event
             for (&h, win) in win_event.windows.iter() {
-                if win.needs_paint {
+                if win.owner_thread_id == tid && win.needs_paint {
                     paint_hwnd = h;
                     break;
                 }
@@ -491,12 +495,19 @@ pub(super) fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         clear_msg_struct(uc, lp_msg);
         // 메인 스레드가 idle 상태임을 표시하여 메인 루프의 idle sleep이 작동하도록 합니다.
         let ctx = uc.get_data();
-        let resume = Instant::now() + std::time::Duration::from_millis(1);
-        *ctx.main_resume_time.lock().unwrap() = Some(resume);
+        let tid = ctx.current_queue_thread_id();
+        KERNEL32::set_wait_handles(ctx, tid, &[]);
+        KERNEL32::set_wait_sockets(ctx, tid, &[]);
+        KERNEL32::schedule_retry_wait(ctx, tid, USER32::next_timer_deadline(ctx, tid));
         return Some(ApiHookResult::retry());
     }
 
     if let Some(mut m) = msg {
+        {
+            let ctx = uc.get_data();
+            let tid = ctx.current_queue_thread_id();
+            KERNEL32::clear_retry_wait(ctx, tid);
+        }
         if cleared_paint_hwnd != 0 {
             let ctx = uc.get_data();
             if let Some(state) = ctx
@@ -583,9 +594,6 @@ pub(super) fn msg_wait_for_multiple_objects(
     let dw_milliseconds = uc.read_arg(3);
     let _dw_wake_mask = uc.read_arg(4);
 
-    // 타 스레드 스케줄링
-    KERNEL32::schedule_threads(uc);
-
     let ctx = uc.get_data();
     let tid = ctx
         .current_thread_idx
@@ -598,7 +606,7 @@ pub(super) fn msg_wait_for_multiple_objects(
         Vec::new()
     };
 
-    if USER32::has_pending_ui_message(ctx) {
+    if USER32::has_pending_ui_message(ctx, tid) {
         KERNEL32::clear_retry_wait(ctx, tid);
         // crate::emu_log!(
         //     "[USER32] MsgWaitForMultipleObjects({:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> message",
@@ -638,13 +646,14 @@ pub(super) fn msg_wait_for_multiple_objects(
     }
 
     let now = std::time::Instant::now();
-    let deadline = if dw_milliseconds == 0xFFFF_FFFF {
+    let handle_deadline = if dw_milliseconds == 0xFFFF_FFFF {
         None
     } else {
         KERNEL32::current_wait_deadline(ctx, tid).or(Some(
             now + std::time::Duration::from_millis(dw_milliseconds as u64),
         ))
     };
+    let deadline = earlier_deadline(handle_deadline, USER32::next_timer_deadline(ctx, tid));
 
     if let Some(limit) = deadline
         && now >= limit
@@ -661,6 +670,8 @@ pub(super) fn msg_wait_for_multiple_objects(
         return Some(ApiHookResult::callee(5, Some(0x102)));
     }
 
+    KERNEL32::set_wait_handles(ctx, tid, &handles);
+    KERNEL32::set_wait_sockets(ctx, tid, &[]);
     KERNEL32::schedule_retry_wait(ctx, tid, deadline);
     Some(ApiHookResult::retry())
 }
@@ -669,6 +680,13 @@ pub(super) fn msg_wait_for_multiple_objects(
 // 역할: 프로그램 종료 메시지를 보냄
 pub(super) fn post_quit_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let n_exit_code = uc.read_arg(0);
+    let ctx = uc.get_data();
+    let tid = ctx
+        .current_thread_idx
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let time = ctx.start_time.elapsed().as_millis() as u32;
+    let target_tid = ctx.queue_message_for_thread(tid, [0, 0x0012, n_exit_code, 0, time, 0, 0]);
+    ctx.wake_thread_message_wait(target_tid);
     crate::emu_log!("[USER32] PostQuitMessage({}) -> void", n_exit_code);
     Some(ApiHookResult::callee(1, None))
 }
@@ -682,10 +700,9 @@ pub(super) fn post_thread_message_a(uc: &mut Unicorn<Win32Context>) -> Option<Ap
     let l_param = uc.read_arg(3);
     let time = uc.get_data().start_time.elapsed().as_millis() as u32;
     let ctx = uc.get_data();
-    ctx.message_queue
-        .lock()
-        .unwrap()
-        .push_back([0, msg, w_param, l_param, time, 0, 0]);
+    let target_tid =
+        ctx.queue_message_for_thread(thread_id, [0, msg, w_param, l_param, time, 0, 0]);
+    ctx.wake_thread_message_wait(target_tid);
     crate::emu_log!(
         "[USER32] PostThreadMessageA({:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
         thread_id,
@@ -979,15 +996,14 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
             // WM_NCLBUTTONUP
             let ctx = uc.get_data();
             let time = ctx.start_time.elapsed().as_millis() as u32;
-            let mut q = ctx.message_queue.lock().unwrap();
             match w_param {
                 20 => {
                     // HTCLOSE
-                    q.push_back([hwnd, 0x0112, 0xF060, l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_CLOSE
+                    ctx.queue_message_for_window(hwnd, [hwnd, 0x0112, 0xF060, l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_CLOSE
                 }
                 8 => {
                     // HTMINBUTTON
-                    q.push_back([hwnd, 0x0112, 0xF020, l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_MINIMIZE
+                    ctx.queue_message_for_window(hwnd, [hwnd, 0x0112, 0xF020, l_param, time, 0, 0]); // WM_SYSCOMMAND, SC_MINIMIZE
                 }
                 9 => {
                     // HTMAXBUTTON
@@ -998,7 +1014,8 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                         .map(|w| w.zoomed)
                         .unwrap_or(false);
                     let cmd = if is_zoomed { 0xF120 } else { 0xF030 }; // SC_RESTORE or SC_MAXIMIZE
-                    q.push_back([hwnd, 0x0112, cmd, l_param, time, 0, 0]);
+                    drop(win_event);
+                    ctx.queue_message_for_window(hwnd, [hwnd, 0x0112, cmd, l_param, time, 0, 0]);
                 }
                 _ => {}
             }
@@ -1012,8 +1029,7 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                     // SC_CLOSE
                     let ctx = uc.get_data();
                     let time = ctx.start_time.elapsed().as_millis() as u32;
-                    let mut q = ctx.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0010, 0, 0, time, 0, 0]); // WM_CLOSE
+                    ctx.queue_message_for_window(hwnd, [hwnd, 0x0010, 0, 0, time, 0, 0]); // WM_CLOSE
                 }
                 0xF020 => {
                     // SC_MINIMIZE

@@ -2,19 +2,19 @@
 
 pub(crate) mod auth;
 pub(crate) mod chat;
+pub(crate) mod control;
 pub(crate) mod echo;
-pub(crate) mod main_frame;
 pub(crate) mod system;
 pub(crate) mod world;
 
-use crate::server::{analysis::HandlerOutcome, protocol::ProtocolPacket, state::GameState};
+use crate::server::{protocol::ChannelPacket, session::Session};
 
 /// MainType 기준으로 적절한 도메인 처리기에 패킷을 위임합니다.
 pub(crate) fn dispatch_packet(
-    pkt: &ProtocolPacket,
+    pkt: &ChannelPacket,
     channel_id: u16,
-    state: &mut GameState,
-) -> HandlerOutcome {
+    state: &mut Session,
+) -> Vec<u8> {
     match pkt.main_type {
         0x0A => world::handle_world_map(pkt, channel_id),
         0x0B => chat::handle_chat_town_main(pkt, channel_id),
@@ -25,10 +25,7 @@ pub(crate) fn dispatch_packet(
         0x68 => echo::handle_ping(pkt, channel_id),
         other => {
             crate::emu_socket_log!("[WARN] 미구현 MainType=0x{:02x}", other);
-            HandlerOutcome {
-                responses: Vec::new(),
-                phase_update: None,
-            }
+            Vec::new()
         }
     }
 }

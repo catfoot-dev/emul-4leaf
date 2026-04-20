@@ -1,17 +1,9 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::mpsc,
-};
+use std::{collections::HashSet, sync::mpsc};
 
 use crate::server::{
-    analysis::{
-        ChannelAnalysisState, ChannelPhase, emit_protocol_analysis,
-        is_post_initial_handshake_phase, phase_label, raw_stage_packet_from_bytes,
-        should_parse_as_raw_stage_packet, should_promote_open_to_mainframe_stage,
-    },
     domain,
     protocol::{self, AuthPacket, ChannelPacket, ControlPacket, DNetPacket},
-    state::GameState,
+    session::Session,
 };
 
 /// 게스트 DLL과 호스트 사이에서 DNet 프레임을 중계하는 메인 핸들러 루프입니다.
@@ -35,8 +27,7 @@ pub fn run_dnet_handler(server_rx: mpsc::Receiver<Vec<u8>>, server_tx: mpsc::Sen
 struct ServerRuntime {
     byte_buf: Vec<u8>,
     open_channels: HashSet<u16>,
-    analysis_states: HashMap<u16, ChannelAnalysisState>,
-    game_state: GameState,
+    request: Session,
 }
 
 impl ServerRuntime {
@@ -45,8 +36,7 @@ impl ServerRuntime {
         Self {
             byte_buf: Vec::new(),
             open_channels: HashSet::new(),
-            analysis_states: HashMap::new(),
-            game_state: GameState::new(),
+            request: Session::new(),
         }
     }
 
@@ -74,6 +64,15 @@ impl ServerRuntime {
             let frame: Vec<u8> = self.byte_buf.drain(..needed).collect();
             let body = &frame[4..];
 
+            let mut hex = String::from(format!("[CLIENT] {:#04x}: ", 0));
+            for (i, b) in frame.iter().enumerate() {
+                if i > 0 && i % 32 == 0 {
+                    hex.push_str(&format!("\n[CLIENT] {:#04x}: ", i));
+                }
+                hex.push_str(&format!("{:02x} ", b));
+            }
+            crate::emu_socket_log!("{}", hex);
+
             if channel_id == 0 {
                 if !self.handle_control_message(server_tx, body) {
                     return false;
@@ -86,8 +85,6 @@ impl ServerRuntime {
 
     /// 제어 채널 메시지를 처리합니다.
     fn handle_control_message(&mut self, server_tx: &mpsc::Sender<Vec<u8>>, body: &[u8]) -> bool {
-        crate::emu_socket_log!("[SERVER] body: {}", hex::encode(body));
-
         let ctrl = match ControlPacket::from_bytes(body) {
             Some(ctrl) => ctrl,
             None => {
@@ -106,11 +103,6 @@ impl ServerRuntime {
             }
             protocol::CTRL_REJECT_OR_ABORT => {
                 let was_open = self.open_channels.remove(&ctrl.channel_id);
-                self.emit_missing_bootstrap_response_hint(
-                    ctrl.channel_id,
-                    "client rejected/aborted immediately after bootstrap version response; response is likely insufficient",
-                );
-                self.analysis_states.remove(&ctrl.channel_id);
                 crate::emu_socket_log!(
                     "[CTRL] Ch={} reject/abort received (was_open={})",
                     ctrl.channel_id,
@@ -120,11 +112,6 @@ impl ServerRuntime {
             }
             protocol::CTRL_CLOSE => {
                 let was_open = self.open_channels.remove(&ctrl.channel_id);
-                self.emit_missing_bootstrap_response_hint(
-                    ctrl.channel_id,
-                    "client closed channel immediately after bootstrap version response; response is likely insufficient",
-                );
-                self.analysis_states.remove(&ctrl.channel_id);
 
                 if was_open {
                     crate::emu_socket_log!(
@@ -178,18 +165,11 @@ impl ServerRuntime {
             );
         }
 
-        if should_parse_as_raw_stage_packet(channel_id, &self.analysis_states, body) {
-            return self.handle_raw_stage_message(channel_id, body);
-        }
-
         if channel_id == 1 {
             let pkt = match AuthPacket::from_bytes(body) {
                 Some(pkt) => pkt,
                 None => {
-                    crate::emu_socket_log!(
-                        "[DNet] Malformed mainframe body on ch={} → sending REJECT",
-                        channel_id
-                    );
+                    crate::emu_socket_log!("[DNet] auth ch={} → sending REJECT", channel_id);
                     return self.send_packets(
                         server_tx,
                         "CTRL",
@@ -202,7 +182,7 @@ impl ServerRuntime {
             };
 
             crate::emu_socket_log!(
-                "[SERVER] ch={} code={:#x} control={} payload={}B {}",
+                "[CLIENT] ch={} code={:#x} control={} payload={}B {}",
                 channel_id,
                 pkt.code,
                 pkt.control,
@@ -210,41 +190,19 @@ impl ServerRuntime {
                 hex::encode(&pkt.payload)
             );
 
-            let post_bootstrap_probe = self.record_post_bootstrap_probe(channel_id);
-            let previous_phase = self
-                .analysis_states
-                .get(&channel_id)
-                .map(|state| state.phase);
-            let outcome = domain::auth::handle_auth(&pkt, channel_id, &mut self.game_state);
-            let current_phase =
-                self.apply_phase_update(channel_id, previous_phase, outcome.phase_update);
+            let responses = vec![domain::auth::handle_auth(
+                &pkt,
+                channel_id,
+                &mut self.request,
+            )];
 
-            if outcome.responses.is_empty()
-                && post_bootstrap_probe.is_some()
-                && is_post_initial_handshake_phase(current_phase)
-            {
-                emit_protocol_analysis(&format!(
-                    "ch={} phase={} candidate#{} requires server response: code={:#x} control={} payload={}B {}",
-                    channel_id,
-                    phase_label(current_phase),
-                    post_bootstrap_probe.unwrap_or(0),
-                    pkt.code,
-                    pkt.control,
-                    pkt.payload.len(),
-                    hex::encode(&pkt.payload)
-                ));
-            }
-
-            return self.send_packets(server_tx, "APP", outcome.responses);
+            return self.send_packets(server_tx, "APP", responses);
         }
 
         let pkt = match ChannelPacket::from_bytes(body) {
             Some(pkt) => pkt,
             None => {
-                crate::emu_socket_log!(
-                    "[DNet] Malformed app body on ch={} → sending REJECT",
-                    channel_id
-                );
+                crate::emu_socket_log!("[DNet] ch={} → sending REJECT", channel_id);
                 return self.send_packets(
                     server_tx,
                     "CTRL",
@@ -257,7 +215,7 @@ impl ServerRuntime {
         };
 
         crate::emu_socket_log!(
-            "[SERVER] ch={} main=0x{:02x} sub=0x{:02x} payload={}B {}",
+            "[CLIENT] ch={} main=0x{:02x} sub=0x{:02x} payload={}B {}",
             channel_id,
             pkt.main_type,
             pkt.sub_type,
@@ -265,83 +223,13 @@ impl ServerRuntime {
             hex::encode(&pkt.payload)
         );
 
-        let post_bootstrap_probe = self.record_post_bootstrap_probe(channel_id);
-        let previous_phase = self
-            .analysis_states
-            .get(&channel_id)
-            .map(|state| state.phase);
-        let outcome = domain::dispatch_packet(&pkt, channel_id, &mut self.game_state);
-        let current_phase =
-            self.apply_phase_update(channel_id, previous_phase, outcome.phase_update);
+        let responses = vec![domain::dispatch_packet(&pkt, channel_id, &mut self.request)];
 
-        if outcome.responses.is_empty()
-            && post_bootstrap_probe.is_some()
-            && is_post_initial_handshake_phase(current_phase)
-        {
-            emit_protocol_analysis(&format!(
-                "ch={} phase={} candidate#{} requires server response: main=0x{:02x} sub=0x{:02x} payload={}B {}",
-                channel_id,
-                phase_label(current_phase),
-                post_bootstrap_probe.unwrap_or(0),
-                pkt.main_type,
-                pkt.sub_type,
-                pkt.payload.len(),
-                hex::encode(&pkt.payload)
-            ));
-        }
-
-        self.send_packets(server_tx, "APP", outcome.responses)
+        self.send_packets(server_tx, "APP", responses)
     }
 
-    /// raw stage 메시지를 기록하고 분석용 힌트를 남깁니다.
-    fn handle_raw_stage_message(&mut self, channel_id: u16, body: &[u8]) -> bool {
-        let Some(pkt) = raw_stage_packet_from_bytes(body) else {
-            crate::emu_socket_log!("[DNet] Raw stage body on ch={} malformed", channel_id);
-            return true;
-        };
-
-        crate::emu_socket_log!(
-            "[SERVER-RAW] ch={} msg={} payload={}B {}",
-            channel_id,
-            pkt.msg_id,
-            pkt.payload.len(),
-            hex::encode(&pkt.payload)
-        );
-
-        // let post_bootstrap_probe = self.record_post_bootstrap_probe(channel_id);
-        // emit_protocol_analysis(&format!(
-        //     "ch={} phase={} note=raw-stage msg={} payload={}B {}",
-        //     channel_id,
-        //     phase_label(ChannelPhase::AwaitingMainFrameStageInfo),
-        //     pkt.msg_id,
-        //     pkt.payload.len(),
-        //     hex::encode(&pkt.payload)
-        // ));
-
-        // if let Some(candidate_index) = post_bootstrap_probe {
-        //     emit_protocol_analysis(&format!(
-        //         "ch={} phase={} candidate#{} requires server response: raw_msg={} payload={}B {}",
-        //         channel_id,
-        //         phase_label(ChannelPhase::AwaitingMainFrameStageInfo),
-        //         candidate_index,
-        //         pkt.msg_id,
-        //         pkt.payload.len(),
-        //         hex::encode(&pkt.payload)
-        //     ));
-        // }
-
-        true
-    }
-
-    /// 채널 open 요청에 대한 승인/거절과 stage 승격 여부를 결정합니다.
+    /// 채널 open 요청에 대한 승인/거절과 기본 후속 응답을 결정합니다.
     fn handle_open_request(&mut self, channel_id: u16) -> Vec<Vec<u8>> {
-        let open_phase =
-            if should_promote_open_to_mainframe_stage(channel_id, &self.analysis_states) {
-                ChannelPhase::AwaitingMainFrameStageInfo
-            } else {
-                ChannelPhase::OpenAccepted
-            };
-
         if !is_supported_data_channel(channel_id) {
             crate::emu_socket_log!(
                 "[CTRL] Ch={} open request → unsupported, rejecting",
@@ -365,77 +253,8 @@ impl ServerRuntime {
         }
 
         crate::emu_socket_log!("[CTRL] Ch={} open request → accepting", channel_id);
-        self.analysis_states.insert(
-            channel_id,
-            ChannelAnalysisState {
-                phase: open_phase,
-                post_bootstrap_client_packets: 0,
-            },
-        );
-
-        // if open_phase == ChannelPhase::AwaitingMainFrameStageInfo {
-        //     emit_protocol_analysis(&format!(
-        //         "ch={} phase={} control-open accepted as likely main-frame stage channel; awaiting raw stage data",
-        //         channel_id,
-        //         phase_label(open_phase)
-        //     ));
-        // } else {
-        //     emit_protocol_analysis(&format!(
-        //         "ch={} phase={} control-open accepted; awaiting bootstrap packet",
-        //         channel_id,
-        //         phase_label(open_phase)
-        //     ));
-        // }
 
         build_stage_open_acceptance_responses(channel_id)
-    }
-
-    /// bootstrap 이후 들어온 후속 클라이언트 패킷 수를 채널별로 기록합니다.
-    fn record_post_bootstrap_probe(&mut self, channel_id: u16) -> Option<usize> {
-        let state = self.analysis_states.get_mut(&channel_id)?;
-        if !is_post_initial_handshake_phase(state.phase) {
-            return None;
-        }
-
-        state.post_bootstrap_client_packets += 1;
-        Some(state.post_bootstrap_client_packets)
-    }
-
-    /// 도메인 처리기에서 반환한 phase 업데이트를 채널 상태에 반영합니다.
-    fn apply_phase_update(
-        &mut self,
-        channel_id: u16,
-        previous_phase: Option<ChannelPhase>,
-        phase_update: Option<ChannelPhase>,
-    ) -> ChannelPhase {
-        if let Some(next_phase) = phase_update {
-            let state = self
-                .analysis_states
-                .entry(channel_id)
-                .or_insert(ChannelAnalysisState {
-                    phase: next_phase,
-                    post_bootstrap_client_packets: 0,
-                });
-            state.phase = next_phase;
-            next_phase
-        } else {
-            previous_phase.unwrap_or(ChannelPhase::OpenAccepted)
-        }
-    }
-
-    /// bootstrap 직후 채널이 닫히는 패턴을 분석 로그에 남깁니다.
-    fn emit_missing_bootstrap_response_hint(&self, channel_id: u16, message: &str) {
-        // if let Some(state) = self.analysis_states.get(&channel_id)
-        //     && state.phase == ChannelPhase::BootstrapVersionSent
-        //     && state.post_bootstrap_client_packets == 0
-        // {
-        //     emit_protocol_analysis(&format!(
-        //         "ch={} phase={} {}",
-        //         channel_id,
-        //         phase_label(state.phase),
-        //         message
-        //     ));
-        // }
     }
 
     /// 생성된 응답 패킷들을 공통 로깅 포맷으로 전송합니다.
@@ -446,7 +265,12 @@ impl ServerRuntime {
         responses: Vec<Vec<u8>>,
     ) -> bool {
         for data in responses {
-            if !send_wire(server_tx, label, data) {
+            // 응답 생성기가 빈 벡터를 돌려준 경우 실제 wire packet으로 보내지 않습니다.
+            if data.is_empty() {
+                continue;
+            }
+
+            if !send_wire(server_tx, data) {
                 crate::emu_socket_log!(
                     "[DNet] Failed to send {} response (guest disconnected)",
                     label.to_lowercase()
@@ -467,8 +291,7 @@ fn build_stage_open_acceptance_responses(channel_id: u16) -> Vec<Vec<u8>> {
     )];
 
     if channel_id == 2 {
-        responses
-            .push(domain::control::build_provisional_worldmap_stage_bootstrap_response(channel_id));
+        responses.push(domain::control::build_worldmap_response(channel_id));
     }
 
     responses
@@ -480,7 +303,6 @@ fn is_supported_data_channel(channel_id: u16) -> bool {
 }
 
 /// 공통 송신 로그를 남기고 실제 채널로 바이트를 보냅니다.
-fn send_wire(server_tx: &mpsc::Sender<Vec<u8>>, label: &str, data: Vec<u8>) -> bool {
-    // crate::emu_socket_log!("[SERVER] {}", protocol::hex_dump(label, &data));
+fn send_wire(server_tx: &mpsc::Sender<Vec<u8>>, data: Vec<u8>) -> bool {
     server_tx.send(data).is_ok()
 }

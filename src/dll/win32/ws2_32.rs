@@ -218,7 +218,8 @@ impl WS2_32 {
         //   guest_tx / handler_rx : 게스트 → DNet 핸들러 (send 경로)
         //   handler_tx / guest_rx : DNet 핸들러 → 게스트 (recv 경로)
         let (guest_tx, handler_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let (handler_tx, guest_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (handler_tx, handler_output_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (guest_feed_tx, guest_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
         // DNet 프로토콜 핸들러를 별도 스레드로 실행
         std::thread::spawn(move || {
@@ -233,6 +234,7 @@ impl WS2_32 {
             .get(&sock)
             .map(|s| s.non_blocking)
             .unwrap_or(false);
+        let wake_ctx = ctx.clone();
 
         ctx.tcp_sockets.lock().unwrap().insert(
             sock,
@@ -249,13 +251,56 @@ impl WS2_32 {
             },
         );
 
+        std::thread::spawn(move || {
+            while let Ok(data) = handler_output_rx.recv() {
+                if guest_feed_tx.send(data).is_err() {
+                    break;
+                }
+
+                let mut wake_handles = Vec::new();
+                {
+                    let mut wsa_map = wake_ctx.wsa_event_map.lock().unwrap();
+                    for (&event_handle, entry) in wsa_map.iter_mut() {
+                        if entry.socket == sock && entry.interest & 0x01 != 0 {
+                            entry.pending |= 0x01; // FD_READ
+                            wake_handles.push(event_handle);
+                        }
+                    }
+                }
+
+                KERNEL32::wake_threads_waiting_on_socket(&wake_ctx, sock);
+                for event_handle in wake_handles {
+                    KERNEL32::wake_threads_waiting_on_handle(&wake_ctx, event_handle);
+                }
+            }
+
+            KERNEL32::wake_threads_waiting_on_socket(&wake_ctx, sock);
+            let wake_handles = {
+                let map = wake_ctx.wsa_event_map.lock().unwrap();
+                map.iter()
+                    .filter_map(|(&event_handle, entry)| {
+                        (entry.socket == sock).then_some(event_handle)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for event_handle in wake_handles {
+                KERNEL32::wake_threads_waiting_on_handle(&wake_ctx, event_handle);
+            }
+        });
+
         // 연결 성공 시 FD_CONNECT(0x10) 이벤트를 이 소켓을 보고 있는 WSA 이벤트에 반영
         {
             let mut wsa_map = ctx.wsa_event_map.lock().unwrap();
-            for entry in wsa_map.values_mut() {
+            let mut wake_handles = Vec::new();
+            for (&event_handle, entry) in wsa_map.iter_mut() {
                 if entry.socket == sock && entry.interest & 0x10 != 0 {
                     entry.pending |= 0x10; // FD_CONNECT
+                    wake_handles.push(event_handle);
                 }
+            }
+            drop(wsa_map);
+            for event_handle in wake_handles {
+                KERNEL32::wake_threads_waiting_on_handle(ctx, event_handle);
             }
         }
 
@@ -536,6 +581,8 @@ impl WS2_32 {
                 drop(sockets);
                 let tid = uc.get_data().current_thread_idx.load(Ordering::SeqCst);
                 if tid != 0 || !non_blocking {
+                    KERNEL32::set_wait_handles(uc.get_data(), tid, &[]);
+                    KERNEL32::set_wait_sockets(uc.get_data(), tid, &[sock]);
                     KERNEL32::schedule_retry_wait(uc.get_data(), tid, None);
                     return Some(ApiHookResult::retry());
                 }
@@ -665,6 +712,17 @@ impl WS2_32 {
                 return Some(ApiHookResult::callee(5, Some(0)));
             }
 
+            let wait_sockets = if readfds_ptr != 0 {
+                let count = uc.read_u32(readfds_ptr as u64) as usize;
+                let count = count.min(64);
+                (0..count)
+                    .map(|index| uc.read_u32(readfds_ptr as u64 + 4 + (index * 4) as u64))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            KERNEL32::set_wait_handles(uc.get_data(), tid, &[]);
+            KERNEL32::set_wait_sockets(uc.get_data(), tid, &wait_sockets);
             KERNEL32::schedule_retry_wait(uc.get_data(), tid, deadline);
             return Some(ApiHookResult::retry());
         }
@@ -1048,6 +1106,8 @@ impl WS2_32 {
 
         if total_n == 0 {
             let tid = uc.get_data().current_thread_idx.load(Ordering::SeqCst);
+            KERNEL32::set_wait_handles(uc.get_data(), tid, &[]);
+            KERNEL32::set_wait_sockets(uc.get_data(), tid, &[sock]);
             if tid != 0 {
                 KERNEL32::schedule_retry_wait(uc.get_data(), tid, None);
                 return Some(ApiHookResult::retry());

@@ -136,6 +136,7 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         .map(|meta| meta.hbr_background)
         .unwrap_or(0);
     let use_native_frame = USER32::should_use_native_frame(style);
+    let owner_thread_id = uc.get_data().current_thread_idx.load(Ordering::SeqCst);
 
     let surface_bitmap = uc.get_data().create_surface_bitmap(width, height);
 
@@ -152,6 +153,7 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         height: height as i32,
         style,
         ex_style,
+        owner_thread_id,
         parent,
         id: child_id,
         visible: style & 0x10000000 != 0,
@@ -272,11 +274,47 @@ pub(super) fn show_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
     let n_cmd_show = uc.read_arg(1);
     // 최대화/복원/최소화 상태가 `IsZoomed`/`IsIconic`에 반영되도록
     // Win32의 `ShowWindow` 명령 의미를 함께 적용합니다.
+    let was_visible = {
+        let ctx = uc.get_data();
+        let win_event = ctx.win_event.lock().unwrap();
+        win_event
+            .windows
+            .get(&hwnd)
+            .map(|w| w.visible)
+            .unwrap_or(false)
+    };
+
     uc.get_data()
         .win_event
         .lock()
         .unwrap()
         .apply_show_window(hwnd, n_cmd_show);
+
+    let is_visible = {
+        let ctx = uc.get_data();
+        let win_event = ctx.win_event.lock().unwrap();
+        win_event
+            .windows
+            .get(&hwnd)
+            .map(|w| w.visible)
+            .unwrap_or(false)
+    };
+
+    if !was_visible && is_visible {
+        let wnd_proc = {
+            let ctx = uc.get_data();
+            let win_event = ctx.win_event.lock().unwrap();
+            win_event
+                .windows
+                .get(&hwnd)
+                .map(|w| w.wnd_proc)
+                .unwrap_or(0)
+        };
+        if wnd_proc != 0 {
+            USER32::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0085, 1, 0); // WM_NCPAINT
+        }
+    }
+
     crate::emu_log!(
         "[USER32] ShowWindow({:#x}, {:#x}) -> BOOL 1",
         hwnd,
@@ -300,11 +338,14 @@ pub(super) fn update_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     };
 
     if needs_paint {
-        let mut q = ctx.message_queue.lock().unwrap();
-        if !q.iter().any(|m| m[0] == hwnd && m[1] == 0x000F) {
-            let time = ctx.start_time.elapsed().as_millis() as u32;
-            q.push_back([hwnd, 0x000F, 0, 0, time, 0, 0]);
-        }
+        let time = ctx.start_time.elapsed().as_millis() as u32;
+        let target_tid = ctx.window_owner_thread_id(hwnd);
+        ctx.with_thread_message_queue(target_tid, |queue| {
+            if !queue.iter().any(|m| m[0] == hwnd && m[1] == 0x000F) {
+                queue.push_back([hwnd, 0x000F, 0, 0, time, 0, 0]);
+            }
+        });
+        ctx.wake_thread_message_wait(target_tid);
     } else {
         ctx.win_event.lock().unwrap().update_window(hwnd);
     }
@@ -429,6 +470,25 @@ pub(super) fn set_window_pos(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         }
     }
     uc.get_data().sync_window_surface_bitmap(hwnd);
+
+    // WM_NCPAINT 디스패치
+    let swp_drawframe = (flags & 0x0020) != 0;
+    let swp_showwindow = (flags & 0x0040) != 0;
+    if swp_drawframe || swp_showwindow || (cx > 0 || cy > 0) {
+        let wnd_proc = {
+            let ctx = uc.get_data();
+            let win_event = ctx.win_event.lock().unwrap();
+            win_event
+                .windows
+                .get(&hwnd)
+                .map(|w| w.wnd_proc)
+                .unwrap_or(0)
+        };
+        if wnd_proc != 0 {
+            USER32::dispatch_to_wndproc(uc, wnd_proc, hwnd, 0x0085, 1, 0); // WM_NCPAINT
+        }
+    }
+
     crate::emu_log!(
         "[USER32] SetWindowPos({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> BOOL 1",
         hwnd,

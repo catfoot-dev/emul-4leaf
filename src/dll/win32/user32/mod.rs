@@ -64,9 +64,13 @@ impl USER32 {
     fn enqueue_elapsed_timer_messages(
         timers: &mut std::collections::HashMap<u32, Timer>,
         queue: &mut std::collections::VecDeque<[u32; 7]>,
+        target_thread_id: u32,
         now: std::time::Instant,
     ) {
         for timer in timers.values_mut() {
+            if timer.owner_thread_id != target_thread_id {
+                continue;
+            }
             if now.duration_since(timer.last_tick).as_millis() < timer.elapse as u128 {
                 continue;
             }
@@ -93,17 +97,39 @@ impl USER32 {
             .lock()
             .unwrap()
             .retain(|_, timer| timer.hwnd != hwnd);
-        ctx.message_queue
-            .lock()
-            .unwrap()
-            .retain(|msg| msg[0] != hwnd);
+        let mut queues = ctx.message_queues.lock().unwrap();
+        for queue in queues.values_mut() {
+            queue.retain(|msg| msg[0] != hwnd);
+        }
+    }
+
+    /// 지정된 스레드 메시지 큐에 `WM_QUIT`를 하나만 유지하며 적재합니다.
+    fn queue_thread_quit(ctx: &Win32Context, thread_id: u32, exit_code: u32) {
+        let time = ctx.start_time.elapsed().as_millis() as u32;
+        let target_tid = ctx.normalize_queue_thread_id(thread_id);
+        ctx.with_thread_message_queue(target_tid, |queue| {
+            if !queue.iter().any(|msg| msg[0] == 0 && msg[1] == 0x0012) {
+                queue.push_back([0, 0x0012, exit_code, 0, time, 0, 0]);
+            }
+        });
+        ctx.wake_thread_message_wait(target_tid);
     }
 
     /// 지정된 창과 자식 창 전체를 런타임 상태까지 포함해 한 번에 파괴합니다.
     fn destroy_window_tree(ctx: &Win32Context, hwnd: u32) {
-        let subtree = {
+        let (subtree, owner_threads) = {
             let win_event = ctx.win_event.lock().unwrap();
-            win_event.window_subtree_postorder(hwnd)
+            let subtree = win_event.window_subtree_postorder(hwnd);
+            let owner_threads = subtree
+                .iter()
+                .filter_map(|handle| {
+                    win_event
+                        .windows
+                        .get(handle)
+                        .map(|state| state.owner_thread_id)
+                })
+                .collect::<Vec<_>>();
+            (subtree, owner_threads)
         };
 
         for handle in &subtree {
@@ -111,16 +137,34 @@ impl USER32 {
         }
 
         ctx.win_event.lock().unwrap().destroy_window(hwnd);
+
+        let remaining_owner_threads = ctx
+            .win_event
+            .lock()
+            .unwrap()
+            .windows
+            .values()
+            .map(|state| state.owner_thread_id)
+            .collect::<Vec<_>>();
+        for thread_id in owner_threads {
+            if thread_id == 0 || remaining_owner_threads.contains(&thread_id) {
+                continue;
+            }
+            Self::queue_thread_quit(ctx, thread_id, 0);
+        }
     }
 
     /// 현재 메시지 큐나 무효화된 창으로 인해 즉시 처리할 UI 메시지가 있는지 확인합니다.
-    fn has_pending_ui_message(ctx: &Win32Context) -> bool {
+    fn has_pending_ui_message(ctx: &Win32Context, tid: u32) -> bool {
         {
             let mut timers = ctx.timers.lock().unwrap();
-            let mut queue = ctx.message_queue.lock().unwrap();
+            let mut queues = ctx.message_queues.lock().unwrap();
+            let queue = queues.entry(tid).or_default();
+            // Timer.owner_thread_id를 직접 사용하므로 windows 맵 전체 순회가 필요 없습니다.
             Self::enqueue_elapsed_timer_messages(
                 &mut timers,
-                &mut queue,
+                queue,
+                tid,
                 std::time::Instant::now(),
             );
             if !queue.is_empty() {
@@ -133,7 +177,19 @@ impl USER32 {
             .unwrap()
             .windows
             .values()
-            .any(|state| state.needs_paint)
+            .any(|state| state.owner_thread_id == tid && state.needs_paint)
+    }
+
+    /// 지정된 스레드에 속한 타이머 중 가장 먼저 만료될 시각을 계산합니다.
+    fn next_timer_deadline(ctx: &Win32Context, tid: u32) -> Option<std::time::Instant> {
+        // Timer.owner_thread_id를 직접 사용하므로 windows 맵 collect가 불필요합니다.
+        ctx.timers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|timer| timer.owner_thread_id == tid)
+            .map(|timer| timer.last_tick + std::time::Duration::from_millis(timer.elapse as u64))
+            .min()
     }
 
     /// 게스트 ANSI 문자열을 힙에 그대로 복제해 이후에도 안정적으로 참조할 수 있게 합니다.
@@ -772,6 +828,7 @@ mod tests {
             height: 120,
             style,
             ex_style: 0,
+            owner_thread_id: 0,
             parent: 0,
             id: 0,
             visible: true,
@@ -850,11 +907,12 @@ mod tests {
                 elapse: 10,
                 timer_proc: 0,
                 last_tick: now - Duration::from_millis(20),
+                owner_thread_id: 0,
             },
         );
         queue.push_back([0x1001, 0x0113, 7, 0, 0, 0, 0]);
 
-        USER32::enqueue_elapsed_timer_messages(&mut timers, &mut queue, now);
+        USER32::enqueue_elapsed_timer_messages(&mut timers, &mut queue, 0, now);
 
         assert_eq!(queue.len(), 1);
     }
@@ -862,10 +920,12 @@ mod tests {
     #[test]
     fn destroy_window_cleanup_removes_window_timers_and_messages() {
         let ctx = Win32Context::new(None);
-        ctx.message_queue.lock().unwrap().extend([
-            [0x1001, 0x000F, 0, 0, 0, 0, 0],
-            [0x2002, 0x000F, 0, 0, 0, 0, 0],
-        ]);
+        ctx.with_thread_message_queue(0, |queue| {
+            queue.extend([
+                [0x1001, 0x000F, 0, 0, 0, 0, 0],
+                [0x2002, 0x000F, 0, 0, 0, 0, 0],
+            ]);
+        });
         {
             let mut timers = ctx.timers.lock().unwrap();
             timers.insert(
@@ -876,6 +936,7 @@ mod tests {
                     elapse: 50,
                     timer_proc: 0,
                     last_tick: Instant::now(),
+                    owner_thread_id: 0,
                 },
             );
             timers.insert(
@@ -886,16 +947,17 @@ mod tests {
                     elapse: 50,
                     timer_proc: 0,
                     last_tick: Instant::now(),
+                    owner_thread_id: 0,
                 },
             );
         }
 
         USER32::cleanup_window_runtime_state(&ctx, 0x1001);
 
-        let queue = ctx.message_queue.lock().unwrap();
+        let queue = ctx.message_queues.lock().unwrap();
+        let queue = queue.get(&0).unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0][0], 0x2002);
-        drop(queue);
 
         let timers = ctx.timers.lock().unwrap();
         assert_eq!(timers.len(), 1);
@@ -914,11 +976,13 @@ mod tests {
             win_event.create_window(0x1001, child);
         }
 
-        ctx.message_queue.lock().unwrap().extend([
-            [0x1000, 0x000F, 0, 0, 0, 0, 0],
-            [0x1001, 0x000F, 0, 0, 0, 0, 0],
-            [0x2002, 0x000F, 0, 0, 0, 0, 0],
-        ]);
+        ctx.with_thread_message_queue(0, |queue| {
+            queue.extend([
+                [0x1000, 0x000F, 0, 0, 0, 0, 0],
+                [0x1001, 0x000F, 0, 0, 0, 0, 0],
+                [0x2002, 0x000F, 0, 0, 0, 0, 0],
+            ]);
+        });
         {
             let mut timers = ctx.timers.lock().unwrap();
             timers.insert(
@@ -929,6 +993,7 @@ mod tests {
                     elapse: 50,
                     timer_proc: 0,
                     last_tick: Instant::now(),
+                    owner_thread_id: 0,
                 },
             );
             timers.insert(
@@ -939,6 +1004,7 @@ mod tests {
                     elapse: 50,
                     timer_proc: 0,
                     last_tick: Instant::now(),
+                    owner_thread_id: 0,
                 },
             );
             timers.insert(
@@ -949,16 +1015,17 @@ mod tests {
                     elapse: 50,
                     timer_proc: 0,
                     last_tick: Instant::now(),
+                    owner_thread_id: 0,
                 },
             );
         }
 
         USER32::destroy_window_tree(&ctx, 0x1000);
 
-        let queue = ctx.message_queue.lock().unwrap();
+        let queue = ctx.message_queues.lock().unwrap();
+        let queue = queue.get(&0).unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0][0], 0x2002);
-        drop(queue);
 
         let timers = ctx.timers.lock().unwrap();
         assert_eq!(timers.len(), 1);
@@ -968,6 +1035,47 @@ mod tests {
         let windows = ctx.win_event.lock().unwrap();
         assert!(!windows.windows.contains_key(&0x1000));
         assert!(!windows.windows.contains_key(&0x1001));
+    }
+
+    #[test]
+    fn destroy_window_tree_queues_quit_for_orphaned_owner_thread() {
+        let ctx = Win32Context::new(None);
+        {
+            let mut win_event = ctx.win_event.lock().unwrap();
+            let mut popup = sample_window_state(0x8000_0000, false);
+            popup.owner_thread_id = 0x2200;
+            win_event.create_window(0x1000, popup);
+        }
+
+        USER32::destroy_window_tree(&ctx, 0x1000);
+
+        let queues = ctx.message_queues.lock().unwrap();
+        let queue = queues.get(&0x2200).expect("owner thread queue");
+        assert!(queue.iter().any(|msg| msg[0] == 0 && msg[1] == 0x0012));
+    }
+
+    #[test]
+    fn destroy_window_tree_keeps_owner_thread_alive_when_sibling_window_remains() {
+        let ctx = Win32Context::new(None);
+        {
+            let mut win_event = ctx.win_event.lock().unwrap();
+            let mut first = sample_window_state(0x8000_0000, false);
+            first.owner_thread_id = 0x2200;
+            win_event.create_window(0x1000, first);
+
+            let mut second = sample_window_state(0x8000_0000, false);
+            second.owner_thread_id = 0x2200;
+            second.x = 10;
+            win_event.create_window(0x1001, second);
+        }
+
+        USER32::destroy_window_tree(&ctx, 0x1000);
+
+        let queues = ctx.message_queues.lock().unwrap();
+        let queue = queues.get(&0x2200);
+        assert!(queue.is_none_or(|messages| {
+            !messages.iter().any(|msg| msg[0] == 0 && msg[1] == 0x0012)
+        }));
     }
 
     #[test]

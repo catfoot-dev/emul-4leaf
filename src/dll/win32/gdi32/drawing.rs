@@ -156,6 +156,10 @@ pub(super) fn set_bk_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResu
     if let Some(GdiObject::Dc { bk_color, .. }) =
         uc.get_data().gdi_objects.lock().unwrap().get_mut(&hdc)
     {
+        let b = color >> 16 & 0xFF;
+        let g = color >> 8 & 0xFF;
+        let r = color & 0xFF;
+        let color = (r << 16) | (g << 8) | b;
         old_color = *bk_color;
         *bk_color = color;
     }
@@ -199,6 +203,10 @@ pub(super) fn set_text_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
     if let Some(GdiObject::Dc { text_color, .. }) =
         uc.get_data().gdi_objects.lock().unwrap().get_mut(&hdc)
     {
+        let b = color >> 16 & 0xFF;
+        let g = color >> 8 & 0xFF;
+        let r = color & 0xFF;
+        let color = (r << 16) | (g << 8) | b;
         old_color = *text_color;
         *text_color = color;
     }
@@ -241,14 +249,17 @@ pub(super) fn create_pen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
     let color = uc.read_arg(2);
     let ctx = uc.get_data();
     let hpen = ctx.alloc_handle();
-    ctx.gdi_objects.lock().unwrap().insert(
-        hpen,
+    ctx.gdi_objects.lock().unwrap().insert(hpen, {
+        let b = color >> 16 & 0xFF;
+        let g = color >> 8 & 0xFF;
+        let r = color & 0xFF;
+        let color = (r << 16) | (g << 8) | b;
         GdiObject::Pen {
             style,
             width,
             color,
-        },
-    );
+        }
+    });
     crate::emu_log!(
         "[GDI32] CreatePen({:#x}, {}, {:#x}) -> HPEN {:#x}",
         style,
@@ -265,10 +276,13 @@ pub(super) fn create_solid_brush(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     let color = uc.read_arg(0);
     let ctx = uc.get_data();
     let hbrush = ctx.alloc_handle();
-    ctx.gdi_objects
-        .lock()
-        .unwrap()
-        .insert(hbrush, GdiObject::Brush { color });
+    ctx.gdi_objects.lock().unwrap().insert(hbrush, {
+        let b = color >> 16 & 0xFF;
+        let g = color >> 8 & 0xFF;
+        let r = color & 0xFF;
+        let color = (r << 16) | (g << 8) | b;
+        GdiObject::Brush { color }
+    });
     crate::emu_log!(
         "[GDI32] CreateSolidBrush({:#x}) -> HBRUSH {:#x}",
         color,

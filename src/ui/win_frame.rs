@@ -4,7 +4,11 @@ use crate::{
 };
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use softbuffer::{Context as SoftContext, Surface};
-use std::{collections::HashMap, num::NonZeroU32, sync::mpsc::Receiver};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU32,
+    sync::mpsc::Receiver,
+};
 #[cfg(target_os = "windows")]
 use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
 #[cfg(target_os = "windows")]
@@ -12,7 +16,7 @@ use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
     raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle},
@@ -38,6 +42,8 @@ const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const WS_EX_APPWINDOW: u32 = 0x0004_0000;
 
 type WinSurface = Surface<DisplayHandle<'static>, Window>;
+const WM_CHAR: u32 = 0x0102;
+const WM_IME_CHAR: u32 = 0x0286;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HostParentLink {
@@ -180,6 +186,43 @@ pub struct WinFrame {
 }
 
 impl WinFrame {
+    fn encode_committed_char_for_ansi(ch: char) -> Vec<u32> {
+        if (ch as u32) < 0x80 {
+            return vec![ch as u32];
+        }
+
+        let text = ch.to_string();
+        let (encoded, _, _) = encoding_rs::EUC_KR.encode(&text);
+        let bytes = encoded.as_ref();
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+
+        let mut result = Vec::new();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            if index + 1 < bytes.len() {
+                result.push(bytes[index] as u32 | ((bytes[index + 1] as u32) << 8));
+                index += 2;
+            } else {
+                result.push(bytes[index] as u32);
+                index += 1;
+            }
+        }
+        result
+    }
+
+    fn committed_char_messages(ch: char) -> Vec<(u32, u32)> {
+        if (ch as u32) < 0x80 {
+            return vec![(WM_CHAR, ch as u32)];
+        }
+
+        Self::encode_committed_char_for_ansi(ch)
+            .into_iter()
+            .map(|value| (WM_IME_CHAR, value))
+            .collect()
+    }
+
     fn activation_hwnds_in_order(&self, root_hwnd: u32) -> Vec<u32> {
         fn collect(
             windows: &HashMap<u32, crate::dll::win32::WindowState>,
@@ -327,6 +370,14 @@ impl WinFrame {
         }
     }
 
+    /// 호스트 닫기 요청이 즉시 UI 종료로 이어져야 하는지 판정합니다.
+    ///
+    /// 메인 게스트 창은 guest가 `WM_CLOSE`를 소비해도 사용자는 종료를 기대하므로
+    /// host 종료 fallback을 유지합니다. 팝업/보조 창은 guest destroy 경로를 기다립니다.
+    fn should_exit_on_close_request(&self, hwnd: Option<u32>, quit_on_close: bool) -> bool {
+        quit_on_close || hwnd.is_some_and(|handle| self.main_guest_hwnd == Some(handle))
+    }
+
     /// 가상 아이콘 핸들을 호스트 윈도우 아이콘으로 변환합니다.
     fn host_window_icon(&self, hicon: u32) -> Option<Icon> {
         if hicon == 0 {
@@ -377,22 +428,6 @@ impl WinFrame {
 
         // 창이 파괴되면 해당 창과 연결된 커서 상태도 정리합니다.
         self.clear_cursor_state_for_window(id);
-    }
-
-    /// 지정된 HWND와 그 자손에 해당하는 호스트 창을 모두 제거합니다.
-    fn remove_window_tree_by_hwnd(&mut self, root_hwnd: u32) -> Vec<u32> {
-        let subtree = {
-            let win_event = self.emu_context.win_event.lock().unwrap();
-            win_event.window_subtree_postorder(root_hwnd)
-        };
-
-        for hwnd in &subtree {
-            if let Some(id) = self.hwnd_to_id.get(hwnd).copied() {
-                self.remove_window(id);
-            }
-        }
-
-        subtree
     }
 
     #[allow(dead_code)]
@@ -622,17 +657,19 @@ impl WinFrame {
     }
 
     /// 에뮬레이터 스레드를 즉시 깨워 새 메시지를 처리하도록 합니다.
-    /// main_resume_time을 클리어하여 메인 스레드가 즉시 실행되게 합니다.
-    fn wake_emulator(&self) {
-        // 메인 스레드의 대기 시간을 해제하여 다음 루프에서 즉시 실행되도록 합니다.
-        if let Ok(mut guard) = self.emu_context.main_resume_time.try_lock() {
-            *guard = None;
+    fn wake_emulator(&self, target_thread_id: Option<u32>) {
+        if let Some(thread_id) = target_thread_id {
+            self.emu_context.wake_thread_message_wait(thread_id);
         }
         if let Ok(guard) = self.emu_context.emu_thread.try_lock()
             && let Some(thread) = guard.as_ref()
         {
             thread.unpark();
         }
+    }
+
+    fn queue_message_for_window(&self, hwnd: u32, message: [u32; 7]) -> u32 {
+        self.emu_context.queue_message_for_window(hwnd, message)
     }
 
     fn apply_guest_window_attributes(
@@ -644,9 +681,9 @@ impl WinFrame {
         let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
 
         attributes = attributes
-            .with_decorations(host_style.decorations)
+            .with_decorations(false)
             .with_resizable(host_style.resizable)
-            .with_enabled_buttons(host_style.enabled_buttons)
+            .with_enabled_buttons(WindowButtons::empty())
             .with_transparent(host_style.transparent)
             .with_window_level(host_style.window_level());
 
@@ -682,8 +719,9 @@ impl WinFrame {
         }
     }
 
-    fn process_ui_commands(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        let mut needs_redraw = false;
+    fn process_ui_commands(&mut self, event_loop: &ActiveEventLoop) -> HashSet<WindowId> {
+        crate::ui::win_event::WinEvent::clear_wake_pending();
+        let mut dirty_windows = HashSet::new();
 
         while let Ok(cmd) = self.ui_rx.try_recv() {
             match cmd {
@@ -744,6 +782,8 @@ impl WinFrame {
                     );
 
                     let window = event_loop.create_window(attributes).unwrap();
+                    // IME(한글 등 조합 문자)를 입력받기 위해 활성화합니다.
+                    window.set_ime_allowed(true);
                     let id = window.id();
                     if parent == 0 {
                         self.register_main_guest_window(hwnd, style);
@@ -774,7 +814,7 @@ impl WinFrame {
                         .expect("Context should be initialized");
                     let surface = Surface::new(context, window).unwrap();
                     self.surfaces.insert(id, surface);
-                    needs_redraw = true;
+                    dirty_windows.insert(id);
                 }
 
                 UiCommand::SyncWindowStyle {
@@ -789,7 +829,7 @@ impl WinFrame {
                             self.hwnd_native_frame.get(&hwnd).copied().unwrap_or(true);
 
                         Self::apply_guest_window_style(window, style, ex_style, use_native_frame);
-                        window.request_redraw();
+                        dirty_windows.insert(*id);
                     }
                 }
 
@@ -814,7 +854,7 @@ impl WinFrame {
                         );
                         window.set_visible(visible);
                         if visible {
-                            window.request_redraw();
+                            dirty_windows.insert(*id);
                         }
                     } else {
                         crate::emu_log!(
@@ -865,9 +905,9 @@ impl WinFrame {
 
                 UiCommand::UpdateWindow { hwnd } => {
                     if let Some(id) = self.hwnd_to_id.get(&hwnd)
-                        && let Some(window) = self.get_window(id)
+                        && let Some(_window) = self.get_window(id)
                     {
-                        window.request_redraw();
+                        dirty_windows.insert(*id);
                     }
                 }
 
@@ -941,7 +981,7 @@ impl WinFrame {
                         && let Some(window) = self.get_window(id)
                     {
                         window.set_transparent(transparent);
-                        window.request_redraw();
+                        dirty_windows.insert(*id);
                     }
                 }
 
@@ -982,7 +1022,7 @@ impl WinFrame {
             }
         }
 
-        needs_redraw
+        dirty_windows
     }
 
     /// CursorFrame의 ARGB 픽셀을 RGBA로 변환하여 winit CustomCursor를 생성합니다.
@@ -1117,25 +1157,19 @@ impl ApplicationHandler<()> for WinFrame {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let needs_redraw = self.process_ui_commands(event_loop);
+        let mut dirty_windows = self.process_ui_commands(event_loop);
 
         // 커서 애니메이션 프레임 전환 체크
         self.tick_cursor_animation(event_loop);
 
         // 모든 Painter에게 백그라운드 상태 변경 알림 및 종료 체크
         let mut windows_to_remove = Vec::new();
-        let mut windows_to_redraw = Vec::new();
         for (id, painter) in self.painters.iter_mut() {
             if painter.tick() {
-                windows_to_redraw.push(*id);
+                dirty_windows.insert(*id);
             }
             if painter.should_close() {
                 windows_to_remove.push(*id);
-            }
-        }
-        for id in windows_to_redraw {
-            if let Some(window) = self.get_window(&id) {
-                window.request_redraw();
             }
         }
 
@@ -1143,8 +1177,8 @@ impl ApplicationHandler<()> for WinFrame {
             self.remove_window(id);
         }
 
-        if needs_redraw {
-            for window in self.surfaces.values().map(|s| s.window()) {
+        for id in dirty_windows {
+            if let Some(window) = self.get_window(&id) {
                 window.request_redraw();
             }
         }
@@ -1204,31 +1238,15 @@ impl ApplicationHandler<()> for WinFrame {
             }
 
             WindowEvent::CloseRequested => {
-                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
-                    let mut q = self.emu_context.message_queue.lock().unwrap();
-                    q.push_back([hwnd, 0x0010, 0, 0, 0, 0, 0]); // WM_CLOSE
-                }
-                self.wake_emulator();
-
                 let hwnd = self.id_to_hwnd.get(&id).copied();
-                let should_exit_main = hwnd
-                    .map(|handle| self.take_main_guest_window_close(handle))
-                    .unwrap_or(false);
+                if let Some(hwnd) = hwnd {
+                    let target_tid =
+                        self.queue_message_for_window(hwnd, [hwnd, 0x0010, 0, 0, 0, 0, 0]); // WM_CLOSE
+                    self.wake_emulator(Some(target_tid));
+                }
 
-                if quit_on_close {
+                if self.should_exit_on_close_request(hwnd, quit_on_close) {
                     event_loop.exit();
-                } else {
-                    if let Some(hwnd) = hwnd {
-                        let subtree = self.remove_window_tree_by_hwnd(hwnd);
-                        let mut q = self.emu_context.message_queue.lock().unwrap();
-                        for handle in subtree {
-                            q.push_back([handle, 0x0002, 0, 0, 0, 0, 0]); // WM_DESTROY
-                        }
-                    }
-                    self.wake_emulator();
-                    if should_exit_main {
-                        event_loop.exit();
-                    }
                 }
             }
 
@@ -1270,60 +1288,61 @@ impl ApplicationHandler<()> for WinFrame {
                         .emu_context
                         .capture_hwnd
                         .load(std::sync::atomic::Ordering::SeqCst);
-                    let mut q = self.emu_context.message_queue.lock().unwrap();
-
-                    // 단일 패스로 WM_SETCURSOR(0x0020)와 WM_MOUSEMOVE(0x0200) 인덱스를 동시에 탐색
-                    let mut setcursor_idx = None;
-                    let mut mousemove_idx = None;
-                    for (i, m) in q.iter().enumerate() {
-                        if m[0] == hwnd {
-                            if m[1] == 0x0020 && setcursor_idx.is_none() {
-                                setcursor_idx = Some(i);
-                            } else if m[1] == 0x0200 && mousemove_idx.is_none() {
-                                mousemove_idx = Some(i);
-                            }
-                            if setcursor_idx.is_some() && mousemove_idx.is_some() {
-                                break;
+                    let target_tid = self.emu_context.window_owner_thread_id(hwnd);
+                    self.emu_context.with_thread_message_queue(target_tid, |q| {
+                        // 단일 패스로 WM_SETCURSOR(0x0020)와 WM_MOUSEMOVE(0x0200) 인덱스를 동시에 탐색
+                        let mut setcursor_idx = None;
+                        let mut mousemove_idx = None;
+                        for (i, m) in q.iter().enumerate() {
+                            if m[0] == hwnd {
+                                if m[1] == 0x0020 && setcursor_idx.is_none() {
+                                    setcursor_idx = Some(i);
+                                } else if m[1] == 0x0200 && mousemove_idx.is_none() {
+                                    mousemove_idx = Some(i);
+                                }
+                                if setcursor_idx.is_some() && mousemove_idx.is_some() {
+                                    break;
+                                }
                             }
                         }
-                    }
 
-                    if capture_hwnd == 0 {
-                        let setcursor_lparam = (0x0200u32 << 16) | 0x0001; // WM_MOUSEMOVE | HTCLIENT
-                        if let Some(idx) = setcursor_idx {
+                        if capture_hwnd == 0 {
+                            let setcursor_lparam = (0x0200u32 << 16) | 0x0001; // WM_MOUSEMOVE | HTCLIENT
+                            if let Some(idx) = setcursor_idx {
+                                if let Some(message) = q.get_mut(idx) {
+                                    message[0] = hwnd;
+                                    message[2] = hwnd;
+                                    message[3] = setcursor_lparam;
+                                    message[4] = time;
+                                    message[5] = x;
+                                    message[6] = y;
+                                }
+                            } else {
+                                let setcursor_message =
+                                    [hwnd, 0x0020, hwnd, setcursor_lparam, time, x, y];
+                                if let Some(idx) = mousemove_idx {
+                                    q.insert(idx, setcursor_message);
+                                    // insert가 mousemove_idx를 1칸 밀었으므로 보정
+                                    mousemove_idx = mousemove_idx.map(|i| i + 1);
+                                } else {
+                                    q.push_back(setcursor_message);
+                                }
+                            }
+                        }
+
+                        // WM_MOUSEMOVE(0x0200) 중복 제거: 이미 큐에 있으면 위치만 업데이트
+                        if let Some(idx) = mousemove_idx {
                             if let Some(message) = q.get_mut(idx) {
                                 message[0] = hwnd;
-                                message[2] = hwnd;
-                                message[3] = setcursor_lparam;
+                                message[3] = lparam;
                                 message[4] = time;
                                 message[5] = x;
                                 message[6] = y;
                             }
                         } else {
-                            let setcursor_message =
-                                [hwnd, 0x0020, hwnd, setcursor_lparam, time, x, y];
-                            if let Some(idx) = mousemove_idx {
-                                q.insert(idx, setcursor_message);
-                                // insert가 mousemove_idx를 1칸 밀었으므로 보정
-                                mousemove_idx = mousemove_idx.map(|i| i + 1);
-                            } else {
-                                q.push_back(setcursor_message);
-                            }
+                            q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
                         }
-                    }
-
-                    // WM_MOUSEMOVE(0x0200) 중복 제거: 이미 큐에 있으면 위치만 업데이트
-                    if let Some(idx) = mousemove_idx {
-                        if let Some(message) = q.get_mut(idx) {
-                            message[0] = hwnd;
-                            message[3] = lparam;
-                            message[4] = time;
-                            message[5] = x;
-                            message[6] = y;
-                        }
-                    } else {
-                        q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
-                    }
+                    });
 
                     // 마우스 트래킹 (TrackMouseEvent) 처리
                     let mut track_opt = self.emu_context.track_mouse_event.lock().unwrap();
@@ -1332,10 +1351,14 @@ impl ApplicationHandler<()> for WinFrame {
                         && (track.flags & 0x00000002 != 0)
                     {
                         let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                        q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
+                        let track_tid = self.queue_message_for_window(
+                            track.hwnd,
+                            [track.hwnd, 0x02A3, 0, 0, time, 0, 0],
+                        ); // WM_MOUSELEAVE
                         *track_opt = None;
+                        self.wake_emulator(Some(track_tid));
                     }
-                    self.wake_emulator();
+                    self.wake_emulator(Some(target_tid));
                 }
             }
 
@@ -1351,10 +1374,12 @@ impl ApplicationHandler<()> for WinFrame {
                         && (track.flags & 0x00000002 != 0)
                     {
                         let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                        let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([track.hwnd, 0x02A3, 0, 0, time, 0, 0]); // WM_MOUSELEAVE
+                        let target_tid = self.queue_message_for_window(
+                            track.hwnd,
+                            [track.hwnd, 0x02A3, 0, 0, time, 0, 0],
+                        ); // WM_MOUSELEAVE
                         *track_opt = None;
-                        self.wake_emulator();
+                        self.wake_emulator(Some(target_tid));
                     }
                 }
             }
@@ -1372,11 +1397,13 @@ impl ApplicationHandler<()> for WinFrame {
 
                     // 스로틀링으로 인해 WM_MOUSEMOVE가 생략되었을 수 있으므로,
                     // 클릭 직전 현재 위치에 대한 이동 메시지 전송을 보장합니다.
+                    let target_tid = self.emu_context.window_owner_thread_id(hwnd);
                     if self.last_sent_mouse_pos != Some((hwnd, x, y)) {
                         let time = self.emu_context.start_time.elapsed().as_millis() as u32;
                         let lparam = (y << 16) | (x & 0xFFFF);
-                        let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
+                        self.emu_context.with_thread_message_queue(target_tid, |q| {
+                            q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
+                        });
                         self.last_sent_mouse_pos = Some((hwnd, x, y));
                     }
 
@@ -1403,10 +1430,10 @@ impl ApplicationHandler<()> for WinFrame {
 
                     if msg != 0 {
                         let time = self.emu_context.start_time.elapsed().as_millis() as u32;
-                        let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([hwnd, msg, wparam, lparam, time, x, y]);
-                        drop(q);
-                        self.wake_emulator();
+                        self.emu_context.with_thread_message_queue(target_tid, |q| {
+                            q.push_back([hwnd, msg, wparam, lparam, time, x, y]);
+                        });
+                        self.wake_emulator(Some(target_tid));
                     }
                 }
             }
@@ -1431,7 +1458,11 @@ impl ApplicationHandler<()> for WinFrame {
                         Key::Named(NamedKey::Shift) => 0x10,
                         Key::Named(NamedKey::Control) => 0x11,
                         Key::Named(NamedKey::Alt) => 0x12,
-                        Key::Character(s) => s.chars().next().unwrap_or('\0') as u32,
+                        // 0x80 이상 유니코드(한글 등)는 IME Commit 이벤트에서 처리합니다.
+                        Key::Character(s) => {
+                            let ch = s.chars().next().unwrap_or('\0');
+                            if (ch as u32) < 0x80 { ch as u32 } else { 0 }
+                        }
                         _ => 0,
                     };
 
@@ -1448,11 +1479,27 @@ impl ApplicationHandler<()> for WinFrame {
                         } else {
                             0x0101 // WM_KEYUP
                         };
-                        let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([hwnd, msg, vk, 0, 0, 0, 0]);
-                        drop(q);
-                        self.wake_emulator();
+                        let target_tid =
+                            self.queue_message_for_window(hwnd, [hwnd, msg, vk, 0, 0, 0, 0]);
+                        self.wake_emulator(Some(target_tid));
                     }
+                }
+            }
+
+            // IME로 조합 완성된 문자는 ANSI 앱 기준으로
+            // ASCII는 `WM_CHAR`, DBCS(한글)는 `WM_IME_CHAR`로 전달합니다.
+            WindowEvent::Ime(Ime::Commit(s)) => {
+                if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
+                    let target_tid = self.emu_context.window_owner_thread_id(hwnd);
+                    for ch in s.chars() {
+                        let committed_messages = Self::committed_char_messages(ch);
+                        self.emu_context.with_thread_message_queue(target_tid, |q| {
+                            for &(message, value) in &committed_messages {
+                                q.push_back([hwnd, message, value, 0, 0, 0, 0]);
+                            }
+                        });
+                    }
+                    self.wake_emulator(Some(target_tid));
                 }
             }
 
@@ -1469,9 +1516,9 @@ impl ApplicationHandler<()> for WinFrame {
                 }
 
                 if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
-                    let mut q = self.emu_context.message_queue.lock().unwrap();
                     let wparam = if focused { 1 } else { 0 }; // WA_ACTIVE, WA_INACTIVE
-                    q.push_back([hwnd, 0x0006, wparam, 0, 0, 0, 0]); // WM_ACTIVATE
+                    let target_tid =
+                        self.queue_message_for_window(hwnd, [hwnd, 0x0006, wparam, 0, 0, 0, 0]); // WM_ACTIVATE
 
                     if focused {
                         self.emu_context
@@ -1481,11 +1528,10 @@ impl ApplicationHandler<()> for WinFrame {
                             .active_hwnd
                             .store(hwnd, std::sync::atomic::Ordering::SeqCst);
                     }
-                    drop(q);
                     if focused {
                         self.activate_window_tree(hwnd);
                     }
-                    self.wake_emulator();
+                    self.wake_emulator(Some(target_tid));
                 }
             }
 
@@ -1502,10 +1548,9 @@ impl ApplicationHandler<()> for WinFrame {
 
                     if changed {
                         let lparam = (x as i16 as u16 as u32) | ((y as i16 as u16 as u32) << 16);
-                        let mut q = self.emu_context.message_queue.lock().unwrap();
-                        q.push_back([hwnd, 0x0003, 0, lparam, 0, 0, 0]); // WM_MOVE
-                        drop(q);
-                        self.wake_emulator();
+                        let target_tid =
+                            self.queue_message_for_window(hwnd, [hwnd, 0x0003, 0, lparam, 0, 0, 0]); // WM_MOVE
+                        self.wake_emulator(Some(target_tid));
                     }
                 }
             }
@@ -1523,10 +1568,11 @@ impl ApplicationHandler<()> for WinFrame {
                         .resize_window(hwnd, width, height);
                     self.emu_context.sync_window_surface_bitmap(hwnd);
 
-                    let mut q = self.emu_context.message_queue.lock().unwrap();
-                    enqueue_window_message(&mut q, [hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
-                    drop(q);
-                    self.wake_emulator();
+                    let target_tid = self.emu_context.window_owner_thread_id(hwnd);
+                    self.emu_context.with_thread_message_queue(target_tid, |q| {
+                        enqueue_window_message(q, [hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
+                    });
+                    self.wake_emulator(Some(target_tid));
                 }
             }
 
@@ -1715,6 +1761,7 @@ mod tests {
             height: 100,
             style: 0,
             ex_style: 0,
+            owner_thread_id: 0,
             parent,
             id: 0,
             visible: true,
@@ -1759,6 +1806,18 @@ mod tests {
             frame.activation_hwnds_in_order(0x1000),
             vec![0x1000, 0x1002, 0x1003, 0x1001]
         );
+    }
+
+    #[test]
+    fn main_guest_window_keeps_close_fallback() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let context = Win32Context::new(None);
+        let mut frame = WinFrame::new(rx, Vec::new(), context);
+        frame.main_guest_hwnd = Some(0x1000);
+
+        assert!(frame.should_exit_on_close_request(Some(0x1000), false));
+        assert!(!frame.should_exit_on_close_request(Some(0x1001), false));
+        assert!(!frame.should_exit_on_close_request(None, false));
     }
 
     #[test]
@@ -1875,5 +1934,17 @@ mod tests {
         let host_style = HostWindowStyle::from_guest(WS_POPUP | WS_CAPTION, 0, true);
 
         assert!(!host_style.transparent);
+    }
+
+    #[test]
+    fn ansi_commit_encoding_keeps_ascii_as_single_byte() {
+        assert_eq!(WinFrame::encode_committed_char_for_ansi('A'), vec![0x41]);
+    }
+
+    #[test]
+    fn ansi_commit_encoding_packs_hangul_into_single_wparam() {
+        let packed = WinFrame::encode_committed_char_for_ansi('한');
+        assert_eq!(packed.len(), 1);
+        assert_eq!(packed[0], 0xD1C7);
     }
 }

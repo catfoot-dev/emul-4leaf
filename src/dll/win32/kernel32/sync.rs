@@ -53,6 +53,8 @@ pub(super) fn set_event(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
     if let Some(evt) = events.get_mut(&handle) {
         evt.signaled = true;
     }
+    drop(events);
+    KERNEL32::wake_threads_waiting_on_handle(ctx, handle);
     crate::emu_log!("[KERNEL32] SetEvent({:#x}) -> BOOL 1", handle);
     Some(ApiHookResult::callee(1, Some(1)))
 }
@@ -276,6 +278,8 @@ pub(super) fn wait_for_single_object(uc: &mut Unicorn<Win32Context>) -> Option<A
         }
 
         KERNEL32::schedule_retry_wait(ctx, tid, deadline);
+        KERNEL32::set_wait_handles(ctx, tid, &[h_handle]);
+        KERNEL32::set_wait_sockets(ctx, tid, &[]);
         return Some(ApiHookResult::retry());
     }
 
@@ -307,6 +311,8 @@ pub(super) fn wait_for_single_object(uc: &mut Unicorn<Win32Context>) -> Option<A
         return Some(ApiHookResult::callee(2, Some(0x102)));
     }
 
+    KERNEL32::set_wait_handles(ctx, tid, &[h_handle]);
+    KERNEL32::set_wait_sockets(ctx, tid, &[]);
     KERNEL32::schedule_retry_wait(ctx, tid, deadline);
     Some(ApiHookResult::retry())
 }
@@ -436,6 +442,11 @@ pub(super) fn wait_for_multiple_objects(uc: &mut Unicorn<Win32Context>) -> Optio
         return Some(ApiHookResult::callee(4, Some(0x102)));
     }
 
+    let handles = (0..n_count.min(64))
+        .map(|index| uc.read_u32(lp_handles as u64 + index as u64 * 4))
+        .collect::<Vec<_>>();
+    KERNEL32::set_wait_handles(ctx, tid, &handles);
+    KERNEL32::set_wait_sockets(ctx, tid, &[]);
     KERNEL32::schedule_retry_wait(ctx, tid, deadline);
     crate::emu_log!("[KERNEL32] WaitForMultipleObjects({}) -> retry", n_count);
     Some(ApiHookResult::retry())

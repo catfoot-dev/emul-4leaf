@@ -15,6 +15,10 @@ const GRAY_BRUSH: u32 = 2;
 const DKGRAY_BRUSH: u32 = 3;
 const BLACK_BRUSH: u32 = 4;
 const NULL_BRUSH: u32 = 5;
+const OPAQUE: i32 = 2;
+const DEFAULT_BK_COLOR: u32 = 0x00FF_FFFF;
+const DEFAULT_TEXT_COLOR: u32 = 0x0000_0000;
+const R2_COPYPEN: i32 = 13;
 
 fn system_color_to_rgb(index: u32) -> u32 {
     match index {
@@ -269,10 +273,10 @@ pub(super) fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
             selected_pen: 0,
             selected_region,
             selected_palette: 0,
-            bk_mode: 0,
-            bk_color: 0,
-            text_color: 0,
-            rop2_mode: 0,
+            bk_mode: OPAQUE,
+            bk_color: DEFAULT_BK_COLOR,
+            text_color: DEFAULT_TEXT_COLOR,
+            rop2_mode: R2_COPYPEN,
             current_x: 0,
             current_y: 0,
         },
@@ -308,9 +312,12 @@ pub(super) fn end_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
 pub(super) fn invalidate_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hwnd = uc.read_arg(0);
     let ctx = uc.get_data();
+    let target_tid = ctx.window_owner_thread_id(hwnd);
     let mut win_event = ctx.win_event.lock().unwrap();
     if win_event.windows.contains_key(&hwnd) {
         win_event.invalidate_rect(hwnd, std::ptr::null_mut());
+        drop(win_event);
+        ctx.wake_thread_message_wait(target_tid);
         crate::emu_log!("[USER32] InvalidateRect({:#x}) -> 1", hwnd);
         Some(ApiHookResult::callee(3, Some(1)))
     } else {
@@ -744,10 +751,10 @@ pub(super) fn get_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             selected_pen: 0,
             selected_region,
             selected_palette: 0,
-            bk_mode: 0,
-            bk_color: 0,
-            text_color: 0,
-            rop2_mode: 0,
+            bk_mode: OPAQUE,
+            bk_color: DEFAULT_BK_COLOR,
+            text_color: DEFAULT_TEXT_COLOR,
+            rop2_mode: R2_COPYPEN,
             current_x: 0,
             current_y: 0,
         },
@@ -784,10 +791,10 @@ pub(super) fn get_window_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
             selected_pen: 0,
             selected_region: 0,
             selected_palette: 0,
-            bk_mode: 0,
-            bk_color: 0,
-            text_color: 0,
-            rop2_mode: 0,
+            bk_mode: OPAQUE,
+            bk_color: DEFAULT_BK_COLOR,
+            text_color: DEFAULT_TEXT_COLOR,
+            rop2_mode: R2_COPYPEN,
             current_x: 0,
             current_y: 0,
         },
@@ -822,6 +829,8 @@ pub(super) fn set_timer(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
         id = ctx.alloc_handle();
     }
 
+    // 창 소유 스레드 ID를 캐시하여 타이머 필터링 시 windows 맵 역참조를 피합니다.
+    let owner_thread_id = ctx.window_owner_thread_id(hwnd);
     timers.insert(
         id,
         Timer {
@@ -830,6 +839,7 @@ pub(super) fn set_timer(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
             elapse,
             timer_proc: lp_timer_func,
             last_tick: std::time::Instant::now(),
+            owner_thread_id,
         },
     );
 
@@ -852,7 +862,10 @@ pub(super) fn kill_timer(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
 
     let ctx = uc.get_data();
     let mut timers = ctx.timers.lock().unwrap();
-    let removed = timers.remove(&id).is_some();
+    let before = timers.len();
+    // Win32 명세: hwnd와 id가 모두 일치하는 타이머만 제거합니다.
+    timers.retain(|_, timer| !(timer.hwnd == hwnd && timer.id == id));
+    let removed = timers.len() < before;
 
     crate::emu_log!("[USER32] KillTimer({:#x}, {:#x}) -> {}", hwnd, id, removed);
     Some(ApiHookResult::callee(2, Some(if removed { 1 } else { 0 })))
@@ -894,6 +907,7 @@ mod tests {
             height: 100,
             style,
             ex_style: 0,
+            owner_thread_id: 0,
             parent,
             id: 0,
             visible: true,

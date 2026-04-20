@@ -4,10 +4,15 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    sync::{OnceLock, mpsc::Sender},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
 };
 
 static UI_WAKE_PROXY: OnceLock<winit::event_loop::EventLoopProxy<()>> = OnceLock::new();
+static UI_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
 const WS_CHILD: u32 = 0x40000000;
 const SW_HIDE: u32 = 0;
 const SW_SHOWNORMAL: u32 = 1;
@@ -22,7 +27,9 @@ const SW_SHOWDEFAULT: u32 = 10;
 
 fn wake_ui_event_loop() {
     if let Some(proxy) = UI_WAKE_PROXY.get() {
-        let _ = proxy.send_event(());
+        if !UI_WAKE_PENDING.swap(true, Ordering::SeqCst) {
+            let _ = proxy.send_event(());
+        }
     }
 }
 
@@ -199,6 +206,11 @@ impl WinEvent {
     /// UI 이벤트 루프를 깨우기 위한 프록시를 등록합니다.
     pub fn install_wake_proxy(proxy: winit::event_loop::EventLoopProxy<()>) {
         let _ = UI_WAKE_PROXY.set(proxy);
+    }
+
+    /// UI 스레드가 큐 적재를 처리하기 시작할 때 wake 보류 상태를 해제합니다.
+    pub(crate) fn clear_wake_pending() {
+        UI_WAKE_PENDING.store(false, Ordering::SeqCst);
     }
 
     /// 다른 스레드에서 UI 이벤트 루프를 깨웁니다.
@@ -574,7 +586,7 @@ impl WinEvent {
 
     /// 윈도우 닫기 요청을 UI에 전달합니다.
     pub fn close_window(&mut self, hwnd: u32) {
-        self.send_ui_command(UiCommand::DestroyWindow { hwnd });
+        self.minimize_window(hwnd);
     }
 
     /// 윈도우 활성화/비활성화 상태를 UI와 동기화합니다.
@@ -633,6 +645,7 @@ mod tests {
             height: 480,
             style: 0,
             ex_style: 0,
+            owner_thread_id: 0,
             parent: 0,
             id: 0,
             visible: false,
@@ -1052,6 +1065,21 @@ mod tests {
         match rx.try_recv().expect("parent destroy command") {
             UiCommand::DestroyWindow { hwnd } => assert_eq!(hwnd, 0x1000),
             _ => panic!("expected DestroyWindow for parent"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn close_window_requests_minimize_instead_of_destroy() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut win_event = WinEvent::new(Some(tx));
+
+        win_event.create_window(0x1000, sample_window_state());
+        win_event.close_window(0x1000);
+
+        match rx.try_recv().expect("minimize command") {
+            UiCommand::MinimizeWindow { hwnd } => assert_eq!(hwnd, 0x1000),
+            _ => panic!("expected MinimizeWindow for close_window"),
         }
         assert!(rx.try_recv().is_err());
     }

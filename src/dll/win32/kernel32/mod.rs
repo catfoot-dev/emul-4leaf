@@ -6,7 +6,7 @@ mod sync;
 mod thread;
 
 use crate::dll::win32::{ApiHookResult, Win32Context};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use unicorn_engine::Unicorn;
 
 /// `ERROR_INVALID_PARAMETER` 오류 코드입니다.
@@ -25,14 +25,6 @@ const GMEM_ZEROINIT: u32 = 0x0040;
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
 /// `STACK_SIZE_PARAM_IS_A_RESERVATION` 스택 예약 크기 플래그입니다.
 const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
-/// 명시적인 타임아웃이 있는 대기 API를 다시 확인할 기본 폴링 간격입니다.
-const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
-/// 무한 대기 계열을 다시 확인할 기본 폴링 간격입니다.
-///
-/// UI 스레드가 메시지를 넣으면 wake_emulator()가 main_resume_time을 즉시 클리어하므로
-/// 이 값은 외부 이벤트 없이 폴백으로만 쓰입니다.
-const WAIT_POLL_INTERVAL_IDLE: Duration = Duration::from_millis(5);
-
 /// `KERNEL32.dll` 프록시 구현 모듈
 ///
 /// Windows 코어 서브시스템으로, 스레드, 메모리, 모듈 핸들, 뮤텍스(Mutex), 이벤트(Event) 등을 가상으로 프로비저닝
@@ -59,22 +51,19 @@ impl KERNEL32 {
         }
     }
 
-    /// 현재 스레드(또는 메인 스레드)를 짧은 폴링 간격으로 다시 확인하도록 예약합니다.
+    /// 현재 스레드(또는 메인 스레드)를 외부 wake 또는 지정된 deadline까지 대기 상태로 전환합니다.
     pub(crate) fn schedule_retry_wait(ctx: &Win32Context, tid: u32, deadline: Option<Instant>) {
-        let now = Instant::now();
-        let next_resume = deadline
-            .map(|limit| (now + WAIT_POLL_INTERVAL).min(limit))
-            .unwrap_or(now + WAIT_POLL_INTERVAL_IDLE);
-
         if tid == 0 {
-            *ctx.main_resume_time.lock().unwrap() = Some(next_resume);
+            ctx.main_ready.store(0, std::sync::atomic::Ordering::SeqCst);
+            *ctx.main_resume_time.lock().unwrap() = deadline;
             *ctx.main_wait_deadline.lock().unwrap() = deadline;
             return;
         }
 
         let mut threads = ctx.threads.lock().unwrap();
         if let Some(thread) = threads.iter_mut().find(|thread| thread.thread_id == tid) {
-            thread.resume_time = Some(next_resume);
+            thread.ready = false;
+            thread.resume_time = deadline;
             thread.wait_deadline = deadline;
         }
     }
@@ -82,15 +71,107 @@ impl KERNEL32 {
     /// 현재 스레드(또는 메인 스레드)의 재시도형 대기 상태를 해제합니다.
     pub(crate) fn clear_retry_wait(ctx: &Win32Context, tid: u32) {
         if tid == 0 {
+            ctx.main_ready.store(1, std::sync::atomic::Ordering::SeqCst);
             *ctx.main_resume_time.lock().unwrap() = None;
             *ctx.main_wait_deadline.lock().unwrap() = None;
+            ctx.main_wait_handles.lock().unwrap().clear();
+            ctx.main_wait_sockets.lock().unwrap().clear();
             return;
         }
 
         let mut threads = ctx.threads.lock().unwrap();
         if let Some(thread) = threads.iter_mut().find(|thread| thread.thread_id == tid) {
+            thread.ready = true;
             thread.resume_time = None;
             thread.wait_deadline = None;
+            thread.wait_handles.clear();
+            thread.wait_sockets.clear();
+        }
+    }
+
+    /// 현재 스레드(또는 메인 스레드)가 대기 중인 커널 오브젝트 핸들을 등록합니다.
+    pub(crate) fn set_wait_handles(ctx: &Win32Context, tid: u32, handles: &[u32]) {
+        if tid == 0 {
+            let mut wait_handles = ctx.main_wait_handles.lock().unwrap();
+            wait_handles.clear();
+            wait_handles.extend_from_slice(handles);
+            return;
+        }
+
+        let mut threads = ctx.threads.lock().unwrap();
+        if let Some(thread) = threads.iter_mut().find(|thread| thread.thread_id == tid) {
+            thread.wait_handles.clear();
+            thread.wait_handles.extend_from_slice(handles);
+        }
+    }
+
+    /// 현재 스레드(또는 메인 스레드)가 대기 중인 소켓 목록을 등록합니다.
+    pub(crate) fn set_wait_sockets(ctx: &Win32Context, tid: u32, sockets: &[u32]) {
+        if tid == 0 {
+            let mut wait_sockets = ctx.main_wait_sockets.lock().unwrap();
+            wait_sockets.clear();
+            wait_sockets.extend_from_slice(sockets);
+            return;
+        }
+
+        let mut threads = ctx.threads.lock().unwrap();
+        if let Some(thread) = threads.iter_mut().find(|thread| thread.thread_id == tid) {
+            thread.wait_sockets.clear();
+            thread.wait_sockets.extend_from_slice(sockets);
+        }
+    }
+
+    /// 지정된 핸들을 기다리는 스레드들을 ready 상태로 전환합니다.
+    pub(crate) fn wake_threads_waiting_on_handle(ctx: &Win32Context, handle: u32) {
+        let mut woke_any = false;
+
+        {
+            let wait_handles = ctx.main_wait_handles.lock().unwrap();
+            if wait_handles.contains(&handle) {
+                ctx.main_ready.store(1, std::sync::atomic::Ordering::SeqCst);
+                woke_any = true;
+            }
+        }
+
+        {
+            let mut threads = ctx.threads.lock().unwrap();
+            for thread in threads.iter_mut() {
+                if thread.wait_handles.contains(&handle) {
+                    thread.ready = true;
+                    woke_any = true;
+                }
+            }
+        }
+
+        if woke_any {
+            ctx.unpark_emulator_thread();
+        }
+    }
+
+    /// 지정된 소켓을 기다리는 스레드들을 ready 상태로 전환합니다.
+    pub(crate) fn wake_threads_waiting_on_socket(ctx: &Win32Context, socket: u32) {
+        let mut woke_any = false;
+
+        {
+            let wait_sockets = ctx.main_wait_sockets.lock().unwrap();
+            if wait_sockets.contains(&socket) {
+                ctx.main_ready.store(1, std::sync::atomic::Ordering::SeqCst);
+                woke_any = true;
+            }
+        }
+
+        {
+            let mut threads = ctx.threads.lock().unwrap();
+            for thread in threads.iter_mut() {
+                if thread.wait_sockets.contains(&socket) {
+                    thread.ready = true;
+                    woke_any = true;
+                }
+            }
+        }
+
+        if woke_any {
+            ctx.unpark_emulator_thread();
         }
     }
 
@@ -192,6 +273,7 @@ impl KERNEL32 {
 mod tests {
     use super::*;
     use crate::dll::win32::{EmulatedThread, VirtualSocket, WsaEventEntry};
+    use std::sync::atomic::Ordering;
 
     fn sample_thread(thread_id: u32, alive: bool) -> EmulatedThread {
         EmulatedThread {
@@ -208,11 +290,14 @@ mod tests {
             esi: 0,
             edi: 0,
             eip: 0,
+            ready: true,
             alive,
             terminate_requested: !alive,
             suspended: false,
             resume_time: None,
             wait_deadline: None,
+            wait_handles: Vec::new(),
+            wait_sockets: Vec::new(),
         }
     }
 
@@ -290,5 +375,37 @@ mod tests {
             .map(|entry| entry.pending)
             .unwrap_or(0);
         assert_eq!(pending & 0x01, 0x01);
+    }
+
+    #[test]
+    fn wake_threads_waiting_on_handle_marks_thread_ready() {
+        let ctx = Win32Context::new(None);
+        {
+            let mut threads = ctx.threads.lock().unwrap();
+            let mut thread = sample_thread(0x2201, true);
+            thread.ready = false;
+            thread.wait_handles = vec![0x9000];
+            threads.push(thread);
+        }
+
+        KERNEL32::wake_threads_waiting_on_handle(&ctx, 0x9000);
+
+        let threads = ctx.threads.lock().unwrap();
+        assert!(threads[0].ready);
+    }
+
+    #[test]
+    fn schedule_retry_wait_tracks_main_socket_interest() {
+        let ctx = Win32Context::new(None);
+
+        KERNEL32::set_wait_handles(&ctx, 0, &[]);
+        KERNEL32::set_wait_sockets(&ctx, 0, &[0x4400, 0x5500]);
+        KERNEL32::schedule_retry_wait(&ctx, 0, None);
+
+        assert_eq!(ctx.main_ready.load(Ordering::SeqCst), 0);
+        assert_eq!(&*ctx.main_wait_sockets.lock().unwrap(), &[0x4400, 0x5500]);
+
+        KERNEL32::wake_threads_waiting_on_socket(&ctx, 0x5500);
+        assert_eq!(ctx.main_ready.load(Ordering::SeqCst), 1);
     }
 }

@@ -117,8 +117,8 @@ pub struct Win32Context {
     /// 마우스 트래킹 상태 (_TrackMouseEvent 용)
     pub track_mouse_event: Arc<Mutex<Option<TrackMouseEventState>>>,
 
-    /// 애플리케이션용 가상 메시지 큐
-    pub message_queue: Arc<Mutex<std::collections::VecDeque<[u32; 7]>>>,
+    /// 가상 스레드별 애플리케이션 메시지 큐입니다. 메인 스레드는 내부 키 `0`을 사용합니다.
+    pub message_queues: Arc<Mutex<HashMap<u32, std::collections::VecDeque<[u32; 7]>>>>,
     /// 활성화된 타이머 맵 (ID -> Timer 객체)
     pub timers: Arc<Mutex<HashMap<u32, Timer>>>,
     /// 가상 키보드 키 상태 배열 (256키)
@@ -148,10 +148,16 @@ pub struct Win32Context {
     pub threads: Arc<Mutex<Vec<EmulatedThread>>>,
     /// 현재 실행 중인 스레드 ID (0 = 메인 스레드)
     pub current_thread_idx: Arc<AtomicU32>,
+    /// 메인 스레드가 외부 wake 없이도 즉시 실행 가능한 상태인지 여부
+    pub main_ready: Arc<AtomicU32>,
     /// 메인 스레드(tid=0)용 재실행 대기 시각
     pub main_resume_time: Arc<Mutex<Option<Instant>>>,
     /// 메인 스레드의 재시도형 대기 API 타임아웃 시각
     pub main_wait_deadline: Arc<Mutex<Option<Instant>>>,
+    /// 메인 스레드가 현재 대기 중인 커널 오브젝트 핸들 목록
+    pub main_wait_handles: Arc<Mutex<Vec<u32>>>,
+    /// 메인 스레드가 현재 대기 중인 소켓 목록
+    pub main_wait_sockets: Arc<Mutex<Vec<u32>>>,
     /// 중첩 emu_start 호출 깊이 (코드 훅 내 재귀 제한용)
     pub emu_depth: Arc<AtomicU32>,
     /// 에뮬레이터 스레드 핸들 (park/unpark 기반 즉시 깨우기용)
@@ -206,7 +212,10 @@ impl Win32Context {
             foreground_hwnd: Arc::new(AtomicU32::new(0)),
             capture_hwnd: Arc::new(AtomicU32::new(0)),
             track_mouse_event: Arc::new(Mutex::new(None)),
-            message_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            message_queues: Arc::new(Mutex::new(HashMap::from([(
+                0,
+                std::collections::VecDeque::new(),
+            )]))),
             timers: Arc::new(Mutex::new(HashMap::new())),
             key_states: Arc::new(Mutex::new([false; 256])),
             clipboard_data: Arc::new(Mutex::new(Vec::new())),
@@ -221,8 +230,11 @@ impl Win32Context {
             onexit_handlers: Arc::new(Mutex::new(Vec::new())),
             threads: Arc::new(Mutex::new(Vec::new())),
             current_thread_idx: Arc::new(AtomicU32::new(0)),
+            main_ready: Arc::new(AtomicU32::new(1)),
             main_resume_time: Arc::new(Mutex::new(None)),
             main_wait_deadline: Arc::new(Mutex::new(None)),
+            main_wait_handles: Arc::new(Mutex::new(Vec::new())),
+            main_wait_sockets: Arc::new(Mutex::new(Vec::new())),
             emu_depth: Arc::new(AtomicU32::new(0)),
             emu_thread: Arc::new(Mutex::new(None)),
             rare_audio: Arc::new(Mutex::new(None)),
@@ -348,6 +360,84 @@ impl Win32Context {
             },
         );
         hbmp
+    }
+
+    /// 게스트에 노출되는 스레드 ID를 내부 메시지 큐 키로 정규화합니다.
+    ///
+    /// 메인 스레드는 guest 입장에서는 `1`로 보이지만, 내부 스케줄러에서는 `0`으로 유지합니다.
+    pub(crate) fn normalize_queue_thread_id(&self, thread_id: u32) -> u32 {
+        if thread_id == 1 { 0 } else { thread_id }
+    }
+
+    /// 현재 실행 중인 가상 스레드의 내부 메시지 큐 키를 반환합니다.
+    pub(crate) fn current_queue_thread_id(&self) -> u32 {
+        self.current_thread_idx.load(Ordering::SeqCst)
+    }
+
+    /// 지정된 HWND를 소유한 가상 스레드의 내부 메시지 큐 키를 반환합니다.
+    pub(crate) fn window_owner_thread_id(&self, hwnd: u32) -> u32 {
+        self.win_event
+            .lock()
+            .unwrap()
+            .windows
+            .get(&hwnd)
+            .map(|state| state.owner_thread_id)
+            .unwrap_or(0)
+    }
+
+    /// 지정된 가상 스레드의 메시지 큐를 가변 참조로 노출합니다.
+    pub(crate) fn with_thread_message_queue<T, F>(&self, thread_id: u32, f: F) -> T
+    where
+        F: FnOnce(&mut std::collections::VecDeque<[u32; 7]>) -> T,
+    {
+        let thread_id = self.normalize_queue_thread_id(thread_id);
+        let mut queues = self.message_queues.lock().unwrap();
+        let queue = queues.entry(thread_id).or_default();
+        f(queue)
+    }
+
+    /// 지정된 가상 스레드 큐에 메시지를 추가하고 실제 사용된 큐 키를 반환합니다.
+    pub(crate) fn queue_message_for_thread(&self, thread_id: u32, message: [u32; 7]) -> u32 {
+        let thread_id = self.normalize_queue_thread_id(thread_id);
+        self.with_thread_message_queue(thread_id, |queue| queue.push_back(message));
+        thread_id
+    }
+
+    /// 지정된 HWND를 소유한 가상 스레드 큐에 메시지를 추가하고 큐 키를 반환합니다.
+    pub(crate) fn queue_message_for_window(&self, hwnd: u32, message: [u32; 7]) -> u32 {
+        let thread_id = if hwnd == 0 {
+            self.current_queue_thread_id()
+        } else {
+            self.window_owner_thread_id(hwnd)
+        };
+        self.queue_message_for_thread(thread_id, message)
+    }
+
+    /// 지정된 가상 스레드의 재시도형 대기 상태를 즉시 해제합니다.
+    pub(crate) fn wake_thread_message_wait(&self, thread_id: u32) -> u32 {
+        let thread_id = self.normalize_queue_thread_id(thread_id);
+        if thread_id == 0 {
+            self.main_ready.store(1, Ordering::SeqCst);
+            return thread_id;
+        }
+
+        let mut threads = self.threads.lock().unwrap();
+        if let Some(thread) = threads
+            .iter_mut()
+            .find(|thread| thread.thread_id == thread_id)
+        {
+            thread.ready = true;
+        }
+        thread_id
+    }
+
+    /// 에뮬레이터 호스트 스레드를 즉시 깨웁니다.
+    pub(crate) fn unpark_emulator_thread(&self) {
+        if let Ok(guard) = self.emu_thread.lock()
+            && let Some(thread) = guard.as_ref()
+        {
+            thread.unpark();
+        }
     }
 
     /// 윈도우 상태의 현재 크기에 맞춰 연결된 표면 비트맵 저장소를 동기화합니다.
@@ -489,7 +579,7 @@ impl Clone for Win32Context {
             foreground_hwnd: self.foreground_hwnd.clone(),
             capture_hwnd: self.capture_hwnd.clone(),
             track_mouse_event: self.track_mouse_event.clone(),
-            message_queue: self.message_queue.clone(),
+            message_queues: self.message_queues.clone(),
             timers: self.timers.clone(),
             key_states: self.key_states.clone(),
             clipboard_data: self.clipboard_data.clone(),
@@ -504,8 +594,11 @@ impl Clone for Win32Context {
             onexit_handlers: self.onexit_handlers.clone(),
             threads: self.threads.clone(),
             current_thread_idx: self.current_thread_idx.clone(),
+            main_ready: self.main_ready.clone(),
             main_resume_time: self.main_resume_time.clone(),
             main_wait_deadline: self.main_wait_deadline.clone(),
+            main_wait_handles: self.main_wait_handles.clone(),
+            main_wait_sockets: self.main_wait_sockets.clone(),
             emu_depth: self.emu_depth.clone(),
             emu_thread: self.emu_thread.clone(),
             rare_audio: self.rare_audio.clone(),

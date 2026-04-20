@@ -335,7 +335,11 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                     0x00F00021 => {
                         // PATCOPY
                         if let Some(GdiObject::Brush { color }) = gdi.get(selected_brush) {
-                            Some(*color)
+                            let b = *color >> 16 & 0xFF;
+                            let g = *color >> 8 & 0xFF;
+                            let r = *color & 0xFF;
+                            let color = (r << 16) | (g << 8) | b;
+                            Some(color)
                         } else {
                             Some(0x00FFFFFF)
                         }
@@ -366,6 +370,10 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                 ..
             }) = gdi.get(&hbmp)
             {
+                let b = color >> 16 & 0xFF;
+                let g = color >> 8 & 0xFF;
+                let r = color & 0xFF;
+                let color = (r << 16) | (g << 8) | b;
                 let width = *width;
                 let height = *height;
                 let mut pixels = pixels.lock().unwrap();
@@ -561,7 +569,11 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                 match rop {
                     0x00F00021 => {
                         if let Some(GdiObject::Brush { color }) = gdi.get(selected_brush) {
-                            Some(*color)
+                            let b = *color >> 16 & 0xFF;
+                            let g = *color >> 8 & 0xFF;
+                            let r = *color & 0xFF;
+                            let color = (r << 16) | (g << 8) | b;
+                            Some(color)
                         } else {
                             Some(0x00FFFFFF)
                         }
@@ -583,6 +595,10 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                 ..
             }) = gdi.get(&hbmp_dest)
         {
+            let b = color >> 16 & 0xFF;
+            let g = color >> 8 & 0xFF;
+            let r = color & 0xFF;
+            let color = (r << 16) | (g << 8) | b;
             let (dw, dh) = (*dw, *dh);
             let mut dp = dp.lock().unwrap();
             for (left, top, right, bottom) in GDI32::intersect_rect_with_clip_rects(
@@ -912,7 +928,11 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
                         let hdc = uc.read_arg(0);
                         if let Some(GdiObject::Dc { selected_brush, .. }) = gdi.get(&hdc) {
                             if let Some(GdiObject::Brush { color }) = gdi.get(selected_brush) {
-                                Some(*color)
+                                let b = *color >> 16 & 0xFF;
+                                let g = *color >> 8 & 0xFF;
+                                let r = *color & 0xFF;
+                                let color = (r << 16) | (g << 8) | b;
+                                Some(color)
                             } else {
                                 Some(0x00FFFFFF)
                             }
@@ -925,6 +945,10 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
                     _ => None,
                 };
                 if let Some(color) = brush_color {
+                    let b = color >> 16 & 0xFF;
+                    let g = color >> 8 & 0xFF;
+                    let r = color & 0xFF;
+                    let color = (r << 16) | (g << 8) | b;
                     for (left, top, right, bottom) in GDI32::intersect_rect_with_clip_rects(
                         &clip_rects,
                         x_dest + origin_x,

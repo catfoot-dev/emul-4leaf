@@ -37,6 +37,8 @@ pub struct EmulatedThread {
     pub esi: u32,
     pub edi: u32,
     pub eip: u32,
+    /// 스레드가 외부 이벤트 없이도 즉시 실행 가능한 상태인지 여부입니다.
+    pub ready: bool,
     pub alive: bool,
     /// _endthreadex / _endthread 에 의해 종료가 요청된 경우 true
     pub terminate_requested: bool,
@@ -46,6 +48,10 @@ pub struct EmulatedThread {
     pub resume_time: Option<Instant>,
     /// 재시도형 대기 API의 최종 타임아웃 시각
     pub wait_deadline: Option<Instant>,
+    /// 현재 대기 중인 커널 오브젝트 핸들 목록입니다.
+    pub wait_handles: Vec<u32>,
+    /// 현재 대기 중인 소켓 목록입니다.
+    pub wait_sockets: Vec<u32>,
 }
 
 /// 함수 호출 후 스택 정리 방식을 정의하는 열거형입니다.
@@ -326,6 +332,8 @@ pub struct Timer {
     pub elapse: u32,
     pub timer_proc: u32,
     pub last_tick: std::time::Instant,
+    /// 타이머를 소유한 가상 스레드 ID (windows 맵 순회 없이 필터링하기 위해 캐시)
+    pub owner_thread_id: u32,
 }
 
 /// 가상 마우스 트래킹(TrackMouseEvent) 상태를 저장합니다.
@@ -353,6 +361,8 @@ pub struct WindowState {
     pub height: i32,
     pub style: u32,
     pub ex_style: u32,
+    /// 창을 생성한 가상 스레드 ID입니다. 내부적으로는 메인 스레드를 `0`으로 유지합니다.
+    pub owner_thread_id: u32,
     pub parent: u32,
     pub id: u32,
     pub visible: bool,

@@ -415,8 +415,12 @@ pub(crate) fn run_emulator_impl(
         // 메시지가 없을 때 불필요한 spin을 방지합니다.
         let should_run_main = {
             let ctx = uc.get_data();
-            let resume = *ctx.main_resume_time.lock().unwrap();
-            resume.is_none_or(|t| Instant::now() >= t)
+            if ctx.main_ready.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                true
+            } else {
+                let resume = *ctx.main_resume_time.lock().unwrap();
+                resume.is_some_and(|t| Instant::now() >= t)
+            }
         };
 
         if should_run_main {
@@ -451,29 +455,48 @@ pub(crate) fn run_emulator_impl(
         }
 
         // 모든 스레드(메인 포함)가 대기 중인 경우 호스트 측에서 대기하여 CPU 점유율 조절
-        let earliest_resume = {
+        let (has_ready_work, earliest_resume) = {
             let context = uc.get_data();
-            let mut min_time = *context.main_resume_time.lock().unwrap();
+            let now = Instant::now();
+            let mut ready = context.main_ready.load(std::sync::atomic::Ordering::SeqCst) != 0;
+            let mut min_time = None;
+
+            if let Some(main_resume) = *context.main_resume_time.lock().unwrap() {
+                if main_resume <= now {
+                    ready = true;
+                } else {
+                    min_time = Some(main_resume);
+                }
+            }
 
             let threads = context.threads.lock().unwrap();
             for t in threads.iter().filter(|t| t.alive) {
+                if t.ready {
+                    ready = true;
+                    break;
+                }
                 if let Some(t_res) = t.resume_time {
+                    if t_res <= now {
+                        ready = true;
+                        break;
+                    }
                     if min_time.is_none() || t_res < min_time.unwrap() {
                         min_time = Some(t_res);
                     }
-                } else {
-                    min_time = None;
-                    break;
                 }
             }
-            min_time
+            (ready, min_time)
         };
 
-        if let Some(res_time) = earliest_resume {
-            let now = Instant::now();
-            if res_time > now {
-                let diff = res_time.duration_since(now);
-                std::thread::park_timeout(diff.min(EMULATOR_IDLE_SLEEP_SLICE));
+        if !has_ready_work {
+            if let Some(res_time) = earliest_resume {
+                let now = Instant::now();
+                if res_time > now {
+                    let diff = res_time.duration_since(now);
+                    std::thread::park_timeout(diff.min(EMULATOR_IDLE_SLEEP_SLICE));
+                }
+            } else {
+                std::thread::park_timeout(EMULATOR_IDLE_SLEEP_SLICE);
             }
         }
     }

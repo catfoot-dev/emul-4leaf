@@ -6,9 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use unicorn_engine::{RegisterX86, Unicorn};
 
-use super::{
-    CREATE_SUSPENDED, ERROR_INVALID_PARAMETER, KERNEL32, STACK_SIZE_PARAM_IS_A_RESERVATION,
-};
+use super::{CREATE_SUSPENDED, ERROR_INVALID_PARAMETER, STACK_SIZE_PARAM_IS_A_RESERVATION};
 
 // =========================================================
 // TLS (Thread Local Storage)
@@ -84,44 +82,41 @@ pub(super) fn sleep(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
         let mut threads = ctx.threads.lock().unwrap();
         if let Some(t) = threads.iter_mut().find(|t| t.thread_id == tid) {
             if t.resume_time.is_none() {
+                t.ready = false;
+                t.wait_handles.clear();
+                t.wait_sockets.clear();
                 t.resume_time =
                     Some(Instant::now() + Duration::from_millis(dw_milliseconds as u64));
                 t.wait_deadline = None;
                 return Some(ApiHookResult::retry());
             } else {
+                t.ready = true;
                 t.resume_time = None;
                 t.wait_deadline = None;
+                t.wait_handles.clear();
+                t.wait_sockets.clear();
             }
         }
     }
 
     if !in_thread {
-        let needs_yield = {
-            let ctx = uc.get_data();
-            let mut main_res = ctx.main_resume_time.lock().unwrap();
-            if main_res.is_none() {
-                if dw_milliseconds > 0 {
-                    *main_res =
-                        Some(Instant::now() + Duration::from_millis(dw_milliseconds as u64));
-                }
-                *ctx.main_wait_deadline.lock().unwrap() = None;
-                true
-            } else if Instant::now() >= main_res.unwrap() {
-                *main_res = None;
-                *ctx.main_wait_deadline.lock().unwrap() = None;
-                false
-            } else {
-                *ctx.main_wait_deadline.lock().unwrap() = None;
-                true
-            }
-        };
-
-        if needs_yield {
-            KERNEL32::schedule_threads(uc);
-            return Some(ApiHookResult::retry());
-        } else {
+        if dw_milliseconds == 0 {
             return Some(ApiHookResult::callee(1, None));
         }
+
+        let ctx = uc.get_data();
+        let mut main_res = ctx.main_resume_time.lock().unwrap();
+        if main_res.is_none() {
+            *main_res = Some(Instant::now() + Duration::from_millis(dw_milliseconds as u64));
+            ctx.main_ready.store(0, Ordering::SeqCst);
+            *ctx.main_wait_deadline.lock().unwrap() = None;
+            return Some(ApiHookResult::retry());
+        }
+
+        *main_res = None;
+        ctx.main_ready.store(1, Ordering::SeqCst);
+        *ctx.main_wait_deadline.lock().unwrap() = None;
+        return Some(ApiHookResult::callee(1, None));
     }
 
     Some(ApiHookResult::callee(1, None))
@@ -277,11 +272,14 @@ pub(super) fn create_thread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         esi: 0,
         edi: 0,
         eip: lp_start_address,
+        ready: !suspended,
         alive: true,
         terminate_requested: false,
         suspended,
         resume_time: None,
         wait_deadline: None,
+        wait_handles: Vec::new(),
+        wait_sockets: Vec::new(),
     };
 
     uc.get_data().threads.lock().unwrap().push(new_thread);
@@ -329,13 +327,14 @@ pub(super) fn schedule_threads_impl(uc: &mut Unicorn<Win32Context>) {
                 result.push((i, t.clone()));
             } else if t.suspended {
                 continue;
+            } else if t.ready {
+                result.push((i, t.clone()));
             } else if let Some(res_time) = t.resume_time {
-                if now < res_time {
-                    continue;
+                if now >= res_time {
+                    result.push((i, t.clone()));
                 }
-                result.push((i, t.clone()));
             } else {
-                result.push((i, t.clone()));
+                continue;
             }
         }
         result

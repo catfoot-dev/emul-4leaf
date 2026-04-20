@@ -306,11 +306,14 @@ pub(super) fn _beginthreadex(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         esi: 0,
         edi: 0,
         eip: start_address,
+        ready: true,
         alive: true,
         terminate_requested: false,
         suspended: false,
         resume_time: None,
         wait_deadline: None,
+        wait_handles: Vec::new(),
+        wait_sockets: Vec::new(),
     });
 
     crate::emu_log!(
@@ -390,11 +393,14 @@ pub(super) fn _beginthread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResu
         esi: 0,
         edi: 0,
         eip: start_address,
+        ready: true,
         alive: true,
         terminate_requested: false,
         suspended: false,
         resume_time: None,
         wait_deadline: None,
+        wait_handles: Vec::new(),
+        wait_sockets: Vec::new(),
     });
 
     crate::emu_log!(

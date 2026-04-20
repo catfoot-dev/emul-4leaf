@@ -31,9 +31,7 @@ use unicorn_engine::{
     unicorn_const::{Arch, Mode},
 };
 
-use crate::boot::{
-    LIBLARY_4LEAF, LIBLARY_CORE, LIBLARY_DICE, LIBLARY_DNET, LIBLARY_LIME, LIBLARY_WINCORE,
-};
+use crate::boot::{LIBLARY_4LEAF, LIBLARY_CORE, LIBLARY_DNET, LIBLARY_LIME, LIBLARY_WINCORE};
 use crate::debug::common::{CpuContext, DebugCommand};
 use crate::ui::UiCommand;
 
