@@ -17,7 +17,7 @@ pub fn run_dnet_handler(server_rx: mpsc::Receiver<Vec<u8>>, server_tx: mpsc::Sen
         };
 
         runtime.byte_buf.extend(chunk);
-        if !runtime.process_available_frames(&server_tx) {
+        if !runtime.process_recv_data(&server_tx) {
             return;
         }
     }
@@ -40,8 +40,8 @@ impl ServerRuntime {
         }
     }
 
-    /// 현재 버퍼에 쌓인 완전한 프레임을 모두 처리합니다.
-    fn process_available_frames(&mut self, server_tx: &mpsc::Sender<Vec<u8>>) -> bool {
+    /// 현재 버퍼에 쌓인 수신 데이터를 처리합니다.
+    fn process_recv_data(&mut self, server_tx: &mpsc::Sender<Vec<u8>>) -> bool {
         loop {
             if self.byte_buf.len() < 4 {
                 return true;
@@ -291,7 +291,7 @@ fn build_stage_open_acceptance_responses(channel_id: u16) -> Vec<Vec<u8>> {
     )];
 
     if channel_id == 2 {
-        responses.push(domain::control::build_worldmap_response(channel_id));
+        responses.push(domain::world::build_worldmap_response(channel_id));
     }
 
     responses

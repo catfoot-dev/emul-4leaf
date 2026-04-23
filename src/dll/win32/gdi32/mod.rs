@@ -17,6 +17,60 @@ const BI_ALPHABITFIELDS: u32 = 6;
 pub struct GDI32;
 
 impl GDI32 {
+    /// Win32 `COLORREF` 값을 내부 `0xAARRGGBB` 색상으로 변환합니다.
+    ///
+    /// 표준 `COLORREF`는 상위 바이트가 예약값이므로 `0`이면 불투명으로 보정하고,
+    /// 비영 값이면 4Leaf 확장 알파로 해석합니다.
+    pub(crate) fn colorref_to_argb(colorref: u32) -> u32 {
+        let raw_a = (colorref >> 24) & 0xFF;
+        let a = if raw_a == 0 { 0xFF } else { raw_a };
+        let r = colorref & 0xFF;
+        let g = (colorref >> 8) & 0xFF;
+        let b = (colorref >> 16) & 0xFF;
+        (a << 24) | (r << 16) | (g << 8) | b
+    }
+
+    /// 내부 `0xAARRGGBB` 색상을 Win32 `COLORREF` 값으로 변환합니다.
+    pub(crate) fn argb_to_colorref(color: u32) -> u32 {
+        let r = (color >> 16) & 0xFF;
+        let g = (color >> 8) & 0xFF;
+        let b = color & 0xFF;
+        (b << 16) | (g << 8) | r
+    }
+
+    /// 알파가 없는 `0x00RRGGBB` 값을 불투명 `0xAARRGGBB` 색상으로 보정합니다.
+    pub(crate) fn opaque_rgb(color: u32) -> u32 {
+        0xFF00_0000 | (color & 0x00FF_FFFF)
+    }
+
+    /// 내부 `0xAARRGGBB` 색상을 source-over 규칙으로 합성합니다.
+    pub(crate) fn blend_source_over(dst: u32, src: u32) -> u32 {
+        let src_a = (src >> 24) & 0xFF;
+        if src_a == 0 {
+            return dst;
+        }
+        if src_a == 0xFF {
+            return src;
+        }
+
+        let dst_a = (dst >> 24) & 0xFF;
+        let inv_a = 0xFF - src_a;
+        let out_a = src_a + ((dst_a * inv_a + 127) / 255);
+        if out_a == 0 {
+            return 0;
+        }
+
+        let blend_channel = |shift: u32| {
+            let src_c = (src >> shift) & 0xFF;
+            let dst_c = (dst >> shift) & 0xFF;
+            let numerator = src_c * src_a * 255 + dst_c * dst_a * inv_a;
+            let denominator = out_a * 255;
+            ((numerator + denominator / 2) / denominator).min(0xFF)
+        };
+
+        (out_a << 24) | (blend_channel(16) << 16) | (blend_channel(8) << 8) | blend_channel(0)
+    }
+
     fn normalize_rect(rect: (i32, i32, i32, i32)) -> Option<(i32, i32, i32, i32)> {
         let (left, top, right, bottom) = rect;
         (left < right && top < bottom).then_some((left, top, right, bottom))
@@ -423,7 +477,7 @@ pub(crate) fn read_dib_header(uc: &Unicorn<Win32Context>, bmi_addr: u32) -> DibH
     }
 }
 
-// Helper: 원시 DIB 바이트 배열을 0x00RRGGBB Vec<u32>으로 변환 (팔레트/저색심도, bottom-up 지원)
+// Helper: 원시 DIB 바이트 배열을 0xAARRGGBB Vec<u32>으로 변환 (팔레트/저색심도, bottom-up 지원)
 //
 // `stride`는 스캔라인 바이트 수입니다. 일반적으로 CreateDIBSection 시점에 계산된 값을
 // 그대로 재사용하며, 0이면 DWORD 정렬 공식을 사용합니다.
@@ -501,7 +555,7 @@ fn read_dib_masks(
     (red_mask, green_mask, blue_mask, alpha_mask, palette_offset)
 }
 
-/// 팔레트 기반 DIB의 RGBQUAD 테이블을 읽어 `0x00RRGGBB`로 변환합니다.
+/// 팔레트 기반 DIB의 RGBQUAD 테이블을 읽어 불투명 `0xAARRGGBB`로 변환합니다.
 fn read_dib_palette(
     uc: &Unicorn<Win32Context>,
     palette_offset: u64,
@@ -524,7 +578,8 @@ fn read_dib_palette(
         let b = uc.read_u8(entry_addr) as u32;
         let g = uc.read_u8(entry_addr + 1) as u32;
         let r = uc.read_u8(entry_addr + 2) as u32;
-        palette.push((r << 16) | (g << 8) | b);
+        let _reserved = uc.read_u8(entry_addr + 3);
+        palette.push(GDI32::opaque_rgb((r << 16) | (g << 8) | b));
     }
 
     palette
@@ -577,7 +632,7 @@ fn nearest_palette_index(palette: &[u32], color: u32) -> u8 {
     best_index.min(u8::MAX as usize) as u8
 }
 
-/// DIB 한 픽셀을 읽어 `0x00RRGGBB`로 변환합니다.
+/// DIB 한 픽셀을 읽어 `0xAARRGGBB`로 변환합니다.
 #[allow(clippy::too_many_arguments)]
 fn read_dib_pixel(
     raw: &[u8],
@@ -595,13 +650,16 @@ fn read_dib_pixel(
             let idx = row_offset + (col / 8);
             let bit = 7 - (col % 8);
             let palette_index = raw.get(idx).map(|byte| (byte >> bit) & 0x01).unwrap_or(0) as usize;
-            palette.get(palette_index).copied().unwrap_or({
-                if palette_index == 0 {
-                    0x000000
-                } else {
-                    0x00FF_FFFF
-                }
-            })
+            palette
+                .get(palette_index)
+                .map(|color| GDI32::opaque_rgb(*color))
+                .unwrap_or({
+                    if palette_index == 0 {
+                        0xFF00_0000
+                    } else {
+                        0xFFFF_FFFF
+                    }
+                })
         }
         4 => {
             let idx = row_offset + (col / 2);
@@ -615,18 +673,24 @@ fn read_dib_pixel(
                     }
                 })
                 .unwrap_or(0) as usize;
-            palette.get(palette_index).copied().unwrap_or_else(|| {
-                let gray = (palette_index as u32 * 17) & 0xFF;
-                (gray << 16) | (gray << 8) | gray
-            })
+            palette
+                .get(palette_index)
+                .map(|color| GDI32::opaque_rgb(*color))
+                .unwrap_or_else(|| {
+                    let gray = (palette_index as u32 * 17) & 0xFF;
+                    GDI32::opaque_rgb((gray << 16) | (gray << 8) | gray)
+                })
         }
         8 => {
             let idx = row_offset + col;
             let palette_index = raw.get(idx).copied().unwrap_or(0) as usize;
-            palette.get(palette_index).copied().unwrap_or_else(|| {
-                let gray = palette_index as u32;
-                (gray << 16) | (gray << 8) | gray
-            })
+            palette
+                .get(palette_index)
+                .map(|color| GDI32::opaque_rgb(*color))
+                .unwrap_or_else(|| {
+                    let gray = palette_index as u32;
+                    GDI32::opaque_rgb((gray << 16) | (gray << 8) | gray)
+                })
         }
         16 => {
             let idx = row_offset + col * 2;
@@ -643,8 +707,12 @@ fn read_dib_pixel(
             let r = decode_masked_component(pixel, red_mask) as u32;
             let g = decode_masked_component(pixel, green_mask) as u32;
             let b = decode_masked_component(pixel, blue_mask) as u32;
-            let _a = decode_masked_component(pixel, alpha_mask);
-            (r << 16) | (g << 8) | b
+            let a = if alpha_mask == 0 {
+                0xFF
+            } else {
+                decode_masked_component(pixel, alpha_mask) as u32
+            };
+            (a << 24) | (r << 16) | (g << 8) | b
         }
         24 => {
             let idx = row_offset + col * 3;
@@ -654,7 +722,7 @@ fn read_dib_pixel(
             let b = raw[idx] as u32;
             let g = raw[idx + 1] as u32;
             let r = raw[idx + 2] as u32;
-            (r << 16) | (g << 8) | b
+            GDI32::opaque_rgb((r << 16) | (g << 8) | b)
         }
         32 => {
             let idx = row_offset + col * 4;
@@ -671,14 +739,18 @@ fn read_dib_pixel(
             let r = decode_masked_component(pixel, red_mask) as u32;
             let g = decode_masked_component(pixel, green_mask) as u32;
             let b = decode_masked_component(pixel, blue_mask) as u32;
-            let _a = decode_masked_component(pixel, alpha_mask);
-            (r << 16) | (g << 8) | b
+            let a = if alpha_mask == 0 {
+                0xFF
+            } else {
+                decode_masked_component(pixel, alpha_mask) as u32
+            };
+            (a << 24) | (r << 16) | (g << 8) | b
         }
         _ => 0,
     }
 }
 
-/// DIB 한 픽셀에 `0x00RRGGBB` 색상을 기록합니다.
+/// DIB 한 픽셀에 `0xAARRGGBB` 색상을 기록합니다.
 #[allow(clippy::too_many_arguments)]
 fn write_dib_pixel(
     raw: &mut [u8],
@@ -751,7 +823,7 @@ fn write_dib_pixel(
             let pixel = encode_masked_component(((color >> 16) & 0xFF) as u8, red_mask)
                 | encode_masked_component(((color >> 8) & 0xFF) as u8, green_mask)
                 | encode_masked_component((color & 0xFF) as u8, blue_mask)
-                | encode_masked_component(0xFF, alpha_mask);
+                | encode_masked_component(((color >> 24) & 0xFF) as u8, alpha_mask);
             raw[idx..idx + 2].copy_from_slice(&(pixel as u16).to_le_bytes());
         }
         24 => {
@@ -777,7 +849,7 @@ fn write_dib_pixel(
             let pixel = encode_masked_component(((color >> 16) & 0xFF) as u8, red_mask)
                 | encode_masked_component(((color >> 8) & 0xFF) as u8, green_mask)
                 | encode_masked_component((color & 0xFF) as u8, blue_mask)
-                | encode_masked_component(0xFF, alpha_mask);
+                | encode_masked_component(((color >> 24) & 0xFF) as u8, alpha_mask);
             raw[idx..idx + 4].copy_from_slice(&pixel.to_le_bytes());
         }
         _ => {}
@@ -786,14 +858,90 @@ fn write_dib_pixel(
 
 #[cfg(test)]
 mod tests {
-    use super::{dib_effective_stride, raw_dib_to_pixels};
+    use super::{GDI32, dib_effective_stride, raw_dib_to_pixels, write_dib_pixel};
+
+    #[test]
+    fn colorref_zero_alpha_is_treated_as_opaque() {
+        assert_eq!(GDI32::colorref_to_argb(0x0000_00FF), 0xFFFF_0000);
+    }
+
+    #[test]
+    fn colorref_nonzero_alpha_is_preserved() {
+        assert_eq!(GDI32::colorref_to_argb(0x8000_00FF), 0x80FF_0000);
+        assert_eq!(GDI32::argb_to_colorref(0x80FF_0000), 0x0000_00FF);
+    }
+
+    #[test]
+    fn source_over_blends_partial_alpha_over_opaque_destination() {
+        let blended = GDI32::blend_source_over(0xFF00_00FF, 0x80FF_0000);
+        assert_eq!(blended, 0xFF80_007F);
+    }
 
     #[test]
     fn paletted_8bpp_dib_is_decoded_with_palette() {
         let palette = vec![0x000000, 0x00FF0000, 0x0000FF00, 0x000000FF];
         let raw = vec![1u8, 2u8, 3u8, 0u8];
         let pixels = raw_dib_to_pixels(&raw, 4, 1, 4, 8, true, &palette, 0, 0, 0, 0);
-        assert_eq!(pixels, vec![0x00FF0000, 0x0000FF00, 0x000000FF, 0x000000]);
+        assert_eq!(pixels, vec![0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFF000000]);
+    }
+
+    #[test]
+    fn twenty_four_bpp_dib_is_decoded_as_opaque() {
+        let raw = vec![0x33, 0x22, 0x11, 0x00];
+        let pixels = raw_dib_to_pixels(&raw, 1, 1, 4, 24, true, &[], 0, 0, 0, 0);
+        assert_eq!(pixels, vec![0xFF11_2233]);
+    }
+
+    #[test]
+    fn thirty_two_bpp_dib_preserves_alpha() {
+        let raw = vec![0x33, 0x22, 0x11, 0x80];
+        let pixels = raw_dib_to_pixels(&raw, 1, 1, 4, 32, true, &[], 0, 0, 0, 0);
+        assert_eq!(pixels, vec![0x8011_2233]);
+    }
+
+    #[test]
+    fn explicit_alpha_bitfield_dib_preserves_alpha() {
+        let raw = vec![0x33, 0x22, 0x11, 0x80];
+        let pixels = raw_dib_to_pixels(
+            &raw,
+            1,
+            1,
+            4,
+            32,
+            true,
+            &[],
+            0x00FF_0000,
+            0x0000_FF00,
+            0x0000_00FF,
+            0xFF00_0000,
+        );
+        assert_eq!(pixels, vec![0x8011_2233]);
+    }
+
+    #[test]
+    fn bitfield_dib_without_alpha_mask_is_decoded_as_opaque() {
+        let raw = vec![0x33, 0x22, 0x11, 0x80];
+        let pixels = raw_dib_to_pixels(
+            &raw,
+            1,
+            1,
+            4,
+            32,
+            true,
+            &[],
+            0x00FF_0000,
+            0x0000_FF00,
+            0x0000_00FF,
+            0,
+        );
+        assert_eq!(pixels, vec![0xFF11_2233]);
+    }
+
+    #[test]
+    fn write_dib_pixel_preserves_alpha_for_32bpp() {
+        let mut raw = vec![0u8; 4];
+        write_dib_pixel(&mut raw, 0, 0, 0x8011_2233, 32, &[], 0, 0, 0, 0);
+        assert_eq!(raw, vec![0x33, 0x22, 0x11, 0x80]);
     }
 
     #[test]

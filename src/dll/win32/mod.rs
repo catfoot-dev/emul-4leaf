@@ -12,6 +12,7 @@ pub(crate) mod user32;
 mod winmm;
 mod ws2_32;
 
+pub(crate) use gdi32::GDI32;
 pub use types::*;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
         win32::{
             advapi32::ADVAPI32,
             comctl32::COMCTL32,
-            gdi32::{BPP, GDI32, aligned_stride},
+            gdi32::{BPP, aligned_stride},
             imm32::IMM32,
             kernel32::KERNEL32,
             msvcp60::MSVCP60,
@@ -431,6 +432,29 @@ impl Win32Context {
         thread_id
     }
 
+    /// UI 스레드에 메시지 박스 표시를 요청하고 응답을 기다립니다.
+    pub(crate) fn message_box(
+        &self,
+        owner_hwnd: u32,
+        caption: String,
+        text: String,
+        u_type: u32,
+    ) -> i32 {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.win_event
+            .lock()
+            .unwrap()
+            .send_ui_command(UiCommand::MessageBox {
+                owner_hwnd,
+                caption,
+                text,
+                u_type,
+                response_tx: tx,
+            });
+
+        rx.recv().unwrap_or(1)
+    }
+
     /// 에뮬레이터 호스트 스레드를 즉시 깨웁니다.
     pub(crate) fn unpark_emulator_thread(&self) {
         if let Ok(guard) = self.emu_thread.lock()
@@ -668,5 +692,37 @@ mod tests {
 
         let merged = ctx.alloc_heap_block(24).unwrap();
         assert_eq!(merged, first);
+    }
+
+    #[test]
+    fn message_box_releases_win_event_lock_while_waiting() {
+        let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+        let ctx = Win32Context::new(Some(ui_tx));
+        let ctx_for_ui = ctx.clone();
+
+        let responder = std::thread::spawn(move || {
+            let command = ui_rx.recv().expect("message box command");
+            match command {
+                UiCommand::MessageBox {
+                    owner_hwnd,
+                    caption,
+                    text,
+                    u_type,
+                    response_tx,
+                } => {
+                    assert_eq!(owner_hwnd, 0x1000);
+                    assert_eq!(caption, "caption");
+                    assert_eq!(text, "text");
+                    assert_eq!(u_type, 1);
+                    assert!(ctx_for_ui.win_event.try_lock().is_ok());
+                    response_tx.send(2).expect("message box response");
+                }
+                _ => panic!("unexpected UI command"),
+            }
+        });
+
+        let result = ctx.message_box(0x1000, "caption".into(), "text".into(), 1);
+        assert_eq!(result, 2);
+        responder.join().expect("responder thread");
     }
 }

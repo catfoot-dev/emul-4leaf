@@ -64,6 +64,8 @@ pub enum UiCommand {
         /// 가상 HWND 핸들
         hwnd: u32,
     },
+    /// 전체 UI 이벤트 루프 종료 요청
+    ExitApplication,
     /// 윈도우 표시 상태 변경 요청
     ShowWindow { hwnd: u32, visible: bool },
     /// 윈도우 위치/크기 변경 요청
@@ -95,6 +97,8 @@ pub enum UiCommand {
     },
     /// 메시지 박스 표시 요청 (동기 응답 채널 포함)
     MessageBox {
+        /// 부모/owner로 사용할 가상 HWND
+        owner_hwnd: u32,
         caption: String,
         text: String,
         u_type: u32,

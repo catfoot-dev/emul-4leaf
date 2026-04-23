@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::{
-    domain::control::{build_provisional_worldmap_stage_payload, build_worldmap_response},
+    domain::world::{build_provisional_worldmap_stage_payload, build_worldmap_response},
     protocol, run_dnet_handler,
     session::{
         SessionInfo, build_avatar_detail_data, build_avatar_dialog_bootstrap_payload,
@@ -180,7 +180,10 @@ fn avatar_dialog_bootstrap_payload_has_expected_layout() {
     assert_eq!(payload.len(), 0x431);
     assert_eq!(payload[0x39], 0);
     assert_eq!(payload[0x3a], 1);
-    assert_eq!(&payload[0x39 + 0x7c + 0x54..0x39 + 0x7c + 0x54 + 8], b"TestUser");
+    assert_eq!(
+        &payload[0x39 + 0x7c + 0x54..0x39 + 0x7c + 0x54 + 8],
+        b"TestUser"
+    );
 }
 
 #[test]
@@ -199,9 +202,11 @@ fn avatar_dialog_bootstrap_payload_supports_empty_avatar_slots() {
     assert_eq!(payload.len(), 0x431);
     assert_eq!(payload[0x39], 0);
     assert_eq!(payload[0x3a], 0);
-    assert!(payload[0x39 + 0x7c..0x39 + 0x7c + 0x80]
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        payload[0x39 + 0x7c..0x39 + 0x7c + 0x80]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
 }
 
 #[test]
@@ -224,16 +229,31 @@ fn login_response_streams_avatar_bootstrap_then_legacy_login_packet() {
         .send(protocol::create_auth_packet(1, 54, 1, b"test\0"))
         .unwrap();
 
-    let response_stream = from_handler_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let response_stream = from_handler_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
     assert!(response_stream.len() > 0x431);
 
     let first_len = u16::from_le_bytes([response_stream[2], response_stream[3]]) as usize;
-    assert_eq!(u32::from_le_bytes(response_stream[4..8].try_into().unwrap()), 54);
-    assert_eq!(u32::from_le_bytes(response_stream[8..12].try_into().unwrap()), 0);
+    assert_eq!(
+        u32::from_le_bytes(response_stream[4..8].try_into().unwrap()),
+        54
+    );
+    assert_eq!(
+        u32::from_le_bytes(response_stream[8..12].try_into().unwrap()),
+        0
+    );
     assert_eq!(first_len, 8 + 0x431);
 
     let second_offset = 4 + first_len;
-    assert_eq!(u16::from_le_bytes(response_stream[second_offset..second_offset + 2].try_into().unwrap()), 1);
+    assert_eq!(
+        u16::from_le_bytes(
+            response_stream[second_offset..second_offset + 2]
+                .try_into()
+                .unwrap()
+        ),
+        1
+    );
     let second_len = u16::from_le_bytes(
         response_stream[second_offset + 2..second_offset + 4]
             .try_into()

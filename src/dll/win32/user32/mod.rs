@@ -42,7 +42,7 @@ impl USER32 {
     const CREATE_STRUCT_A_LPSZ_CLASS_OFFSET: u64 = 40;
     const CREATE_STRUCT_A_EX_STYLE_OFFSET: u64 = 44;
     pub const FRAME_BORDER_WIDTH: i32 = 3;
-    pub const CAPTION_HEIGHT: i32 = 19;
+    pub const CAPTION_HEIGHT: i32 = 0; // 19;
     const WM_CREATE: u32 = 0x0001;
     const WM_NCCREATE: u32 = 0x0081;
     #[allow(dead_code)]
@@ -280,15 +280,23 @@ impl USER32 {
     /// 자식/팝업 창은 guest가 직접 외곽을 그리는 경우가 많으므로 제외하고,
     /// 일반 최상위 framed window만 네이티브 프레임 대상으로 취급합니다.
     pub(crate) fn should_use_native_frame(style: u32) -> bool {
-        const WS_CAPTION: u32 = 0x00C0_0000;
-        const WS_THICKFRAME: u32 = 0x0004_0000;
-        const WS_DLGFRAME: u32 = 0x0040_0000;
-        const WS_BORDER: u32 = 0x0080_0000;
+        // #[cfg(target_os = "macos")]
+        // {
+        //     false
+        // }
 
-        (style & WS_CAPTION) == WS_CAPTION
-            || (style & WS_THICKFRAME) != 0
-            || (style & WS_DLGFRAME) != 0
-            || (style & WS_BORDER) != 0
+        // #[cfg(not(target_os = "macos"))]
+        {
+            const WS_CAPTION: u32 = 0x00C0_0000;
+            const WS_THICKFRAME: u32 = 0x0004_0000;
+            const WS_DLGFRAME: u32 = 0x0040_0000;
+            const WS_BORDER: u32 = 0x0080_0000;
+
+            (style & WS_CAPTION) == WS_CAPTION
+                || (style & WS_THICKFRAME) != 0
+                || (style & WS_DLGFRAME) != 0
+                || (style & WS_BORDER) != 0
+        }
     }
 
     /// `CreateWindowExA`에 들어온 클래스 식별자를 사람이 읽을 수 있는 이름과 클래스 메타데이터로 풉니다.
@@ -454,7 +462,7 @@ impl USER32 {
     /// 클라이언트 inset을 구합니다. 리소스 아트 크기로 별도 보정하면 메시지 좌표계와
     /// 실제 child 배치 기준이 분리되므로 여기서는 일관된 Win32 기준만 사용합니다.
     pub(crate) fn get_window_frame_metrics(window: &WindowState) -> WindowFrameMetrics {
-        if window.use_native_frame {
+        if window.use_native_frame || window.zoomed {
             return WindowFrameMetrics::default();
         }
 
@@ -793,7 +801,7 @@ impl USER32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dll::win32::StackCleanup;
+    use crate::dll::win32::{GdiObject, StackCleanup};
     use crate::helper::UnicornHelper;
     use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
@@ -845,6 +853,7 @@ mod tests {
             guest_frame_top: 0,
             guest_frame_right: 0,
             guest_frame_bottom: 0,
+            guest_frame_exact: false,
             needs_paint: false,
             last_hittest_lparam: u32::MAX,
             last_hittest_result: 0,
@@ -1194,6 +1203,140 @@ mod tests {
         assert_eq!(metrics.top, 8);
         assert_eq!(metrics.right, 8);
         assert_eq!(metrics.bottom, 8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn set_window_rgn_keeps_exact_guest_frame_metrics() {
+        let mut uc = new_test_uc();
+        let hrgn = uc.get_data().alloc_handle();
+        uc.get_data().gdi_objects.lock().unwrap().insert(
+            hrgn,
+            GdiObject::Region {
+                rects: vec![
+                    (2, 0, 8, 1),
+                    (1, 1, 9, 2),
+                    (0, 2, 10, 8),
+                    (1, 8, 9, 9),
+                    (2, 9, 8, 10),
+                ],
+            },
+        );
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            let mut state = sample_window_state(0, false);
+            state.width = 10;
+            state.height = 10;
+            state.guest_frame_left = 12;
+            state.guest_frame_top = 8;
+            state.guest_frame_right = 12;
+            state.guest_frame_bottom = 8;
+            state.guest_frame_exact = true;
+            win_event.create_window(0x1000, state);
+        }
+        write_call_frame(&mut uc, &[0x1000, hrgn, 0]);
+
+        let result = window::set_window_rgn(&mut uc).expect("set_window_rgn result");
+
+        assert_eq!(result.return_value, Some(1));
+        let win_event = uc.get_data().win_event.lock().unwrap();
+        let window = win_event.windows.get(&0x1000).unwrap();
+        assert_eq!(window.window_rgn, hrgn);
+        assert_eq!(window.guest_frame_left, 12);
+        assert_eq!(window.guest_frame_top, 8);
+        assert_eq!(window.guest_frame_right, 12);
+        assert_eq!(window.guest_frame_bottom, 8);
+        assert!(window.guest_frame_exact);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn set_window_rgn_zero_clears_exact_guest_frame_metrics() {
+        let mut uc = new_test_uc();
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            let mut state = sample_window_state(0, false);
+            state.window_rgn = 0x3333;
+            state.guest_frame_left = 12;
+            state.guest_frame_top = 8;
+            state.guest_frame_right = 12;
+            state.guest_frame_bottom = 8;
+            state.guest_frame_exact = true;
+            win_event.create_window(0x1000, state);
+        }
+        write_call_frame(&mut uc, &[0x1000, 0, 0]);
+
+        let result = window::set_window_rgn(&mut uc).expect("set_window_rgn result");
+
+        assert_eq!(result.return_value, Some(1));
+        let win_event = uc.get_data().win_event.lock().unwrap();
+        let window = win_event.windows.get(&0x1000).unwrap();
+        assert_eq!(window.window_rgn, 0);
+        assert_eq!(window.guest_frame_left, 0);
+        assert_eq!(window.guest_frame_top, 0);
+        assert_eq!(window.guest_frame_right, 0);
+        assert_eq!(window.guest_frame_bottom, 0);
+        assert!(!window.guest_frame_exact);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn adjust_window_rect_ex_expands_client_rect_by_frame_metrics() {
+        let mut uc = new_test_uc();
+        let rect_ptr = uc.malloc(16) as u32;
+        uc.write_u32(rect_ptr as u64, 0);
+        uc.write_u32(rect_ptr as u64 + 4, 0);
+        uc.write_u32(rect_ptr as u64 + 8, 100);
+        uc.write_u32(rect_ptr as u64 + 12, 50);
+        write_call_frame(&mut uc, &[rect_ptr, 0x00C0_0000, 0, 0]);
+
+        let result = window::adjust_window_rect_ex(&mut uc).expect("adjust_window_rect_ex result");
+
+        assert_eq!(result.return_value, Some(1));
+        assert_eq!(uc.read_u32(rect_ptr as u64) as i32, -1);
+        assert_eq!(uc.read_u32(rect_ptr as u64 + 4) as i32, -20);
+        assert_eq!(uc.read_u32(rect_ptr as u64 + 8) as i32, 101);
+        assert_eq!(uc.read_u32(rect_ptr as u64 + 12) as i32, 51);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn get_client_rect_uses_exact_guest_frame_metrics() {
+        let mut uc = new_test_uc();
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            let mut state = sample_window_state(0, false);
+            state.width = 100;
+            state.height = 80;
+            state.guest_frame_left = 12;
+            state.guest_frame_top = 8;
+            state.guest_frame_right = 12;
+            state.guest_frame_bottom = 8;
+            state.guest_frame_exact = true;
+            win_event.create_window(0x1000, state);
+        }
+        let rect_ptr = uc.malloc(16) as u32;
+        write_call_frame(&mut uc, &[0x1000, rect_ptr]);
+
+        let result = window::get_client_rect(&mut uc).expect("get_client_rect result");
+
+        assert_eq!(result.return_value, Some(1));
+        assert_eq!(uc.read_u32(rect_ptr as u64), 0);
+        assert_eq!(uc.read_u32(rect_ptr as u64 + 4), 0);
+        assert_eq!(uc.read_u32(rect_ptr as u64 + 8), 76);
+        assert_eq!(uc.read_u32(rect_ptr as u64 + 12), 64);
     }
 
     #[test]

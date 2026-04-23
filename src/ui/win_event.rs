@@ -24,6 +24,9 @@ const SW_SHOWMINNOACTIVE: u32 = 7;
 const SW_SHOWNA: u32 = 8;
 const SW_RESTORE: u32 = 9;
 const SW_SHOWDEFAULT: u32 = 10;
+const WM_CLOSE: u32 = 0x0010;
+const WM_SYSCOMMAND: u32 = 0x0112;
+const SC_CLOSE: u32 = 0xF060;
 
 fn wake_ui_event_loop() {
     if let Some(proxy) = UI_WAKE_PROXY.get() {
@@ -42,9 +45,17 @@ pub struct WinEvent {
     ui_tx: Option<Sender<UiCommand>>,
     /// 윈도우 상태 변경 시 증가하는 세대 카운터 (paint 최적화용)
     pub generation: u64,
+    /// 첫 번째 최상위 guest 창 HWND
+    main_guest_hwnd: Option<u32>,
+    /// 메인 guest 창을 이미 한 번이라도 등록했는지 여부
+    main_guest_window_registered: bool,
 }
 
 impl WinEvent {
+    fn is_main_guest_window_candidate(state: &WindowState) -> bool {
+        state.parent == 0 && (state.style & WS_CHILD) == 0
+    }
+
     /// 지정된 창의 비클라이언트 inset을 USER32 규칙으로 계산합니다.
     fn window_frame_metrics(&self, hwnd: u32) -> Option<(i32, i32)> {
         let state = self.windows.get(&hwnd)?;
@@ -224,6 +235,8 @@ impl WinEvent {
             windows: HashMap::new(),
             ui_tx,
             generation: 0,
+            main_guest_hwnd: None,
+            main_guest_window_registered: false,
         }
     }
 
@@ -243,6 +256,10 @@ impl WinEvent {
 
     /// 새 윈도우 상태를 등록합니다.
     pub fn create_window(&mut self, hwnd: u32, state: WindowState) {
+        if !self.main_guest_window_registered && Self::is_main_guest_window_candidate(&state) {
+            self.main_guest_hwnd = Some(hwnd);
+            self.main_guest_window_registered = true;
+        }
         self.windows.insert(hwnd, state);
         self.bump_generation();
     }
@@ -300,6 +317,12 @@ impl WinEvent {
     /// 윈도우 파괴를 상태와 UI 양쪽에 반영합니다.
     pub fn destroy_window(&mut self, hwnd: u32) {
         let subtree = self.window_subtree_postorder(hwnd);
+        if self
+            .main_guest_hwnd
+            .is_some_and(|main_hwnd| subtree.contains(&main_hwnd))
+        {
+            self.main_guest_hwnd = None;
+        }
         for handle in &subtree {
             self.windows.remove(handle);
         }
@@ -323,6 +346,20 @@ impl WinEvent {
     /// 특정 핸들의 윈도우 상태를 가져옵니다.
     pub fn get_window_mut(&mut self, hwnd: u32) -> Option<&mut WindowState> {
         self.windows.get_mut(&hwnd)
+    }
+
+    /// guest가 메인 창 닫기 메시지를 소비했더라도 호스트 종료 fallback이 필요한지 판정합니다.
+    pub(crate) fn should_exit_after_guest_close_message(
+        &self,
+        hwnd: u32,
+        msg: u32,
+        w_param: u32,
+    ) -> bool {
+        if self.main_guest_hwnd != Some(hwnd) || !self.windows.contains_key(&hwnd) {
+            return false;
+        }
+
+        msg == WM_CLOSE || (msg == WM_SYSCOMMAND && (w_param & 0xFFF0) == SC_CLOSE)
     }
 
     /// 윈도우 표시 상태를 변경하고 subtree 전체의 실제 표시 상태를 동기화합니다.
@@ -561,19 +598,6 @@ impl WinEvent {
         self.send_ui_command(UiCommand::UpdateWindow { hwnd });
     }
 
-    /// 메시지 박스를 표시하고 응답을 대기합니다.
-    pub fn message_box(&mut self, caption: String, text: String, u_type: u32) -> i32 {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.send_ui_command(UiCommand::MessageBox {
-            caption,
-            text,
-            u_type,
-            response_tx: tx,
-        });
-
-        rx.recv().unwrap_or(1)
-    }
-
     /// 윈도우 표시 여부를 반환합니다.
     pub fn is_window_visible(&self, hwnd: u32) -> bool {
         self.windows.get(&hwnd).map(|w| w.visible).unwrap_or(false)
@@ -662,6 +686,7 @@ mod tests {
             guest_frame_top: 0,
             guest_frame_right: 0,
             guest_frame_bottom: 0,
+            guest_frame_exact: false,
             needs_paint: false,
             last_hittest_lparam: u32::MAX,
             last_hittest_result: 0,
@@ -1032,6 +1057,74 @@ mod tests {
 
         assert!(win_event.sync_host_window_position(0x1000, 500, 600));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn create_window_tracks_only_first_top_level_guest_window() {
+        let mut win_event = WinEvent::new(None);
+
+        win_event.create_window(0x1000, sample_window_state());
+
+        let mut child = sample_window_state();
+        child.parent = 0x1000;
+        child.style = WS_CHILD;
+        win_event.create_window(0x1001, child);
+
+        let popup = sample_window_state();
+        win_event.create_window(0x1002, popup);
+
+        assert_eq!(win_event.main_guest_hwnd, Some(0x1000));
+    }
+
+    #[test]
+    fn destroy_window_clears_tracked_main_guest_window() {
+        let mut win_event = WinEvent::new(None);
+
+        win_event.create_window(0x1000, sample_window_state());
+        win_event.create_window(0x1001, sample_window_state());
+
+        win_event.destroy_window(0x1000);
+
+        assert_eq!(win_event.main_guest_hwnd, None);
+    }
+
+    #[test]
+    fn later_top_level_window_does_not_replace_destroyed_main_guest_window() {
+        let mut win_event = WinEvent::new(None);
+
+        win_event.create_window(0x1000, sample_window_state());
+        win_event.destroy_window(0x1000);
+        win_event.create_window(0x1001, sample_window_state());
+
+        assert_eq!(win_event.main_guest_hwnd, None);
+    }
+
+    #[test]
+    fn main_guest_close_message_requests_exit_fallback() {
+        let mut win_event = WinEvent::new(None);
+        win_event.create_window(0x1000, sample_window_state());
+
+        assert!(win_event.should_exit_after_guest_close_message(0x1000, WM_SYSCOMMAND, SC_CLOSE));
+        assert!(win_event.should_exit_after_guest_close_message(0x1000, WM_CLOSE, 0));
+    }
+
+    #[test]
+    fn non_main_close_message_does_not_request_exit_fallback() {
+        let mut win_event = WinEvent::new(None);
+        win_event.create_window(0x1000, sample_window_state());
+
+        let mut child = sample_window_state();
+        child.parent = 0x1000;
+        child.style = WS_CHILD;
+        win_event.create_window(0x1001, child);
+        win_event.create_window(0x1002, sample_window_state());
+
+        assert!(!win_event.should_exit_after_guest_close_message(0x1001, WM_SYSCOMMAND, SC_CLOSE));
+        assert!(!win_event.should_exit_after_guest_close_message(0x1002, WM_SYSCOMMAND, SC_CLOSE));
+        assert!(!win_event.should_exit_after_guest_close_message(0x1000, WM_SYSCOMMAND, 0xF020));
+
+        win_event.destroy_window(0x1000);
+        assert!(!win_event.should_exit_after_guest_close_message(0x1000, WM_CLOSE, 0));
     }
 
     #[test]

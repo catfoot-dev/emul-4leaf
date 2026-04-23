@@ -154,6 +154,7 @@ pub enum GdiObject {
     Bitmap {
         width: u32,
         height: u32,
+        /// 내부 `0xAARRGGBB` 픽셀 버퍼입니다.
         pixels: Arc<Mutex<Vec<u32>>>,
         /// DIBSection용 에뮬레이터 힙 주소 (CreateDIBSection이 프로그램에 반환한 bits 포인터)
         bits_addr: Option<u32>,
@@ -387,6 +388,8 @@ pub struct WindowState {
     pub guest_frame_right: i32,
     /// guest가 직접 계산한 비클라이언트 하단 inset
     pub guest_frame_bottom: i32,
+    /// GDI 클립 영역에서 읽은 확정 guest 프레임인지 여부
+    pub guest_frame_exact: bool,
     /// 윈도우가 다시 그려져야 하는지 여부 (WM_PAINT 생성용)
     pub needs_paint: bool,
     /// WM_NCHITTEST 캐시: 마지막 테스트 좌표 (LPARAM 형식)

@@ -9,12 +9,17 @@ use unicorn_engine::Unicorn;
 use super::{BPP, GDI32, aligned_stride, dib_effective_stride, read_dib_header};
 
 fn apply_bitmap_rop(dst_val: u32, src_val: u32, rop: u32) -> u32 {
-    match rop {
-        0x008800C6 => (dst_val & src_val) & 0x00FF_FFFF,
-        0x00EE0086 => (dst_val | src_val) & 0x00FF_FFFF,
-        0x00660046 => (dst_val ^ src_val) & 0x00FF_FFFF,
-        _ => src_val & 0x00FF_FFFF,
-    }
+    let dst_rgb = dst_val & 0x00FF_FFFF;
+    let src_rgb = src_val & 0x00FF_FFFF;
+    let dst_alpha = dst_val & 0xFF00_0000;
+    let rgb = match rop {
+        0x008800C6 => dst_rgb & src_rgb,
+        0x00EE0086 => dst_rgb | src_rgb,
+        0x00660046 => dst_rgb ^ src_rgb,
+        0x00CC0020 => return GDI32::blend_source_over(dst_val, src_val),
+        _ => return GDI32::blend_source_over(dst_val, src_val),
+    };
+    dst_alpha | rgb
 }
 
 // API: HBITMAP CreateDIBSection(HDC hdc, const BITMAPINFO *pbmi, UINT usage, VOID **ppvBits, HANDLE hSection, DWORD offset)
@@ -298,9 +303,9 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                             continue;
                         }
 
-                        let src_val = sp[(sy * sw as i32 + sx) as usize] & 0x00FF_FFFF;
+                        let src_val = sp[(sy * sw as i32 + sx) as usize];
                         let dst_idx = (dy as u32 * dw + dx as u32) as usize;
-                        let dst_val = dp[dst_idx] & 0x00FF_FFFF;
+                        let dst_val = dp[dst_idx];
                         dp[dst_idx] = apply_bitmap_rop(dst_val, src_val, rop);
                     }
                 }
@@ -335,17 +340,13 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                     0x00F00021 => {
                         // PATCOPY
                         if let Some(GdiObject::Brush { color }) = gdi.get(selected_brush) {
-                            let b = *color >> 16 & 0xFF;
-                            let g = *color >> 8 & 0xFF;
-                            let r = *color & 0xFF;
-                            let color = (r << 16) | (g << 8) | b;
-                            Some(color)
+                            Some(*color)
                         } else {
-                            Some(0x00FFFFFF)
+                            Some(0xFFFF_FFFF)
                         }
                     }
-                    0x00000042 => Some(0x00000000), // BLACKNESS
-                    0x00FF0062 => Some(0x00FFFFFF), // WHITENESS
+                    0x00000042 => Some(0xFF00_0000), // BLACKNESS
+                    0x00FF0062 => Some(0xFFFF_FFFF), // WHITENESS
                     _ => None,
                 };
                 draw_params = Some((
@@ -370,10 +371,6 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                 ..
             }) = gdi.get(&hbmp)
             {
-                let b = color >> 16 & 0xFF;
-                let g = color >> 8 & 0xFF;
-                let r = color & 0xFF;
-                let color = (r << 16) | (g << 8) | b;
                 let width = *width;
                 let height = *height;
                 let mut pixels = pixels.lock().unwrap();
@@ -554,8 +551,8 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                     let src_idx = (sy * sw + sx) as usize;
                     let dst_idx = (dst_y as u32 * dw + dst_x as u32) as usize;
                     if src_idx < sp.len() && dst_idx < dp.len() {
-                        let src_val = sp[src_idx] & 0x00FF_FFFF;
-                        let dst_val = dp[dst_idx] & 0x00FF_FFFF;
+                        let src_val = sp[src_idx];
+                        let dst_val = dp[dst_idx];
                         dp[dst_idx] = apply_bitmap_rop(dst_val, src_val, rop);
                     }
                 }
@@ -569,17 +566,13 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                 match rop {
                     0x00F00021 => {
                         if let Some(GdiObject::Brush { color }) = gdi.get(selected_brush) {
-                            let b = *color >> 16 & 0xFF;
-                            let g = *color >> 8 & 0xFF;
-                            let r = *color & 0xFF;
-                            let color = (r << 16) | (g << 8) | b;
-                            Some(color)
+                            Some(*color)
                         } else {
-                            Some(0x00FFFFFF)
+                            Some(0xFFFF_FFFF)
                         }
                     }
-                    0x00000042 => Some(0x00000000),
-                    0x00FF0062 => Some(0x00FFFFFF),
+                    0x00000042 => Some(0xFF00_0000),
+                    0x00FF0062 => Some(0xFFFF_FFFF),
                     _ => None,
                 }
             } else {
@@ -595,10 +588,6 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                 ..
             }) = gdi.get(&hbmp_dest)
         {
-            let b = color >> 16 & 0xFF;
-            let g = color >> 8 & 0xFF;
-            let r = color & 0xFF;
-            let color = (r << 16) | (g << 8) | b;
             let (dw, dh) = (*dw, *dh);
             let mut dp = dp.lock().unwrap();
             for (left, top, right, bottom) in GDI32::intersect_rect_with_clip_rects(
@@ -760,7 +749,7 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
                     let src_idx = (sy * src_dw as i32 + sx) as usize;
                     let dst_idx = (dy as u32 * dw + dx as u32) as usize;
                     if src_idx < src_pixels.len() && dst_idx < dp.len() {
-                        dp[dst_idx] = src_pixels[src_idx];
+                        dp[dst_idx] = GDI32::blend_source_over(dp[dst_idx], src_pixels[src_idx]);
                     }
                 }
             }
@@ -910,12 +899,7 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
                         let dst_idx = (dst_y as u32 * dw + dst_x as u32) as usize;
                         if src_idx < src_pixels.len() && dst_idx < dp.len() {
                             let src_val = src_pixels[src_idx];
-                            match rop {
-                                0x008800C6 => dp[dst_idx] &= src_val, // SRCAND
-                                0x00EE0086 => dp[dst_idx] |= src_val, // SRCPAINT
-                                0x00660046 => dp[dst_idx] ^= src_val, // SRCINVERT
-                                _ => dp[dst_idx] = src_val,           // SRCCOPY
-                            }
+                            dp[dst_idx] = apply_bitmap_rop(dp[dst_idx], src_val, rop);
                         }
                     }
                 }
@@ -928,27 +912,19 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
                         let hdc = uc.read_arg(0);
                         if let Some(GdiObject::Dc { selected_brush, .. }) = gdi.get(&hdc) {
                             if let Some(GdiObject::Brush { color }) = gdi.get(selected_brush) {
-                                let b = *color >> 16 & 0xFF;
-                                let g = *color >> 8 & 0xFF;
-                                let r = *color & 0xFF;
-                                let color = (r << 16) | (g << 8) | b;
-                                Some(color)
+                                Some(*color)
                             } else {
-                                Some(0x00FFFFFF)
+                                Some(0xFFFF_FFFF)
                             }
                         } else {
-                            Some(0x00FFFFFF)
+                            Some(0xFFFF_FFFF)
                         }
                     }
-                    0x00000042 => Some(0x00000000),
-                    0x00FF0062 => Some(0x00FFFFFF),
+                    0x00000042 => Some(0xFF00_0000),
+                    0x00FF0062 => Some(0xFFFF_FFFF),
                     _ => None,
                 };
                 if let Some(color) = brush_color {
-                    let b = color >> 16 & 0xFF;
-                    let g = color >> 8 & 0xFF;
-                    let r = color & 0xFF;
-                    let color = (r << 16) | (g << 8) | b;
                     for (left, top, right, bottom) in GDI32::intersect_rect_with_clip_rects(
                         &clip_rects,
                         x_dest + origin_x,

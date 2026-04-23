@@ -1,6 +1,7 @@
 use std::thread;
 
 use goblin::pe::PE;
+use winit::platform::macos::WindowAttributesExtMacOS;
 
 pub fn load_splash_data(path: &std::path::Path) -> Option<(Vec<u32>, u32, u32)> {
     let exe_path = path.join("4Leaf.exe");
@@ -233,7 +234,9 @@ impl crate::ui::Painter for SplashPainter {
                 .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
                 .with_resizable(false)
                 .with_decorations(false)
-                .with_visible(true),
+                .with_visible(true)
+                .with_active(true)
+                .with_borderless_game(true),
         );
 
         let window = event_loop.create_window(attributes).unwrap();

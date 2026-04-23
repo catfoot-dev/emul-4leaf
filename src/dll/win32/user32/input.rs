@@ -458,7 +458,8 @@ pub(super) fn parse_cur_data(data: &[u8]) -> Option<CursorFrame> {
         let b = bmp_data[offset] as u32;
         let g = bmp_data[offset + 1] as u32;
         let r = bmp_data[offset + 2] as u32;
-        palette.push(0xFF00_0000 | (r << 16) | (g << 8) | b);
+        let a = bmp_data[offset + 3] as u32;
+        palette.push((a << 24) | (r << 16) | (g << 8) | b);
     }
 
     let xor_len = xor_stride.checked_mul(height as usize)?;

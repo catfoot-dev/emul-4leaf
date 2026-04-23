@@ -17,12 +17,9 @@ pub(super) fn message_box_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     let text = uc.read_euc_kr(text_addr as u64);
     let caption = uc.read_euc_kr(caption_addr as u64);
 
-    let result =
-        uc.get_data()
-            .win_event
-            .lock()
-            .unwrap()
-            .message_box(caption.clone(), text.clone(), u_type);
+    let result = uc
+        .get_data()
+        .message_box(hwnd, caption.clone(), text.clone(), u_type);
 
     crate::emu_log!(
         "[USER32] MessageBoxA({:#x}, \"{}\", \"{}\", {:#x}) -> int {:#x}",

@@ -11,6 +11,7 @@ const NULLREGION: i32 = 1;
 const SIMPLEREGION: i32 = 2;
 const COMPLEXREGION: i32 = 3;
 const ERROR: i32 = 0;
+const MAX_FRAME_INFERENCE_PIXELS: i64 = 4_000_000;
 type RectInterval = (i32, i32);
 type RectBand = (i32, i32, Vec<RectInterval>);
 
@@ -32,6 +33,134 @@ fn region_complexity(rects: &[(i32, i32, i32, i32)]) -> i32 {
         1 => SIMPLEREGION,
         _ => COMPLEXREGION,
     }
+}
+
+fn longest_empty_interval(row: &[bool]) -> Option<(i32, i32)> {
+    let mut best = None;
+    let mut best_width = 0usize;
+    let mut x = 0usize;
+
+    while x < row.len() {
+        if row[x] {
+            x += 1;
+            continue;
+        }
+
+        let start = x;
+        while x < row.len() && !row[x] {
+            x += 1;
+        }
+        let width = x - start;
+        if width > best_width {
+            best_width = width;
+            best = Some((start as i32, x as i32));
+        }
+    }
+
+    best
+}
+
+/// 창 전체 DC에 선택된 border 클립 영역에서 중앙 client 구멍을 추정합니다.
+fn infer_guest_frame_from_clip_rects(
+    width: i32,
+    height: i32,
+    rects: &[(i32, i32, i32, i32)],
+) -> Option<crate::dll::win32::user32::WindowFrameMetrics> {
+    if width <= 2 || height <= 2 || rects.is_empty() {
+        return None;
+    }
+
+    let area = i64::from(width) * i64::from(height);
+    if area <= 0 || area > MAX_FRAME_INFERENCE_PIXELS {
+        return None;
+    }
+
+    let width_usize = width as usize;
+    let height_usize = height as usize;
+    let mut occupied = vec![false; width_usize * height_usize];
+    let mut has_any_rect = false;
+
+    for &(left, top, right, bottom) in rects {
+        let Some((left, top, right, bottom)) = normalize_rect((
+            left.clamp(0, width),
+            top.clamp(0, height),
+            right.clamp(0, width),
+            bottom.clamp(0, height),
+        )) else {
+            continue;
+        };
+        has_any_rect = true;
+
+        for y in top as usize..bottom as usize {
+            let row_offset = y * width_usize;
+            for x in left as usize..right as usize {
+                occupied[row_offset + x] = true;
+            }
+        }
+    }
+
+    if !has_any_rect {
+        return None;
+    }
+
+    let mut groups = Vec::new();
+    let mut current: Option<(i32, i32, i32, i32)> = None;
+
+    for y in 0..height_usize {
+        let row = &occupied[y * width_usize..(y + 1) * width_usize];
+        let interval = longest_empty_interval(row)
+            .filter(|&(left, right)| left > 0 && right < width && left < right);
+
+        match (current.take(), interval) {
+            (Some((left, right, start_y, _)), Some((next_left, next_right)))
+                if left == next_left && right == next_right =>
+            {
+                current = Some((left, right, start_y, y as i32 + 1));
+            }
+            (Some(group), Some((next_left, next_right))) => {
+                groups.push(group);
+                current = Some((next_left, next_right, y as i32, y as i32 + 1));
+            }
+            (Some(group), None) => {
+                groups.push(group);
+                current = None;
+            }
+            (None, Some((next_left, next_right))) => {
+                current = Some((next_left, next_right, y as i32, y as i32 + 1));
+            }
+            (None, None) => {}
+        }
+    }
+
+    if let Some(group) = current {
+        groups.push(group);
+    }
+
+    let (left, right, top, bottom) = groups
+        .into_iter()
+        .filter(|&(left, right, top, bottom)| {
+            top > 0 && bottom < height && left > 0 && right < width && bottom > top
+        })
+        .max_by_key(|&(left, right, top, bottom)| (right - left) * (bottom - top))?;
+
+    let metrics = crate::dll::win32::user32::WindowFrameMetrics {
+        left,
+        top,
+        right: width - right,
+        bottom: height - bottom,
+    };
+
+    if metrics.left <= 0
+        || metrics.top <= 0
+        || metrics.right <= 0
+        || metrics.bottom <= 0
+        || metrics.left + metrics.right >= width
+        || metrics.top + metrics.bottom >= height
+    {
+        return None;
+    }
+
+    Some(metrics)
 }
 
 /// 사각형 집합을 정규형(canonical form)으로 변환합니다.
@@ -156,12 +285,8 @@ pub(super) fn set_bk_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResu
     if let Some(GdiObject::Dc { bk_color, .. }) =
         uc.get_data().gdi_objects.lock().unwrap().get_mut(&hdc)
     {
-        let b = color >> 16 & 0xFF;
-        let g = color >> 8 & 0xFF;
-        let r = color & 0xFF;
-        let color = (r << 16) | (g << 8) | b;
-        old_color = *bk_color;
-        *bk_color = color;
+        old_color = GDI32::argb_to_colorref(*bk_color);
+        *bk_color = GDI32::colorref_to_argb(color);
     }
     crate::emu_log!(
         "[GDI32] SetBkColor({:#x}, {:#x}) -> COLORREF {:#x}",
@@ -184,7 +309,7 @@ pub(super) fn get_bk_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResu
         .get(&hdc)
         .map(|obj| {
             if let GdiObject::Dc { bk_color, .. } = obj {
-                *bk_color
+                GDI32::argb_to_colorref(*bk_color)
             } else {
                 0x00FFFFFF
             }
@@ -203,12 +328,8 @@ pub(super) fn set_text_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
     if let Some(GdiObject::Dc { text_color, .. }) =
         uc.get_data().gdi_objects.lock().unwrap().get_mut(&hdc)
     {
-        let b = color >> 16 & 0xFF;
-        let g = color >> 8 & 0xFF;
-        let r = color & 0xFF;
-        let color = (r << 16) | (g << 8) | b;
-        old_color = *text_color;
-        *text_color = color;
+        old_color = GDI32::argb_to_colorref(*text_color);
+        *text_color = GDI32::colorref_to_argb(color);
     }
     crate::emu_log!(
         "[GDI32] SetTextColor({:#x}, {:#x}) -> COLORREF {:#x}",
@@ -231,7 +352,7 @@ pub(super) fn get_text_color(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         .get(&hdc)
         .map(|obj| {
             if let GdiObject::Dc { text_color, .. } = obj {
-                *text_color
+                GDI32::argb_to_colorref(*text_color)
             } else {
                 0
             }
@@ -250,10 +371,7 @@ pub(super) fn create_pen(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
     let ctx = uc.get_data();
     let hpen = ctx.alloc_handle();
     ctx.gdi_objects.lock().unwrap().insert(hpen, {
-        let b = color >> 16 & 0xFF;
-        let g = color >> 8 & 0xFF;
-        let r = color & 0xFF;
-        let color = (r << 16) | (g << 8) | b;
+        let color = GDI32::colorref_to_argb(color);
         GdiObject::Pen {
             style,
             width,
@@ -277,10 +395,7 @@ pub(super) fn create_solid_brush(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     let ctx = uc.get_data();
     let hbrush = ctx.alloc_handle();
     ctx.gdi_objects.lock().unwrap().insert(hbrush, {
-        let b = color >> 16 & 0xFF;
-        let g = color >> 8 & 0xFF;
-        let r = color & 0xFF;
-        let color = (r << 16) | (g << 8) | b;
+        let color = GDI32::colorref_to_argb(color);
         GdiObject::Brush { color }
     });
     crate::emu_log!(
@@ -324,13 +439,63 @@ pub(super) fn select_clip_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     let hrgn = uc.read_arg(1);
     let ctx = uc.get_data();
     let mut result = 0;
-    if let Some(GdiObject::Dc {
-        selected_region, ..
-    }) = ctx.gdi_objects.lock().unwrap().get_mut(&hdc)
+    let mut dc_info = None;
+    let region_rects;
     {
-        *selected_region = hrgn;
-        result = 1;
+        let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
+        region_rects = if hrgn != 0 {
+            match gdi_objects.get(&hrgn) {
+                Some(GdiObject::Region { rects }) => Some(rects.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(GdiObject::Dc {
+            associated_window,
+            width,
+            height,
+            origin_x,
+            origin_y,
+            selected_region,
+            ..
+        }) = gdi_objects.get_mut(&hdc)
+        {
+            *selected_region = hrgn;
+            result = region_rects
+                .as_deref()
+                .map(region_complexity)
+                .unwrap_or(SIMPLEREGION);
+            dc_info = Some((*associated_window, *width, *height, *origin_x, *origin_y));
+        }
     }
+
+    if let (Some((hwnd, width, height, 0, 0)), Some(rects)) = (dc_info, region_rects)
+        && hwnd != 0
+        && let Some(metrics) = infer_guest_frame_from_clip_rects(width, height, &rects)
+    {
+        let mut win_event = ctx.win_event.lock().unwrap();
+        if let Some(window) = win_event.windows.get_mut(&hwnd) {
+            let changed = !window.use_native_frame
+                && (window.guest_frame_left != metrics.left
+                    || window.guest_frame_top != metrics.top
+                    || window.guest_frame_right != metrics.right
+                    || window.guest_frame_bottom != metrics.bottom
+                    || !window.guest_frame_exact);
+
+            if changed {
+                window.guest_frame_left = metrics.left;
+                window.guest_frame_top = metrics.top;
+                window.guest_frame_right = metrics.right;
+                window.guest_frame_bottom = metrics.bottom;
+                window.guest_frame_exact = true;
+                window.last_hittest_lparam = u32::MAX;
+                win_event.bump_generation();
+            }
+        }
+    }
+
     crate::emu_log!(
         "[GDI32] SelectClipRgn({:#x}, {:#x}) -> int {:#x}",
         hdc,
@@ -848,11 +1013,7 @@ pub(super) fn get_pixel(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
         let pixels = pixels.lock().unwrap();
         if x >= 0 && x < *width as i32 && y >= 0 && y < *height as i32 {
             let p = pixels[(y as u32 * *width + x as u32) as usize];
-            // 0x00RRGGBB -> 0x00BBGGRR (COLORREF)
-            let r = (p >> 16) & 0xFF;
-            let g = (p >> 8) & 0xFF;
-            let b = p & 0xFF;
-            color = (b << 16) | (g << 8) | r;
+            color = GDI32::argb_to_colorref(p);
         }
     }
 
@@ -910,17 +1071,8 @@ pub(super) fn set_pixel(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
             if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
                 let idx = (y as u32 * width + x as u32) as usize;
                 let p = pixels[idx];
-                // 0x00RRGGBB -> 0x00BBGGRR
-                let r = (p >> 16) & 0xFF;
-                let g = (p >> 8) & 0xFF;
-                let b = p & 0xFF;
-                old_cr = (b << 16) | (g << 8) | r;
-
-                // 0x00BBGGRR -> 0x00RRGGBB
-                let nr = cr & 0xFF;
-                let ng = (cr >> 8) & 0xFF;
-                let nb = (cr >> 16) & 0xFF;
-                pixels[idx] = (nr << 16) | (ng << 8) | nb;
+                old_cr = GDI32::argb_to_colorref(p);
+                pixels[idx] = GDI32::blend_source_over(p, GDI32::colorref_to_argb(cr));
             }
             drop(pixels);
             drop(gdi);
@@ -987,16 +1139,16 @@ pub(super) fn pat_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                 if let Some(GdiObject::Brush { color }) = gdi.get(&hbrush) {
                     brush_color = Some(*color);
                 } else {
-                    brush_color = Some(0x00FFFFFF);
+                    brush_color = Some(0xFFFF_FFFF);
                 }
             }
             0x00000042 => {
                 // BLACKNESS: 검정색으로 채움
-                brush_color = Some(0x00000000);
+                brush_color = Some(0xFF00_0000);
             }
             0x00FF0062 => {
                 // WHITENESS: 흰색으로 채움
-                brush_color = Some(0x00FFFFFF);
+                brush_color = Some(0xFFFF_FFFF);
             }
             _ => {
                 crate::emu_log!("[GDI32] PatBlt unhandled ROP: {:#x}", rop);
@@ -1059,7 +1211,107 @@ pub(super) fn pat_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_rects;
+    use super::{canonicalize_rects, infer_guest_frame_from_clip_rects, select_clip_rgn};
+    use crate::dll::win32::{GdiObject, Win32Context, WindowState};
+    use crate::helper::UnicornHelper;
+    use unicorn_engine::{Arch, Mode, RegisterX86, Unicorn};
+
+    fn new_test_uc() -> Unicorn<'static, Win32Context> {
+        let mut uc =
+            Unicorn::new_with_data(Arch::X86, Mode::MODE_32, Win32Context::new(None)).unwrap();
+        uc.setup(None, None).unwrap();
+        uc
+    }
+
+    fn write_call_frame(uc: &mut Unicorn<Win32Context>, args: &[u32]) {
+        let esp = uc.reg_read(RegisterX86::ESP).unwrap() as u32;
+        uc.write_u32(esp as u64, 0xDEAD_BEEF);
+        for (index, value) in args.iter().enumerate() {
+            uc.write_u32(esp as u64 + 4 + (index as u64 * 4), *value);
+        }
+    }
+
+    fn sample_window_state(width: i32, height: i32) -> WindowState {
+        WindowState {
+            class_name: "TEST".to_string(),
+            class_icon: 0,
+            big_icon: 0,
+            small_icon: 0,
+            class_hbr_background: 0,
+            title: "test".to_string(),
+            x: 0,
+            y: 0,
+            width,
+            height,
+            style: 0,
+            ex_style: 0,
+            owner_thread_id: 0,
+            parent: 0,
+            id: 0,
+            visible: true,
+            enabled: true,
+            zoomed: false,
+            iconic: false,
+            wnd_proc: 0,
+            class_cursor: 0,
+            user_data: 0,
+            use_native_frame: false,
+            surface_bitmap: 0,
+            window_rgn: 0,
+            guest_frame_left: 0,
+            guest_frame_top: 0,
+            guest_frame_right: 0,
+            guest_frame_bottom: 0,
+            guest_frame_exact: false,
+            needs_paint: false,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order: 0,
+        }
+    }
+
+    fn insert_dc(
+        ctx: &Win32Context,
+        hwnd: u32,
+        width: i32,
+        height: i32,
+        origin_x: i32,
+        origin_y: i32,
+    ) -> u32 {
+        let hdc = ctx.alloc_handle();
+        ctx.gdi_objects.lock().unwrap().insert(
+            hdc,
+            GdiObject::Dc {
+                associated_window: hwnd,
+                width,
+                height,
+                origin_x,
+                origin_y,
+                selected_bitmap: 0,
+                selected_font: 0,
+                selected_brush: 0,
+                selected_pen: 0,
+                selected_region: 0,
+                selected_palette: 0,
+                bk_mode: 2,
+                bk_color: 0,
+                text_color: 0,
+                rop2_mode: 13,
+                current_x: 0,
+                current_y: 0,
+            },
+        );
+        hdc
+    }
+
+    fn insert_region(ctx: &Win32Context, rects: Vec<(i32, i32, i32, i32)>) -> u32 {
+        let hrgn = ctx.alloc_handle();
+        ctx.gdi_objects
+            .lock()
+            .unwrap()
+            .insert(hrgn, GdiObject::Region { rects });
+        hrgn
+    }
 
     #[test]
     fn canonicalize_empty_input_returns_empty() {
@@ -1167,5 +1419,106 @@ mod tests {
         let shape_a = vec![(0, 0, 10, 4), (0, 4, 4, 10)];
         let shape_b = vec![(0, 0, 10, 2), (0, 2, 10, 4), (0, 4, 4, 10)];
         assert_eq!(canonicalize_rects(&shape_a), canonicalize_rects(&shape_b));
+    }
+
+    #[test]
+    fn infer_guest_frame_from_border_shell_clip() {
+        let rects = vec![
+            (0, 0, 100, 8),
+            (0, 8, 12, 72),
+            (88, 8, 100, 72),
+            (0, 72, 100, 80),
+        ];
+
+        let metrics = infer_guest_frame_from_clip_rects(100, 80, &rects).unwrap();
+
+        assert_eq!(metrics.left, 12);
+        assert_eq!(metrics.top, 8);
+        assert_eq!(metrics.right, 12);
+        assert_eq!(metrics.bottom, 8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn select_clip_rgn_updates_window_dc_guest_frame() {
+        let mut uc = new_test_uc();
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state(100, 80));
+        }
+        let hdc = insert_dc(uc.get_data(), 0x1000, 100, 80, 0, 0);
+        let hrgn = insert_region(
+            uc.get_data(),
+            vec![
+                (0, 0, 100, 8),
+                (0, 8, 12, 72),
+                (88, 8, 100, 72),
+                (0, 72, 100, 80),
+            ],
+        );
+        write_call_frame(&mut uc, &[hdc, hrgn]);
+
+        let result = select_clip_rgn(&mut uc).expect("select_clip_rgn result");
+
+        assert_eq!(result.return_value, Some(3));
+        let win_event = uc.get_data().win_event.lock().unwrap();
+        let window = win_event.windows.get(&0x1000).unwrap();
+        assert_eq!(window.guest_frame_left, 12);
+        assert_eq!(window.guest_frame_top, 8);
+        assert_eq!(window.guest_frame_right, 12);
+        assert_eq!(window.guest_frame_bottom, 8);
+        assert!(window.guest_frame_exact);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn select_clip_rgn_ignores_client_origin_dc() {
+        let mut uc = new_test_uc();
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state(100, 80));
+        }
+        let hdc = insert_dc(uc.get_data(), 0x1000, 88, 72, 12, 8);
+        let hrgn = insert_region(uc.get_data(), vec![(0, 0, 88, 72)]);
+        write_call_frame(&mut uc, &[hdc, hrgn]);
+
+        let _ = select_clip_rgn(&mut uc).expect("select_clip_rgn result");
+
+        let win_event = uc.get_data().win_event.lock().unwrap();
+        let window = win_event.windows.get(&0x1000).unwrap();
+        assert!(!window.guest_frame_exact);
+        assert_eq!(window.guest_frame_left, 0);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn select_clip_rgn_ignores_memory_dc_without_window() {
+        let mut uc = new_test_uc();
+        {
+            let mut win_event = uc.get_data().win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state(100, 80));
+        }
+        let hdc = insert_dc(uc.get_data(), 0, 100, 80, 0, 0);
+        let hrgn = insert_region(
+            uc.get_data(),
+            vec![(0, 0, 100, 8), (0, 8, 12, 72), (88, 8, 100, 72)],
+        );
+        write_call_frame(&mut uc, &[hdc, hrgn]);
+
+        let _ = select_clip_rgn(&mut uc).expect("select_clip_rgn result");
+
+        let win_event = uc.get_data().win_event.lock().unwrap();
+        let window = win_event.windows.get(&0x1000).unwrap();
+        assert!(!window.guest_frame_exact);
+        assert_eq!(window.guest_frame_top, 0);
     }
 }

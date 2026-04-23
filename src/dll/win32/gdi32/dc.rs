@@ -56,8 +56,8 @@ pub(super) fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<Api
             selected_region: 0,
             selected_palette: 0,
             bk_mode: 1, // TRANSPARENT(1) or OPAQUE(2)
-            bk_color: 0x00FFFFFF,
-            text_color: 0x00000000,
+            bk_color: 0xFFFF_FFFF,
+            text_color: 0xFF00_0000,
             rop2_mode: 13, // R2_COPYPEN
             current_x: 0,
             current_y: 0,

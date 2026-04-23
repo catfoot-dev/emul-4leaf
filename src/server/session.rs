@@ -46,10 +46,10 @@ pub(crate) fn build_default_session(user_id: &str) -> SessionInfo {
     SessionInfo {
         user_id: user_id.to_string(),
         nickname,
-        character: 0,
+        character: 1,
         gp: 1000,
         fp: 0,
-        has_avatar: true,
+        has_avatar: false,
     }
 }
 

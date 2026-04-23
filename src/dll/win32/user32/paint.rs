@@ -16,26 +16,26 @@ const DKGRAY_BRUSH: u32 = 3;
 const BLACK_BRUSH: u32 = 4;
 const NULL_BRUSH: u32 = 5;
 const OPAQUE: i32 = 2;
-const DEFAULT_BK_COLOR: u32 = 0x00FF_FFFF;
-const DEFAULT_TEXT_COLOR: u32 = 0x0000_0000;
+const DEFAULT_BK_COLOR: u32 = 0xFFFF_FFFF;
+const DEFAULT_TEXT_COLOR: u32 = 0xFF00_0000;
 const R2_COPYPEN: i32 = 13;
 
 fn system_color_to_rgb(index: u32) -> u32 {
     match index {
-        5 => 0x00FF_FFFF,  // COLOR_WINDOW
-        8 => 0x0000_0000,  // COLOR_WINDOWTEXT
-        15 => 0x00C0_C0C0, // COLOR_BTNFACE
-        _ => 0x00C0_C0C0,
+        5 => 0xFFFF_FFFF,  // COLOR_WINDOW
+        8 => 0xFF00_0000,  // COLOR_WINDOWTEXT
+        15 => 0xFFC0_C0C0, // COLOR_BTNFACE
+        _ => 0xFFC0_C0C0,
     }
 }
 
 fn stock_brush_to_rgb(index: u32) -> Option<u32> {
     match index {
-        WHITE_BRUSH => Some(0x00FF_FFFF),
-        LTGRAY_BRUSH => Some(0x00C0_C0C0),
-        GRAY_BRUSH => Some(0x0080_8080),
-        DKGRAY_BRUSH => Some(0x0040_4040),
-        BLACK_BRUSH => Some(0x0000_0000),
+        WHITE_BRUSH => Some(0xFFFF_FFFF),
+        LTGRAY_BRUSH => Some(0xFFC0_C0C0),
+        GRAY_BRUSH => Some(0xFF80_8080),
+        DKGRAY_BRUSH => Some(0xFF40_4040),
+        BLACK_BRUSH => Some(0xFF00_0000),
         NULL_BRUSH => None,
         _ => None,
     }
@@ -924,6 +924,7 @@ mod tests {
             guest_frame_top: 0,
             guest_frame_right: 0,
             guest_frame_bottom: 0,
+            guest_frame_exact: false,
             needs_paint: false,
             last_hittest_lparam: u32::MAX,
             last_hittest_result: 0,

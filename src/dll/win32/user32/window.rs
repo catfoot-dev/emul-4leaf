@@ -9,6 +9,8 @@ use unicorn_engine::{RegisterX86, Unicorn};
 
 use super::USER32;
 
+const WS_CHILD: u32 = 0x4000_0000;
+
 fn estimate_guest_frame_metrics(
     ctx: &Win32Context,
     h_rgn: u32,
@@ -72,6 +74,64 @@ fn estimate_guest_frame_metrics(
         right: inset,
         bottom: inset,
     }
+}
+
+/// 지정된 후보 창이 owner 체인을 따라 `owner_hwnd`의 팝업에 속하는지 판정합니다.
+fn popup_owned_by(
+    windows: &std::collections::HashMap<u32, WindowState>,
+    owner_hwnd: u32,
+    candidate_hwnd: u32,
+) -> bool {
+    let mut current = candidate_hwnd;
+
+    for _ in 0..=windows.len() {
+        let Some(state) = windows.get(&current) else {
+            return false;
+        };
+
+        if (state.style & WS_CHILD) != 0 || state.parent == 0 {
+            return false;
+        }
+
+        if state.parent == owner_hwnd {
+            return true;
+        }
+
+        current = state.parent;
+    }
+
+    false
+}
+
+/// 현재 포커스/활성 owner 체인을 기준으로 마지막 활성 팝업 HWND를 계산합니다.
+fn resolve_last_active_popup(ctx: &Win32Context, hwnd: u32) -> u32 {
+    let focus_hwnd = ctx.focus_hwnd.load(Ordering::SeqCst);
+    let active_hwnd = ctx.active_hwnd.load(Ordering::SeqCst);
+    let win_event = ctx.win_event.lock().unwrap();
+
+    if !win_event.windows.contains_key(&hwnd) {
+        return 0;
+    }
+
+    for candidate in [focus_hwnd, active_hwnd] {
+        if candidate != 0 && popup_owned_by(&win_event.windows, hwnd, candidate) {
+            return candidate;
+        }
+    }
+
+    win_event
+        .windows
+        .iter()
+        .filter(|(candidate_hwnd, state)| {
+            **candidate_hwnd != hwnd
+                && state.visible
+                && state.enabled
+                && state.parent == hwnd
+                && (state.style & WS_CHILD) == 0
+        })
+        .max_by_key(|(candidate_hwnd, state)| (state.z_order, **candidate_hwnd))
+        .map(|(candidate_hwnd, _)| *candidate_hwnd)
+        .unwrap_or(hwnd)
 }
 
 // API: HWND CreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
@@ -170,6 +230,7 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         guest_frame_top: 0,
         guest_frame_right: 0,
         guest_frame_bottom: 0,
+        guest_frame_exact: false,
         needs_paint: true,
         last_hittest_lparam: u32::MAX,
         last_hittest_result: 0,
@@ -599,10 +660,18 @@ pub(super) fn adjust_window_rect_ex(uc: &mut Unicorn<Win32Context>) -> Option<Ap
     let right = uc.read_u32(rect_addr as u64 + 8) as i32;
     let bottom = uc.read_u32(rect_addr as u64 + 12) as i32;
 
-    uc.write_u32(rect_addr as u64, left as u32);
-    uc.write_u32(rect_addr as u64 + 4, top as u32);
-    uc.write_u32(rect_addr as u64 + 8, right as u32);
-    uc.write_u32(rect_addr as u64 + 12, bottom as u32);
+    let (border_width, border_height, caption_height) =
+        USER32::get_window_frame_size(style, ex_style);
+    let menu_height = if menu != 0 { USER32::CAPTION_HEIGHT } else { 0 };
+    let adjusted_left = left - border_width;
+    let adjusted_top = top - border_height - caption_height - menu_height;
+    let adjusted_right = right + border_width;
+    let adjusted_bottom = bottom + border_height;
+
+    uc.write_u32(rect_addr as u64, adjusted_left as u32);
+    uc.write_u32(rect_addr as u64 + 4, adjusted_top as u32);
+    uc.write_u32(rect_addr as u64 + 8, adjusted_right as u32);
+    uc.write_u32(rect_addr as u64 + 12, adjusted_bottom as u32);
 
     crate::emu_log!(
         "[USER32] AdjustWindowRectEx({:#x}, {:#x}, {}, {:#x}) -> BOOL 1",
@@ -767,17 +836,10 @@ pub(super) fn set_foreground_window(uc: &mut Unicorn<Win32Context>) -> Option<Ap
 
 // API: HWND GetLastActivePopup(HWND hWnd)
 // 역할: 지정된 창에서 마지막으로 활성화된 팝업 창을 확인
-// 구현 생략 사유: 다중 창 환경의 포커스 관리용. 팝업 창을 사용하지 않으므로 무시함.
 pub(super) fn get_last_active_popup(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hwnd = uc.read_arg(0);
-    // 에뮬레이터에서는 활성 팝업을 별도로 추적하지 않으므로, 윈도우가 존재하면 해당 윈도우를 반환
     let ctx = uc.get_data();
-    let win_event = ctx.win_event.lock().unwrap();
-    let ret = if win_event.windows.contains_key(&hwnd) {
-        hwnd
-    } else {
-        0
-    };
+    let ret = resolve_last_active_popup(ctx, hwnd);
     crate::emu_log!(
         "[USER32] GetLastActivePopup({:#x}) -> HWND {:#x}",
         hwnd,
@@ -973,10 +1035,18 @@ pub(super) fn set_window_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         let had_rgn = win.window_rgn != 0;
         let has_rgn = h_rgn != 0;
         win.window_rgn = h_rgn;
-        win.guest_frame_left = guest_metrics.left;
-        win.guest_frame_top = guest_metrics.top;
-        win.guest_frame_right = guest_metrics.right;
-        win.guest_frame_bottom = guest_metrics.bottom;
+        if !has_rgn {
+            win.guest_frame_left = 0;
+            win.guest_frame_top = 0;
+            win.guest_frame_right = 0;
+            win.guest_frame_bottom = 0;
+            win.guest_frame_exact = false;
+        } else if !win.guest_frame_exact {
+            win.guest_frame_left = guest_metrics.left;
+            win.guest_frame_top = guest_metrics.top;
+            win.guest_frame_right = guest_metrics.right;
+            win.guest_frame_bottom = guest_metrics.bottom;
+        }
         win_event.bump_generation();
         if had_rgn != has_rgn {
             win_event.send_ui_command(crate::ui::UiCommand::SetWindowTransparent {
@@ -1074,8 +1144,48 @@ pub(super) fn get_focus(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
 
 #[cfg(test)]
 mod tests {
-    use super::estimate_guest_frame_metrics;
-    use crate::dll::win32::{GdiObject, Win32Context};
+    use super::{estimate_guest_frame_metrics, resolve_last_active_popup};
+    use crate::dll::win32::{GdiObject, Win32Context, WindowState};
+    use std::sync::atomic::Ordering;
+
+    fn sample_window_state(style: u32) -> WindowState {
+        WindowState {
+            class_name: "TEST".to_string(),
+            class_icon: 0,
+            big_icon: 0,
+            small_icon: 0,
+            class_hbr_background: 0,
+            title: "test".to_string(),
+            x: 100,
+            y: 50,
+            width: 200,
+            height: 120,
+            style,
+            ex_style: 0,
+            owner_thread_id: 0,
+            parent: 0,
+            id: 0,
+            visible: true,
+            enabled: true,
+            zoomed: false,
+            iconic: false,
+            wnd_proc: 0,
+            class_cursor: 0,
+            user_data: 0,
+            use_native_frame: false,
+            surface_bitmap: 0,
+            window_rgn: 0,
+            guest_frame_left: 0,
+            guest_frame_top: 0,
+            guest_frame_right: 0,
+            guest_frame_bottom: 0,
+            guest_frame_exact: false,
+            needs_paint: false,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order: 0,
+        }
+    }
 
     #[test]
     fn rounded_region_produces_uniform_guest_frame_inset() {
@@ -1100,5 +1210,48 @@ mod tests {
         assert_eq!(metrics.top, 2);
         assert_eq!(metrics.right, 2);
         assert_eq!(metrics.bottom, 2);
+    }
+
+    #[test]
+    fn last_active_popup_prefers_focused_owned_popup() {
+        let ctx = Win32Context::new(None);
+        let root = 0x1000;
+        let popup = 0x1001;
+
+        let mut win_event = ctx.win_event.lock().unwrap();
+        let root_state = sample_window_state(0);
+        let mut popup_state = sample_window_state(0x8000_0000);
+        popup_state.parent = root;
+        popup_state.z_order = 1;
+        win_event.create_window(root, root_state);
+        win_event.create_window(popup, popup_state);
+        drop(win_event);
+
+        ctx.focus_hwnd.store(popup, Ordering::SeqCst);
+        assert_eq!(resolve_last_active_popup(&ctx, root), popup);
+    }
+
+    #[test]
+    fn last_active_popup_returns_nested_active_popup() {
+        let ctx = Win32Context::new(None);
+        let root = 0x1000;
+        let popup = 0x1001;
+        let nested_popup = 0x1002;
+
+        let mut win_event = ctx.win_event.lock().unwrap();
+        let root_state = sample_window_state(0);
+        let mut popup_state = sample_window_state(0x8000_0000);
+        popup_state.parent = root;
+        popup_state.z_order = 1;
+        let mut nested_popup_state = sample_window_state(0x8000_0000);
+        nested_popup_state.parent = popup;
+        nested_popup_state.z_order = 2;
+        win_event.create_window(root, root_state);
+        win_event.create_window(popup, popup_state);
+        win_event.create_window(nested_popup, nested_popup_state);
+        drop(win_event);
+
+        ctx.active_hwnd.store(nested_popup, Ordering::SeqCst);
+        assert_eq!(resolve_last_active_popup(&ctx, root), nested_popup);
     }
 }

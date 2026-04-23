@@ -1,13 +1,16 @@
 use crate::{
     dll::win32::{GdiObject, Win32Context},
-    ui::{Painter, UiCommand, WindowPositionMode, apply_platform_window_attributes},
+    ui::{Painter, UiCommand, WindowPositionMode},
 };
-use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use rfd::{AsyncMessageDialog, MessageButtons, MessageDialogResult, MessageLevel};
 use softbuffer::{Context as SoftContext, Surface};
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     num::NonZeroU32,
-    sync::mpsc::Receiver,
+    pin::Pin,
+    sync::{Arc, mpsc::Receiver},
+    task::{Context, Poll, Wake, Waker},
 };
 #[cfg(target_os = "windows")]
 use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
@@ -78,7 +81,7 @@ impl HostWindowStyle {
         let framing_bits = WS_CAPTION | WS_BORDER | WS_DLGFRAME | WS_THICKFRAME;
         let is_shaped_popup = (style & WS_POPUP) != 0 && (style & framing_bits) == 0;
         let decorations = use_native_frame && (style & WS_CAPTION) != 0;
-        let resizable = use_native_frame && (style & WS_THICKFRAME) != 0;
+        let resizable = (style & WS_THICKFRAME) != 0;
         let transparent = (ex_style & WS_EX_LAYERED) != 0 || is_shaped_popup;
         let topmost = (ex_style & WS_EX_TOPMOST) != 0;
         #[cfg(target_os = "windows")]
@@ -143,6 +146,23 @@ enum CursorAction {
     Default,
 }
 
+/// 비동기 메시지 박스 완료를 기다리는 상태입니다.
+struct PendingMessageDialog {
+    /// `rfd`가 반환한 완료 future입니다.
+    future: Pin<Box<dyn Future<Output = MessageDialogResult> + Send>>,
+    /// guest 쪽 대기자에게 결과를 돌려줄 채널입니다.
+    response_tx: std::sync::mpsc::Sender<i32>,
+}
+
+/// 비동기 dialog 완료 시 UI 이벤트 루프를 다시 깨우는 waker입니다.
+struct UiEventLoopWake;
+
+impl Wake for UiEventLoopWake {
+    fn wake(self: Arc<Self>) {
+        crate::ui::win_event::WinEvent::notify_wakeup();
+    }
+}
+
 /// 윈도우 애플리케이션 핸들러
 /// 모든 winit 윈도우와 Painter를 관리함
 pub struct WinFrame {
@@ -160,6 +180,8 @@ pub struct WinFrame {
     hwnd_native_frame: HashMap<u32, bool>,
     /// 첫 번째 게스트 최상위 창 HWND
     main_guest_hwnd: Option<u32>,
+    /// 메인 게스트 창을 이미 한 번이라도 등록했는지 여부
+    main_guest_window_registered: bool,
 
     /// softbuffer 컨텍스트
     sb_context: Option<SoftContext<DisplayHandle<'static>>>,
@@ -183,6 +205,8 @@ pub struct WinFrame {
     last_cursor_moved: Option<(u32, std::time::Instant)>,
     /// 마지막으로 게스트에게 전송된 마우스 좌표 (윈도우별 스로틀링 누락 감지용)
     last_sent_mouse_pos: Option<(u32, u32, u32)>,
+    /// UI 스레드에 떠 있는 비동기 메시지 박스 목록
+    pending_message_dialogs: Vec<PendingMessageDialog>,
 }
 
 impl WinFrame {
@@ -223,47 +247,12 @@ impl WinFrame {
             .collect()
     }
 
-    fn activation_hwnds_in_order(&self, root_hwnd: u32) -> Vec<u32> {
-        fn collect(
-            windows: &HashMap<u32, crate::dll::win32::WindowState>,
-            hwnd: u32,
-            out: &mut Vec<u32>,
-        ) {
-            let Some(_) = windows.get(&hwnd) else {
-                return;
-            };
-
-            out.push(hwnd);
-
-            let mut children = windows
-                .iter()
-                .filter_map(|(&child_hwnd, state)| {
-                    (state.parent == hwnd).then_some((child_hwnd, state.z_order))
-                })
-                .collect::<Vec<_>>();
-            children.sort_unstable_by_key(|&(child_hwnd, z_order)| (z_order, child_hwnd));
-
-            for (child_hwnd, _) in children {
-                collect(windows, child_hwnd, out);
-            }
-        }
-
-        let windows = {
-            let win_event = self.emu_context.win_event.lock().unwrap();
-            win_event.windows.clone()
-        };
-        let mut order = Vec::new();
-        collect(&windows, root_hwnd, &mut order);
-        order
-    }
-
+    /// guest가 지정한 대상 창 하나에만 실제 호스트 포커스를 요청합니다.
     fn activate_window_tree(&self, root_hwnd: u32) {
-        for hwnd in self.activation_hwnds_in_order(root_hwnd) {
-            if let Some(id) = self.hwnd_to_id.get(&hwnd)
-                && let Some(window) = self.get_window(id)
-            {
-                window.focus_window();
-            }
+        if let Some(id) = self.hwnd_to_id.get(&root_hwnd)
+            && let Some(window) = self.get_window(id)
+        {
+            window.focus_window();
         }
     }
 
@@ -277,49 +266,115 @@ impl WinFrame {
         }
     }
 
-    fn apply_host_parent_link(
+    fn generate_window_attributes(
         &self,
-        mut attributes: WindowAttributes,
+        hwnd: u32,
+        title: String,
+        x: i32,
+        y: i32,
+        position_mode: WindowPositionMode,
+        width: u32,
+        height: u32,
         parent: u32,
+        visible: bool,
         style: u32,
+        ex_style: u32,
+        use_native_frame: bool,
     ) -> WindowAttributes {
-        let host_parent_link = Self::host_parent_link(parent, style);
-        if host_parent_link == HostParentLink::None {
-            return attributes;
+        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
+
+        let class_icon = {
+            let win_event = self.emu_context.win_event.lock().unwrap();
+            win_event.windows.get(&hwnd).map(|state| {
+                if state.small_icon != 0 {
+                    state.small_icon
+                } else if state.big_icon != 0 {
+                    state.big_icon
+                } else {
+                    state.class_icon
+                }
+            })
+        }
+        .unwrap_or(0);
+
+        let mut attributes = Window::default_attributes()
+            // 게스트가 다루는 좌표계는 픽셀 기반이므로 backing store 크기와 1:1로 맞춥니다.
+            .with_active(true)
+            .with_inner_size(PhysicalSize::new(width, height))
+            .with_min_inner_size(PhysicalSize::new(width, height))
+            .with_resizable(host_style.resizable)
+            .with_title(title)
+            .with_transparent(host_style.transparent)
+            .with_visible(visible)
+            .with_window_icon(self.host_window_icon(class_icon))
+            .with_window_level(host_style.window_level());
+
+        if x != CW_USEDEFAULT && y != CW_USEDEFAULT {
+            let position = winit::dpi::PhysicalPosition::new(x, y);
+            attributes = match position_mode {
+                WindowPositionMode::Screen | WindowPositionMode::ParentClient => {
+                    attributes.with_position(position)
+                }
+            };
         }
 
-        let Some(parent_id) = self.hwnd_to_id.get(&parent) else {
-            return attributes;
-        };
-        let Some(parent_window) = self.get_window(parent_id) else {
-            return attributes;
-        };
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
+
+            attributes = attributes
+                .with_borderless_game(true)
+                // .with_decorations(false)
+                .with_fullsize_content_view(true)
+                .with_option_as_alt(OptionAsAlt::Both)
+                .with_title_hidden(true)
+                .with_titlebar_buttons_hidden(true)
+                .with_titlebar_transparent(true);
+        }
 
         #[cfg(target_os = "windows")]
         {
-            if let Ok(parent_handle) = parent_window.window_handle() {
-                let raw = parent_handle.as_raw();
-                match host_parent_link {
-                    HostParentLink::None => return attributes,
-                    HostParentLink::Child => {
-                        return unsafe { attributes.with_parent_window(Some(raw)) };
-                    }
-                    HostParentLink::Owner => {
-                        if let RawWindowHandle::Win32(handle) = raw {
-                            return attributes.with_owner_window(handle.hwnd.get() as _);
+            // 툴 윈도우/레이어드 윈도우 같은 Win32 확장 스타일을 가능한 범위에서 반영합니다.
+            attributes = attributes
+                .with_skip_taskbar(host_style.skip_taskbar)
+                .with_undecorated_shadow(!host_style.decorations && !host_style.transparent);
+        }
+
+        let parent_id = if Self::host_parent_link(parent, style) != HostParentLink::None {
+            self.hwnd_to_id.get(&parent)
+        } else {
+            None
+        };
+        if parent_id.is_some() {
+            let parent_window = self.get_window(parent_id.unwrap()).unwrap();
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Ok(parent_handle) = parent_window.window_handle() {
+                    return unsafe { attributes.with_parent_window(Some(parent_handle.as_raw())) };
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                if let Ok(parent_handle) = parent_window.window_handle() {
+                    let raw = parent_handle.as_raw();
+                    match host_parent_link {
+                        HostParentLink::None => return attributes,
+                        HostParentLink::Child => {
+                            return unsafe { attributes.with_parent_window(Some(raw)) };
+                        }
+                        HostParentLink::Owner => {
+                            if let RawWindowHandle::Win32(handle) = raw {
+                                return attributes.with_owner_window(handle.hwnd.get() as _);
+                            }
                         }
                     }
                 }
             }
         }
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            if let Ok(parent_handle) = parent_window.window_handle() {
-                attributes = unsafe { attributes.with_parent_window(Some(parent_handle.as_raw())) };
-            }
-        }
-
+        #[allow(unreachable_code)]
         attributes
     }
 
@@ -336,6 +391,7 @@ impl WinFrame {
             id_to_hwnd: HashMap::new(),
             hwnd_native_frame: HashMap::new(),
             main_guest_hwnd: None,
+            main_guest_window_registered: false,
             sb_context: None,
             emu_context: context,
             initial_painters,
@@ -346,6 +402,7 @@ impl WinFrame {
             window_cursor_cache: HashMap::new(),
             last_cursor_moved: None,
             last_sent_mouse_pos: None,
+            pending_message_dialogs: Vec::new(),
         }
     }
 
@@ -355,8 +412,9 @@ impl WinFrame {
 
     /// 첫 번째 게스트 최상위 창을 메인 창으로 기록합니다.
     fn register_main_guest_window(&mut self, hwnd: u32, style: u32) {
-        if (style & WS_CHILD) == 0 && self.main_guest_hwnd.is_none() {
+        if (style & WS_CHILD) == 0 && !self.main_guest_window_registered {
             self.main_guest_hwnd = Some(hwnd);
+            self.main_guest_window_registered = true;
         }
     }
 
@@ -672,32 +730,6 @@ impl WinFrame {
         self.emu_context.queue_message_for_window(hwnd, message)
     }
 
-    fn apply_guest_window_attributes(
-        mut attributes: WindowAttributes,
-        style: u32,
-        ex_style: u32,
-        use_native_frame: bool,
-    ) -> WindowAttributes {
-        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
-
-        attributes = attributes
-            .with_decorations(false)
-            .with_resizable(host_style.resizable)
-            .with_enabled_buttons(WindowButtons::empty())
-            .with_transparent(host_style.transparent)
-            .with_window_level(host_style.window_level());
-
-        #[cfg(target_os = "windows")]
-        {
-            // 툴 윈도우/레이어드 윈도우 같은 Win32 확장 스타일을 가능한 범위에서 반영합니다.
-            attributes = attributes
-                .with_skip_taskbar(host_style.skip_taskbar)
-                .with_undecorated_shadow(!host_style.decorations && !host_style.transparent);
-        }
-
-        attributes
-    }
-
     fn apply_guest_window_style(
         window: &Window,
         style: u32,
@@ -716,6 +748,85 @@ impl WinFrame {
         {
             window.set_skip_taskbar(host_style.skip_taskbar);
             window.set_undecorated_shadow(!host_style.decorations && !host_style.transparent);
+        }
+    }
+
+    /// `rfd` 결과를 Win32 `MessageBoxA` 반환값으로 변환합니다.
+    fn message_dialog_result_to_win32(result: MessageDialogResult) -> i32 {
+        match result {
+            MessageDialogResult::Ok => 1,
+            MessageDialogResult::Cancel => 2,
+            MessageDialogResult::Yes => 6,
+            MessageDialogResult::No => 7,
+            MessageDialogResult::Custom(_) => 1,
+        }
+    }
+
+    /// 비동기 메시지 박스를 생성하고 완료 future를 추적 목록에 추가합니다.
+    fn queue_message_dialog(
+        &mut self,
+        owner_hwnd: u32,
+        caption: String,
+        text: String,
+        u_type: u32,
+        response_tx: std::sync::mpsc::Sender<i32>,
+    ) {
+        let mut dialog = AsyncMessageDialog::new()
+            .set_title(&caption)
+            .set_description(&text);
+
+        if (u_type & 0x10) != 0 {
+            dialog = dialog.set_level(MessageLevel::Error);
+        } else if (u_type & 0x30) == 0x30 {
+            dialog = dialog.set_level(MessageLevel::Warning);
+        } else if (u_type & 0x40) != 0 {
+            dialog = dialog.set_level(MessageLevel::Info);
+        }
+
+        let buttons = match u_type & 0xF {
+            1 => MessageButtons::OkCancel,
+            3 => MessageButtons::YesNoCancel,
+            4 => MessageButtons::YesNo,
+            _ => MessageButtons::Ok,
+        };
+        dialog = dialog.set_buttons(buttons);
+
+        if owner_hwnd != 0
+            && let Some(id) = self.hwnd_to_id.get(&owner_hwnd)
+            && let Some(window) = self.get_window(id)
+        {
+            dialog = dialog.set_parent(window);
+        }
+
+        let future: Pin<Box<dyn Future<Output = MessageDialogResult> + Send>> =
+            Box::pin(dialog.show());
+        self.pending_message_dialogs.push(PendingMessageDialog {
+            future,
+            response_tx,
+        });
+    }
+
+    /// 완료된 비동기 메시지 박스를 수거하고 guest 쪽 대기자에게 결과를 전달합니다.
+    fn poll_pending_message_dialogs(&mut self) {
+        if self.pending_message_dialogs.is_empty() {
+            return;
+        }
+
+        let waker = Waker::from(Arc::new(UiEventLoopWake));
+        let mut cx = Context::from_waker(&waker);
+        let mut completed = Vec::new();
+
+        for (index, pending) in self.pending_message_dialogs.iter_mut().enumerate() {
+            if let Poll::Ready(result) = pending.future.as_mut().poll(&mut cx) {
+                let _ = pending
+                    .response_tx
+                    .send(Self::message_dialog_result_to_win32(result));
+                completed.push(index);
+            }
+        }
+
+        for index in completed.into_iter().rev() {
+            self.pending_message_dialogs.swap_remove(index);
         }
     }
 
@@ -741,46 +852,20 @@ impl WinFrame {
                     surface_bitmap,
                     ..
                 } => {
-                    let mut attributes = Window::default_attributes()
-                        // 게스트가 다루는 좌표계는 픽셀 기반이므로 backing store 크기와 1:1로 맞춥니다.
-                        .with_title(title)
-                        .with_inner_size(PhysicalSize::new(width, height))
-                        .with_min_inner_size(PhysicalSize::new(width, height))
-                        .with_visible(visible);
-                    attributes = apply_platform_window_attributes(attributes);
-                    attributes = self.apply_host_parent_link(attributes, parent, style);
-
-                    let class_icon = {
-                        let win_event = self.emu_context.win_event.lock().unwrap();
-                        win_event.windows.get(&hwnd).map(|state| {
-                            if state.small_icon != 0 {
-                                state.small_icon
-                            } else if state.big_icon != 0 {
-                                state.big_icon
-                            } else {
-                                state.class_icon
-                            }
-                        })
-                    }
-                    .unwrap_or(0);
-                    attributes = attributes.with_window_icon(self.host_window_icon(class_icon));
-
-                    if x != CW_USEDEFAULT && y != CW_USEDEFAULT {
-                        let position = winit::dpi::PhysicalPosition::new(x, y);
-                        attributes = match position_mode {
-                            WindowPositionMode::Screen | WindowPositionMode::ParentClient => {
-                                attributes.with_position(position)
-                            }
-                        };
-                    }
-
-                    attributes = Self::apply_guest_window_attributes(
-                        attributes,
+                    let attributes = self.generate_window_attributes(
+                        hwnd,
+                        title,
+                        x,
+                        y,
+                        position_mode,
+                        width,
+                        height,
+                        parent,
+                        visible,
                         style,
                         ex_style,
                         use_native_frame,
                     );
-
                     let window = event_loop.create_window(attributes).unwrap();
                     // IME(한글 등 조합 문자)를 입력받기 위해 활성화합니다.
                     window.set_ime_allowed(true);
@@ -841,6 +926,10 @@ impl WinFrame {
                     if should_exit {
                         event_loop.exit();
                     }
+                }
+
+                UiCommand::ExitApplication => {
+                    event_loop.exit();
                 }
 
                 UiCommand::ShowWindow { hwnd, visible } => {
@@ -930,40 +1019,14 @@ impl WinFrame {
                 }
 
                 UiCommand::MessageBox {
+                    owner_hwnd,
                     caption,
                     text,
                     u_type,
                     response_tx,
                 } => {
-                    let mut dialog = MessageDialog::new()
-                        .set_title(&caption)
-                        .set_description(&text);
-
-                    if (u_type & 0x10) != 0 {
-                        dialog = dialog.set_level(MessageLevel::Error);
-                    } else if (u_type & 0x30) == 0x30 {
-                        dialog = dialog.set_level(MessageLevel::Warning);
-                    } else if (u_type & 0x40) != 0 {
-                        dialog = dialog.set_level(MessageLevel::Info);
-                    }
-
-                    let buttons = match u_type & 0xF {
-                        1 => MessageButtons::OkCancel,
-                        3 => MessageButtons::YesNoCancel,
-                        4 => MessageButtons::YesNo,
-                        _ => MessageButtons::Ok,
-                    };
-                    dialog = dialog.set_buttons(buttons);
-
-                    let result = dialog.show();
-                    let win_result = match result {
-                        MessageDialogResult::Ok => 1,
-                        MessageDialogResult::Cancel => 2,
-                        MessageDialogResult::Yes => 6,
-                        MessageDialogResult::No => 7,
-                        _ => 1,
-                    };
-                    let _ = response_tx.send(win_result);
+                    let _ = event_loop;
+                    self.queue_message_dialog(owner_hwnd, caption, text, u_type, response_tx);
                 }
 
                 UiCommand::DragWindow { hwnd } => {
@@ -1109,11 +1172,18 @@ impl WinFrame {
             anim.interval.saturating_sub(elapsed)
         });
 
-        match (painter_interval, cursor_interval) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        let dialog_interval = (!self.pending_message_dialogs.is_empty())
+            .then_some(std::time::Duration::from_millis(16));
+
+        match (painter_interval, cursor_interval, dialog_interval) {
+            (Some(a), Some(b), Some(c)) => Some(a.min(b).min(c)),
+            (Some(a), Some(b), None) => Some(a.min(b)),
+            (Some(a), None, Some(c)) => Some(a.min(c)),
+            (None, Some(b), Some(c)) => Some(b.min(c)),
+            (Some(a), None, None) => Some(a),
+            (None, Some(b), None) => Some(b),
+            (None, None, Some(c)) => Some(c),
+            (None, None, None) => None,
         }
     }
 }
@@ -1158,6 +1228,7 @@ impl ApplicationHandler<()> for WinFrame {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut dirty_windows = self.process_ui_commands(event_loop);
+        self.poll_pending_message_dialogs();
 
         // 커서 애니메이션 프레임 전환 체크
         self.tick_cursor_animation(event_loop);
@@ -1778,6 +1849,7 @@ mod tests {
             guest_frame_top: 0,
             guest_frame_right: 0,
             guest_frame_bottom: 0,
+            guest_frame_exact: false,
             needs_paint: false,
             last_hittest_lparam: u32::MAX,
             last_hittest_result: 0,
@@ -1787,25 +1859,6 @@ mod tests {
 
     fn dummy_window_id(raw: u64) -> WindowId {
         WindowId::from(raw)
-    }
-
-    #[test]
-    fn activation_order_visits_children_from_lower_z_to_higher_z() {
-        let (_tx, rx) = std::sync::mpsc::channel();
-        let context = Win32Context::new(None);
-        {
-            let mut win_event = context.win_event.lock().unwrap();
-            win_event.create_window(0x1000, sample_window_state(0, 0));
-            win_event.create_window(0x1001, sample_window_state(0x1000, 2));
-            win_event.create_window(0x1002, sample_window_state(0x1000, 1));
-            win_event.create_window(0x1003, sample_window_state(0x1002, 0));
-        }
-
-        let frame = WinFrame::new(rx, Vec::new(), context);
-        assert_eq!(
-            frame.activation_hwnds_in_order(0x1000),
-            vec![0x1000, 0x1002, 0x1003, 0x1001]
-        );
     }
 
     #[test]

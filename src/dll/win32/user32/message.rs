@@ -37,6 +37,26 @@ fn earlier_deadline(left: Option<Instant>, right: Option<Instant>) -> Option<Ins
     }
 }
 
+fn request_main_window_exit_fallback(ctx: &Win32Context, hwnd: u32, msg: u32, w_param: u32) {
+    let should_exit = {
+        let win_event = ctx.win_event.lock().unwrap();
+        win_event.should_exit_after_guest_close_message(hwnd, msg, w_param)
+    };
+
+    if should_exit {
+        crate::emu_log!(
+            "[USER32] DispatchMessageA fallback exit requested for main HWND {:#x} msg={:#x} wParam={:#x}",
+            hwnd,
+            msg,
+            w_param
+        );
+        ctx.win_event
+            .lock()
+            .unwrap()
+            .send_ui_command(crate::ui::UiCommand::ExitApplication);
+    }
+}
+
 // API: LRESULT SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 // 역할: 지정된 창에 메시지를 전송하고 처리가 완료될 때까지 대기
 pub(super) fn send_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -190,6 +210,7 @@ pub(super) fn dispatch_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     };
 
     let ret = USER32::dispatch_to_wndproc(uc, wnd_proc, hwnd, msg, w_param, l_param);
+    request_main_window_exit_fallback(uc.get_data(), hwnd, msg, w_param);
 
     Some(ApiHookResult::callee(1, Some(ret)))
 }
@@ -230,6 +251,49 @@ pub(super) fn translate_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        dll::win32::{Win32Context, WindowState},
+        ui::UiCommand,
+    };
+
+    fn sample_window_state() -> WindowState {
+        WindowState {
+            class_name: "TEST".to_string(),
+            class_icon: 0,
+            big_icon: 0,
+            small_icon: 0,
+            class_hbr_background: 0,
+            title: "test".to_string(),
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+            style: 0,
+            ex_style: 0,
+            owner_thread_id: 0,
+            parent: 0,
+            id: 0,
+            visible: true,
+            enabled: true,
+            zoomed: false,
+            iconic: false,
+            wnd_proc: 0,
+            class_cursor: 0,
+            user_data: 0,
+            use_native_frame: false,
+            surface_bitmap: 0,
+            window_rgn: 0,
+            guest_frame_left: 0,
+            guest_frame_top: 0,
+            guest_frame_right: 0,
+            guest_frame_bottom: 0,
+            guest_frame_exact: false,
+            needs_paint: false,
+            last_hittest_lparam: u32::MAX,
+            last_hittest_result: 0,
+            z_order: 0,
+        }
+    }
 
     #[test]
     fn printable_lowercase_vk_is_translated_to_char() {
@@ -239,6 +303,46 @@ mod tests {
     #[test]
     fn printable_symbol_vk_is_translated_to_char() {
         assert_eq!(translated_char_from_vk('!' as u32), Some('!' as u32));
+    }
+
+    #[test]
+    fn main_guest_close_fallback_sends_exit_command() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = Win32Context::new(Some(tx));
+        ctx.win_event
+            .lock()
+            .unwrap()
+            .create_window(0x1000, sample_window_state());
+
+        request_main_window_exit_fallback(&ctx, 0x1000, 0x0112, 0xF060);
+
+        match rx.try_recv().expect("exit command") {
+            UiCommand::ExitApplication => {}
+            _ => panic!("expected ExitApplication"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn non_main_or_destroyed_close_fallback_does_not_send_exit_command() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = Win32Context::new(Some(tx));
+        {
+            let mut win_event = ctx.win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state());
+            win_event.create_window(0x1001, sample_window_state());
+            win_event.destroy_window(0x1000);
+        }
+
+        match rx.try_recv().expect("destroy command") {
+            UiCommand::DestroyWindow { hwnd } => assert_eq!(hwnd, 0x1000),
+            _ => panic!("expected DestroyWindow"),
+        }
+
+        request_main_window_exit_fallback(&ctx, 0x1001, 0x0112, 0xF060);
+        request_main_window_exit_fallback(&ctx, 0x1000, 0x0010, 0);
+
+        assert!(rx.try_recv().is_err());
     }
 }
 
@@ -1059,17 +1163,16 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
             if w_param == 0x50000 {
                 let id = (l_param & 0xFFFF) as u16;
                 match id {
-                    0x9090 => {
-                        // MINIMIZE
-                        uc.get_data()
-                            .win_event
-                            .lock()
-                            .unwrap()
-                            .minimize_window(hwnd);
-                    }
-                    0xc2c8 => {
+                    // 0x9090 => {
+                    //     // MINIMIZE
+                    //     uc.get_data()
+                    //         .win_event
+                    //         .lock()
+                    //         .unwrap()
+                    //         .minimize_window(hwnd);
+                    // }
+                    0xc2c8 | 0x2ddc => {
                         // CLOSE
-                        // uc.get_data().win_event.lock().unwrap().close_window(hwnd);
                         let ctx = uc.get_data();
                         USER32::destroy_window_tree(ctx, hwnd);
                     }

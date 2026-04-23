@@ -1,6 +1,8 @@
 use rusttype::{Font as TtfFont, Scale, point};
 use std::sync::OnceLock;
 
+use crate::dll::win32::GDI32;
+
 static GDI_FONT: OnceLock<TtfFont<'static>> = OnceLock::new();
 
 /// 글로벌 TTF 폰트를 초기화하고 반환합니다.
@@ -17,6 +19,15 @@ pub struct GdiRenderer;
 
 #[allow(dead_code, clippy::too_many_arguments)]
 impl GdiRenderer {
+    fn glyph_color(color: u32, coverage: u8) -> u32 {
+        let alpha = ((color >> 24) & 0xFF) * u32::from(coverage);
+        (((alpha + 127) / 255) << 24) | (color & 0x00FF_FFFF)
+    }
+
+    fn put_pixel(pixels: &mut [u32], idx: usize, color: u32) {
+        pixels[idx] = GDI32::blend_source_over(pixels[idx], color);
+    }
+
     /// 좌표가 클리핑 사각형 목록 안에 포함되는지 확인합니다.
     pub(crate) fn point_in_clip_rects(clip_rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> bool {
         clip_rects
@@ -45,7 +56,8 @@ impl GdiRenderer {
 
         loop {
             if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
-                pixels[(y * width as i32 + x) as usize] = color;
+                let idx = (y * width as i32 + x) as usize;
+                Self::put_pixel(pixels, idx, color);
             }
 
             if x == x2 && y == y2 {
@@ -91,7 +103,8 @@ impl GdiRenderer {
                 && y < height as i32
                 && Self::point_in_clip_rects(clip_rects, x, y)
             {
-                pixels[(y * width as i32 + x) as usize] = color;
+                let idx = (y * width as i32 + x) as usize;
+                Self::put_pixel(pixels, idx, color);
             }
 
             if x == x2 && y == y2 {
@@ -131,7 +144,8 @@ impl GdiRenderer {
         if let Some(color) = brush_color {
             for y in y_start..y_end {
                 for x in x_start..x_end {
-                    pixels[(y * width as i32 + x) as usize] = color;
+                    let idx = (y * width as i32 + x) as usize;
+                    Self::put_pixel(pixels, idx, color);
                 }
             }
         }
@@ -141,19 +155,23 @@ impl GdiRenderer {
             // 상/하
             for x in x_start..x_end {
                 if top >= 0 && top < height as i32 {
-                    pixels[(top * width as i32 + x) as usize] = color;
+                    let idx = (top * width as i32 + x) as usize;
+                    Self::put_pixel(pixels, idx, color);
                 }
                 if bottom > 0 && bottom - 1 < height as i32 {
-                    pixels[((bottom - 1) * width as i32 + x) as usize] = color;
+                    let idx = ((bottom - 1) * width as i32 + x) as usize;
+                    Self::put_pixel(pixels, idx, color);
                 }
             }
             // 좌/우
             for y in y_start..y_end {
                 if left >= 0 && left < width as i32 {
-                    pixels[(y * width as i32 + left) as usize] = color;
+                    let idx = (y * width as i32 + left) as usize;
+                    Self::put_pixel(pixels, idx, color);
                 }
                 if right > 0 && right - 1 < width as i32 {
-                    pixels[(y * width as i32 + (right - 1)) as usize] = color;
+                    let idx = (y * width as i32 + (right - 1)) as usize;
+                    Self::put_pixel(pixels, idx, color);
                 }
             }
         }
@@ -268,22 +286,25 @@ impl GdiRenderer {
                 match rop {
                     0x008800C6 => {
                         // SRCAND: dst = dst & src
-                        dest_pixels[dst_idx] &= src_val;
+                        let rgb = (dest_pixels[dst_idx] & src_val) & 0x00FF_FFFF;
+                        dest_pixels[dst_idx] = (dest_pixels[dst_idx] & 0xFF00_0000) | rgb;
                     }
                     0x00EE0086 => {
                         // SRCPAINT: dst = dst | src
-                        dest_pixels[dst_idx] |= src_val;
+                        let rgb = (dest_pixels[dst_idx] | src_val) & 0x00FF_FFFF;
+                        dest_pixels[dst_idx] = (dest_pixels[dst_idx] & 0xFF00_0000) | rgb;
                     }
                     0x00660046 => {
                         // SRCINVERT: dst = dst ^ src
-                        dest_pixels[dst_idx] ^= src_val;
+                        let rgb = (dest_pixels[dst_idx] ^ src_val) & 0x00FF_FFFF;
+                        dest_pixels[dst_idx] = (dest_pixels[dst_idx] & 0xFF00_0000) | rgb;
                     }
                     0x00CC0020 => {
-                        // SRCCOPY: dst = src
-                        dest_pixels[dst_idx] = src_val;
+                        // SRCCOPY: source-over 알파 합성
+                        Self::put_pixel(dest_pixels, dst_idx, src_val);
                     }
                     _ => {
-                        dest_pixels[dst_idx] = src_val;
+                        Self::put_pixel(dest_pixels, dst_idx, src_val);
                     }
                 }
             }
@@ -311,10 +332,6 @@ impl GdiRenderer {
 
         let glyphs: Vec<_> = font.layout(text, scale, offset).collect();
 
-        let fg_r = ((color >> 16) & 0xFF) as u16;
-        let fg_g = ((color >> 8) & 0xFF) as u16;
-        let fg_b = (color & 0xFF) as u16;
-
         if let Some(bg_color) = bg_color {
             let bg_left = x.max(0);
             let bg_top = y.max(0);
@@ -323,7 +340,8 @@ impl GdiRenderer {
 
             for py in bg_top..bg_bottom {
                 for px in bg_left..bg_right {
-                    pixels[(py as u32 * width + px as u32) as usize] = bg_color;
+                    let idx = (py as u32 * width + px as u32) as usize;
+                    Self::put_pixel(pixels, idx, bg_color);
                 }
             }
         }
@@ -340,22 +358,11 @@ impl GdiRenderer {
                     if idx >= pixels.len() {
                         return;
                     }
-                    let a = (v.clamp(0.0, 1.0) * 255.0) as u16;
+                    let a = (v.clamp(0.0, 1.0) * 255.0) as u8;
                     if a == 0 {
                         return;
                     }
-                    if a >= 250 {
-                        pixels[idx] = color;
-                    } else {
-                        let bg = pixels[idx];
-                        let bg_r = ((bg >> 16) & 0xFF) as u16;
-                        let bg_g = ((bg >> 8) & 0xFF) as u16;
-                        let bg_b = (bg & 0xFF) as u16;
-                        let r = (a * fg_r + (255 - a) * bg_r) / 255;
-                        let g = (a * fg_g + (255 - a) * bg_g) / 255;
-                        let b = (a * fg_b + (255 - a) * bg_b) / 255;
-                        pixels[idx] = (r as u32) << 16 | (g as u32) << 8 | b as u32;
-                    }
+                    Self::put_pixel(pixels, idx, Self::glyph_color(color, a));
                 });
             }
         }
@@ -383,10 +390,6 @@ impl GdiRenderer {
 
         let glyphs: Vec<_> = font.layout(text, scale, offset).collect();
 
-        let fg_r = ((color >> 16) & 0xFF) as u16;
-        let fg_g = ((color >> 8) & 0xFF) as u16;
-        let fg_b = (color & 0xFF) as u16;
-
         if let Some(bg_color) = bg_color {
             let bg_left = x.max(0);
             let bg_top = y.max(0);
@@ -396,7 +399,8 @@ impl GdiRenderer {
             for py in bg_top..bg_bottom {
                 for px in bg_left..bg_right {
                     if Self::point_in_clip_rects(clip_rects, px, py) {
-                        pixels[(py as u32 * width + px as u32) as usize] = bg_color;
+                        let idx = (py as u32 * width + px as u32) as usize;
+                        Self::put_pixel(pixels, idx, bg_color);
                     }
                 }
             }
@@ -419,22 +423,11 @@ impl GdiRenderer {
                     if idx >= pixels.len() {
                         return;
                     }
-                    let a = (v.clamp(0.0, 1.0) * 255.0) as u16;
+                    let a = (v.clamp(0.0, 1.0) * 255.0) as u8;
                     if a == 0 {
                         return;
                     }
-                    if a >= 250 {
-                        pixels[idx] = color;
-                    } else {
-                        let bg = pixels[idx];
-                        let bg_r = ((bg >> 16) & 0xFF) as u16;
-                        let bg_g = ((bg >> 8) & 0xFF) as u16;
-                        let bg_b = (bg & 0xFF) as u16;
-                        let r = (a * fg_r + (255 - a) * bg_r) / 255;
-                        let g = (a * fg_g + (255 - a) * bg_g) / 255;
-                        let b = (a * fg_b + (255 - a) * bg_b) / 255;
-                        pixels[idx] = (r as u32) << 16 | (g as u32) << 8 | b as u32;
-                    }
+                    Self::put_pixel(pixels, idx, Self::glyph_color(color, a));
                 });
             }
         }
@@ -474,5 +467,19 @@ impl GdiRenderer {
         let ascent = v.ascent.ceil() as i32;
         let descent = (-v.descent).ceil() as i32;
         (height, ascent, descent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GdiRenderer;
+
+    #[test]
+    fn draw_rect_uses_source_over_alpha() {
+        let mut pixels = vec![0xFF00_00FF];
+
+        GdiRenderer::draw_rect(&mut pixels, 1, 1, 0, 0, 1, 1, None, Some(0x80FF_0000));
+
+        assert_eq!(pixels, vec![0xFF80_007F]);
     }
 }
