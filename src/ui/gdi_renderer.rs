@@ -5,6 +5,20 @@ use crate::dll::win32::GDI32;
 
 static GDI_FONT: OnceLock<TtfFont<'static>> = OnceLock::new();
 
+/// GPU 텍스트 경로에 넘길 알파 마스크 비트맵입니다.
+pub struct TextMaskBitmap {
+    /// 좌상단 X 좌표입니다.
+    pub left: i32,
+    /// 좌상단 Y 좌표입니다.
+    pub top: i32,
+    /// 비트맵 너비입니다.
+    pub width: u32,
+    /// 비트맵 높이입니다.
+    pub height: u32,
+    /// `R8` 알파 값입니다.
+    pub alpha: Vec<u8>,
+}
+
 /// 글로벌 TTF 폰트를 초기화하고 반환합니다.
 fn get_ttf_font() -> Option<&'static TtfFont<'static>> {
     GDI_FONT.get_or_init(|| {
@@ -368,6 +382,61 @@ impl GdiRenderer {
         }
     }
 
+    /// 클리핑을 반영한 텍스트 알파 마스크를 생성합니다.
+    pub fn rasterize_text_mask_clipped(
+        text: &str,
+        x: i32,
+        y: i32,
+        font_size: f32,
+        clip_rects: &[(i32, i32, i32, i32)],
+    ) -> Option<TextMaskBitmap> {
+        let Some(font) = get_ttf_font() else {
+            return None;
+        };
+        let scale = Scale::uniform(font_size);
+        let v_metrics = font.v_metrics(scale);
+        let offset = point(x as f32, y as f32 + v_metrics.ascent);
+        let width = Self::measure_text_width(text, font_size).max(1) as u32;
+        let height = (v_metrics.ascent - v_metrics.descent).ceil().max(1.0) as u32;
+        let glyphs: Vec<_> = font.layout(text, scale, offset).collect();
+
+        let mut alpha = vec![0u8; width.saturating_mul(height) as usize];
+        let mut has_coverage = false;
+        for glyph in glyphs {
+            if let Some(bb) = glyph.pixel_bounding_box() {
+                glyph.draw(|gx, gy, v| {
+                    let px = bb.min.x + gx as i32;
+                    let py = bb.min.y + gy as i32;
+                    if px < x
+                        || py < y
+                        || px >= x + width as i32
+                        || py >= y + height as i32
+                        || !Self::point_in_clip_rects(clip_rects, px, py)
+                    {
+                        return;
+                    }
+                    let alpha_x = (px - x) as usize;
+                    let alpha_y = (py - y) as usize;
+                    let idx = alpha_y * width as usize + alpha_x;
+                    let value = (v.clamp(0.0, 1.0) * 255.0) as u8;
+                    if value == 0 || idx >= alpha.len() {
+                        return;
+                    }
+                    alpha[idx] = alpha[idx].max(value);
+                    has_coverage = true;
+                });
+            }
+        }
+
+        has_coverage.then_some(TextMaskBitmap {
+            left: x,
+            top: y,
+            width,
+            height,
+            alpha,
+        })
+    }
+
     /// 클리핑 사각형을 적용하여 텍스트를 그립니다.
     pub fn draw_text_clipped(
         pixels: &mut [u32],
@@ -481,5 +550,14 @@ mod tests {
         GdiRenderer::draw_rect(&mut pixels, 1, 1, 0, 0, 1, 1, None, Some(0x80FF_0000));
 
         assert_eq!(pixels, vec![0xFF80_007F]);
+    }
+
+    #[test]
+    fn rasterize_text_mask_clipped_produces_alpha_pixels() {
+        let mask = GdiRenderer::rasterize_text_mask_clipped("A", 0, 0, 16.0, &[(0, 0, 32, 32)])
+            .expect("text mask should be generated");
+        assert!(mask.width > 0);
+        assert!(mask.height > 0);
+        assert!(mask.alpha.iter().any(|value| *value > 0));
     }
 }

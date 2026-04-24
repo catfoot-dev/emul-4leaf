@@ -278,6 +278,7 @@ pub(super) fn create_thread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         suspended,
         resume_time: None,
         wait_deadline: None,
+        wait_start_time: None,
         wait_handles: Vec::new(),
         wait_sockets: Vec::new(),
     };

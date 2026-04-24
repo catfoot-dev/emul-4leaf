@@ -1,7 +1,4 @@
-use std::thread;
-
 use goblin::pe::PE;
-use winit::platform::macos::WindowAttributesExtMacOS;
 
 pub fn load_splash_data(path: &std::path::Path) -> Option<(Vec<u32>, u32, u32)> {
     let exe_path = path.join("4Leaf.exe");
@@ -188,7 +185,7 @@ fn decode_bitmap_resource(data: &[u8]) -> Option<(Vec<u32>, u32, u32)> {
                     let b = data[p] as u32;
                     let g = data[p + 1] as u32;
                     let r = data[p + 2] as u32;
-                    pixels[(y * abs_width + x) as usize] = (r << 16) | (g << 8) | b;
+                    pixels[(y * abs_width + x) as usize] = (0xFF << 24) | (r << 16) | (g << 8) | b;
                 }
             }
         }
@@ -204,6 +201,7 @@ fn decode_bitmap_resource(data: &[u8]) -> Option<(Vec<u32>, u32, u32)> {
                     let g = data[p + 1] as u32;
                     let r = data[p + 2] as u32;
                     let a = data[p + 3] as u32;
+                    let a = if a == 0 { 0xFF } else { a };
                     pixels[(y * abs_width + x) as usize] = (a << 24) | (r << 16) | (g << 8) | b;
                 }
             }
@@ -232,11 +230,9 @@ impl crate::ui::Painter for SplashPainter {
             winit::window::Window::default_attributes()
                 .with_title("4Leaf Emulator")
                 .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
-                .with_resizable(false)
                 .with_decorations(false)
                 .with_visible(true)
-                .with_active(true)
-                .with_borderless_game(true),
+                .with_active(true),
         );
 
         let window = event_loop.create_window(attributes).unwrap();
@@ -284,7 +280,6 @@ impl crate::ui::Painter for SplashPainter {
 
     fn tick(&mut self) -> bool {
         if !self.should_close && self.receiver.try_recv().is_ok() {
-            thread::sleep(std::time::Duration::from_secs(1));
             self.should_close = true;
             return true;
         }

@@ -304,6 +304,12 @@ impl WS2_32 {
             }
         }
 
+        // 최초 연결 성공 시 UI 스레드에 스플래시 창 종료를 알립니다.
+        if let Some(splash_close_tx) = &ctx.splash_close_tx {
+            let _ = splash_close_tx.send(());
+            crate::ui::win_event::WinEvent::notify_wakeup();
+        }
+
         crate::emu_log!(
             "[WS2_32] connect({}, \"{}\") -> OK (channel)",
             sock,

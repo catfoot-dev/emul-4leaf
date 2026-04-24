@@ -75,7 +75,7 @@ pub(super) fn create_compatible_dc(uc: &mut Unicorn<Win32Context>) -> Option<Api
 // 역할: 지정된 디바이스 컨텍스트(DC)를 삭제
 pub(super) fn delete_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hdc = uc.read_arg(0);
-    uc.get_data().gdi_objects.lock().unwrap().remove(&hdc);
+    uc.get_data().release_gdi_dc(hdc);
     crate::emu_log!("[GDI32] DeleteDC({:#x}) -> BOOL 1", hdc);
     Some(ApiHookResult::callee(1, Some(1)))
 }
@@ -114,7 +114,7 @@ pub(super) fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         ..
     }) = gdi_objects.get_mut(&hdc)
     {
-        match obj_clone {
+        match obj_clone.clone() {
             Some(GdiObject::Bitmap {
                 width: bmp_width,
                 height: bmp_height,
@@ -176,6 +176,13 @@ pub(super) fn select_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
 pub(super) fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let hobj = uc.read_arg(0);
     let ctx = uc.get_data();
+    let window_owned_region = ctx
+        .win_event
+        .lock()
+        .unwrap()
+        .windows
+        .values()
+        .any(|window| window.window_rgn == hobj);
     let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
     let selected_somewhere = gdi_objects.values().any(|obj| {
         matches!(
@@ -197,11 +204,17 @@ pub(super) fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         )
     });
 
-    let ret = if selected_somewhere {
+    let removed = if selected_somewhere || window_owned_region {
+        None
+    } else {
+        gdi_objects.remove(&hobj)
+    };
+    drop(gdi_objects);
+
+    let ret = if selected_somewhere || window_owned_region {
         0
     } else {
-        let removed = gdi_objects.remove(&hobj);
-        drop(gdi_objects);
+        ctx.forget_surface_bitmap(hobj);
         if let Some(GdiObject::Bitmap {
             bits_addr: Some(bits_addr),
             ..
@@ -211,7 +224,6 @@ pub(super) fn delete_object(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
         }
         1
     };
-    // crate::emu_log!("[GDI32] DeleteObject({:#x}) -> BOOL {}", hobj, ret);
     Some(ApiHookResult::callee(1, Some(ret)))
 }
 

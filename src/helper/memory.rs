@@ -124,7 +124,10 @@ pub(crate) fn apply_stack_cleanup_impl(uc: &mut Unicorn<Win32Context>, cleanup: 
 pub(crate) fn malloc_impl(uc: &mut Unicorn<Win32Context>, size: usize) -> u64 {
     let ctx = uc.get_data();
     match ctx.alloc_heap_block(size) {
-        Some(addr) => addr as u64,
+        Some(addr) => {
+            crate::diagnostics::record_heap_alloc(addr as u64, size.max(1));
+            addr as u64
+        }
         None => {
             let cursor = ctx.heap_cursor.load(std::sync::atomic::Ordering::SeqCst);
             crate::emu_log!(

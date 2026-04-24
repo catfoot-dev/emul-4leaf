@@ -7,6 +7,105 @@ use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// GPU 표시 경로에 전달할 비트맵 부분 갱신 정보입니다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuBitmapUpdate {
+    /// 갱신 대상 surface bitmap 핸들입니다.
+    pub surface_bitmap: u32,
+    /// 갱신 시작 X 좌표입니다.
+    pub x: u32,
+    /// 갱신 시작 Y 좌표입니다.
+    pub y: u32,
+    /// 갱신 영역 너비입니다.
+    pub width: u32,
+    /// 갱신 영역 높이입니다.
+    pub height: u32,
+    /// 갱신 영역의 `0xAARRGGBB` 픽셀 데이터입니다.
+    pub pixels: Vec<u32>,
+}
+
+/// surface bitmap에 반영될 순서 보존형 렌더 동기화 항목입니다.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GpuSurfaceOp {
+    /// 부분 텍스처 업로드입니다.
+    Upload(GpuBitmapUpdate),
+    /// GPU 직접 그리기 명령입니다.
+    Draw(GpuDrawCommand),
+}
+
+/// GPU 표시 경로에 전달할 직접 그리기 명령입니다.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GpuDrawCommand {
+    /// 지정한 색으로 직사각형을 채웁니다.
+    FillRect {
+        /// 갱신 대상 surface bitmap 핸들입니다.
+        surface_bitmap: u32,
+        /// 왼쪽 X 좌표입니다.
+        left: i32,
+        /// 위쪽 Y 좌표입니다.
+        top: i32,
+        /// 오른쪽 X 좌표입니다.
+        right: i32,
+        /// 아래쪽 Y 좌표입니다.
+        bottom: i32,
+        /// `0xAARRGGBB` 색상입니다.
+        color: u32,
+    },
+    /// 지정한 색으로 1픽셀 두께 선분을 그립니다.
+    Line {
+        /// 갱신 대상 surface bitmap 핸들입니다.
+        surface_bitmap: u32,
+        /// 시작 X 좌표입니다.
+        x1: i32,
+        /// 시작 Y 좌표입니다.
+        y1: i32,
+        /// 끝 X 좌표입니다.
+        x2: i32,
+        /// 끝 Y 좌표입니다.
+        y2: i32,
+        /// `0xAARRGGBB` 색상입니다.
+        color: u32,
+    },
+    /// 알파 마스크 텍스트를 지정한 색으로 그립니다.
+    TextMask {
+        /// 갱신 대상 surface bitmap 핸들입니다.
+        surface_bitmap: u32,
+        /// 좌상단 X 좌표입니다.
+        x: i32,
+        /// 좌상단 Y 좌표입니다.
+        y: i32,
+        /// 마스크 너비입니다.
+        width: u32,
+        /// 마스크 높이입니다.
+        height: u32,
+        /// 글자색 `0xAARRGGBB` 값입니다.
+        color: u32,
+        /// `R8` 알파 마스크 데이터입니다.
+        alpha: Vec<u8>,
+    },
+    /// 소스 비트맵을 대상 surface bitmap으로 알파 블릿합니다.
+    Blit {
+        /// 갱신 대상 surface bitmap 핸들입니다.
+        surface_bitmap: u32,
+        /// 대상 사각형 왼쪽 X 좌표입니다.
+        left: i32,
+        /// 대상 사각형 위쪽 Y 좌표입니다.
+        top: i32,
+        /// 대상 사각형 오른쪽 X 좌표입니다.
+        right: i32,
+        /// 대상 사각형 아래쪽 Y 좌표입니다.
+        bottom: i32,
+        /// 소스 비트맵 너비입니다.
+        src_width: u32,
+        /// 소스 비트맵 높이입니다.
+        src_height: u32,
+        /// 소스 텍스처에서 샘플링할 UV 사각형입니다.
+        uv: [f32; 4],
+        /// 소스 픽셀 `0xAARRGGBB` 데이터입니다.
+        pixels: Vec<u32>,
+    },
+}
+
 /// WSA 이벤트 핸들과 소켓을 연결하는 상태 구조체입니다.
 #[derive(Debug, Clone)]
 pub struct WsaEventEntry {
@@ -48,6 +147,8 @@ pub struct EmulatedThread {
     pub resume_time: Option<Instant>,
     /// 재시도형 대기 API의 최종 타임아웃 시각
     pub wait_deadline: Option<Instant>,
+    /// 현재 대기를 시작한 시각 (로깅/디버깅 용)
+    pub wait_start_time: Option<Instant>,
     /// 현재 대기 중인 커널 오브젝트 핸들 목록입니다.
     pub wait_handles: Vec<u32>,
     /// 현재 대기 중인 소켓 목록입니다.

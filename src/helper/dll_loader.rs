@@ -1,10 +1,73 @@
 use crate::dll::win32::{LoadedDll, Win32Context};
 use goblin::pe::PE;
-use std::{collections::HashMap, fs, sync::atomic::Ordering};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    sync::atomic::Ordering,
+};
 use unicorn_engine::{Prot, RegisterX86, Unicorn};
 
 use super::UnicornHelper;
 use super::memory::{EXIT_ADDRESS, SIZE_4KB};
+
+const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
+const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+
+fn section_prot(characteristics: u32) -> Prot {
+    let mut prot = Prot::NONE;
+    if (characteristics & IMAGE_SCN_MEM_READ) != 0 {
+        prot |= Prot::READ;
+    }
+    if (characteristics & IMAGE_SCN_MEM_WRITE) != 0 {
+        prot |= Prot::WRITE;
+    }
+    if (characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 {
+        prot |= Prot::EXEC;
+    }
+    if prot == Prot::NONE { Prot::READ } else { prot }
+}
+
+fn finalize_image_protection(
+    uc: &mut Unicorn<Win32Context>,
+    image_base: u64,
+    pe: &PE<'_>,
+) -> Result<(), ()> {
+    let mut page_perms: BTreeMap<u64, Prot> = BTreeMap::new();
+    for section in &pe.sections {
+        let section_size = u64::from(section.virtual_size.max(section.size_of_raw_data));
+        if section_size == 0 {
+            continue;
+        }
+
+        let start = image_base + u64::from(section.virtual_address);
+        let end = start + section_size;
+        let aligned_start = start & !(SIZE_4KB - 1);
+        let aligned_end = (end + (SIZE_4KB - 1)) & !(SIZE_4KB - 1);
+        let prot = section_prot(section.characteristics);
+
+        let mut page = aligned_start;
+        while page < aligned_end {
+            page_perms
+                .entry(page)
+                .and_modify(|existing| *existing |= prot)
+                .or_insert(prot);
+            page += SIZE_4KB;
+        }
+    }
+
+    for (page, prot) in page_perms {
+        uc.mem_protect(page, SIZE_4KB, prot).map_err(|e| {
+            crate::emu_log!(
+                "[!] Failed to protect image page {:#x} with {:?}: {:?}",
+                page,
+                prot,
+                e
+            );
+        })?;
+    }
+    Ok(())
+}
 
 /// 지정된 경로의 DLL 파일을 메모리에 로드하고 재배치(Relocation)를 수행합니다.
 ///
@@ -39,7 +102,7 @@ pub(crate) fn load_dll_with_reloc_impl(
 
     let aligned_size = (image_size + (SIZE_4KB - 1)) & !(SIZE_4KB - 1);
 
-    uc.mem_map(target_base, aligned_size, Prot::ALL)
+    uc.mem_map(target_base, aligned_size, Prot::READ | Prot::WRITE)
         .map_err(|e| {
             crate::emu_log!(
                 "[!] Memory map failed for {} at {:#x}: {:?}",
@@ -310,6 +373,8 @@ pub(crate) fn resolve_imports_impl(
             .unwrap()
             .insert(target_dll_name, target.clone());
     }
+
+    finalize_image_protection(uc, image_base, &pe)?;
 
     Ok(())
 }

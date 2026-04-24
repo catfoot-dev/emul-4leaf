@@ -8,6 +8,9 @@ use crate::helper::UnicornHelper;
 use unicorn_engine::Unicorn;
 
 pub const BPP: u32 = 24;
+const BI_RGB: u32 = 0;
+const BI_RLE8: u32 = 1;
+const BI_RLE4: u32 = 2;
 const BI_BITFIELDS: u32 = 3;
 const BI_ALPHABITFIELDS: u32 = 6;
 
@@ -328,8 +331,8 @@ impl GDI32 {
             return;
         }
         let converted = raw_dib_to_pixels(
-            &raw, width, height, stride, bit_count, top_down, &palette, red_mask, green_mask,
-            blue_mask, alpha_mask,
+            &raw, width, height, stride, bit_count, BI_RGB, top_down, &palette, red_mask,
+            green_mask, blue_mask, alpha_mask,
         );
         let mut pixels = pixels_arc.lock().unwrap();
         if pixels.len() == converted.len() {
@@ -404,6 +407,8 @@ pub(crate) struct DibHeaderInfo {
     pub top_down: bool,
     pub stride: u32,
     pub bit_count: u16,
+    pub compression: u32,
+    pub size_image: u32,
     pub palette: Vec<u32>,
     pub red_mask: u32,
     pub green_mask: u32,
@@ -469,6 +474,8 @@ pub(crate) fn read_dib_header(uc: &Unicorn<Win32Context>, bmi_addr: u32) -> DibH
         top_down,
         stride,
         bit_count,
+        compression,
+        size_image: bi_size_image,
         palette,
         red_mask,
         green_mask,
@@ -488,6 +495,7 @@ fn raw_dib_to_pixels(
     height: u32,
     stride: u32,
     bit_count: u16,
+    compression: u32,
     top_down: bool,
     palette: &[u32],
     red_mask: u32,
@@ -495,6 +503,13 @@ fn raw_dib_to_pixels(
     blue_mask: u32,
     alpha_mask: u32,
 ) -> Vec<u32> {
+    if compression == BI_RLE8 {
+        return decode_rle8_pixels(raw, width, height, top_down, palette);
+    }
+    if compression == BI_RLE4 {
+        return decode_rle4_pixels(raw, width, height, top_down, palette);
+    }
+
     let stride = if stride != 0 {
         stride
     } else {
@@ -519,6 +534,208 @@ fn raw_dib_to_pixels(
             }
         }
     }
+    pixels
+}
+
+/// 팔레트 인덱스를 불투명 `0xAARRGGBB`로 변환합니다.
+fn palette_index_to_argb(palette: &[u32], palette_index: usize) -> u32 {
+    palette
+        .get(palette_index)
+        .map(|color| GDI32::opaque_rgb(*color))
+        .unwrap_or_else(|| {
+            let gray = palette_index.min(u8::MAX as usize) as u32;
+            GDI32::opaque_rgb((gray << 16) | (gray << 8) | gray)
+        })
+}
+
+/// RLE 디코더가 지정한 위치에 팔레트 색을 기록합니다.
+fn write_rle_palette_pixel(
+    pixels: &mut [u32],
+    width: u32,
+    height: u32,
+    top_down: bool,
+    x: usize,
+    y: i32,
+    palette_index: usize,
+    palette: &[u32],
+) {
+    if x >= width as usize || y < 0 || y >= height as i32 {
+        return;
+    }
+
+    let row = if top_down {
+        y as usize
+    } else {
+        height as usize - 1 - y as usize
+    };
+    let idx = row * width as usize + x;
+    if idx < pixels.len() {
+        pixels[idx] = palette_index_to_argb(palette, palette_index);
+    }
+}
+
+/// RLE8 압축 DIB를 `0xAARRGGBB` 픽셀 배열로 복원합니다.
+fn decode_rle8_pixels(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    top_down: bool,
+    palette: &[u32],
+) -> Vec<u32> {
+    let mut pixels = vec![0u32; width.saturating_mul(height) as usize];
+    let mut offset = 0usize;
+    let mut x = 0usize;
+    let mut y = 0i32;
+
+    while offset + 1 < raw.len() && y >= 0 && y < height as i32 {
+        let count = raw[offset];
+        let value = raw[offset + 1];
+        offset += 2;
+
+        if count != 0 {
+            for step in 0..count as usize {
+                write_rle_palette_pixel(
+                    &mut pixels,
+                    width,
+                    height,
+                    top_down,
+                    x + step,
+                    y,
+                    value as usize,
+                    palette,
+                );
+            }
+            x = x.saturating_add(count as usize);
+            continue;
+        }
+
+        match value {
+            0 => {
+                x = 0;
+                y += 1;
+            }
+            1 => break,
+            2 => {
+                if offset + 1 >= raw.len() {
+                    break;
+                }
+                x = x.saturating_add(raw[offset] as usize);
+                y += raw[offset + 1] as i32;
+                offset += 2;
+            }
+            literal_count => {
+                let literal_count = literal_count as usize;
+                for step in 0..literal_count {
+                    let Some(&palette_index) = raw.get(offset + step) else {
+                        break;
+                    };
+                    write_rle_palette_pixel(
+                        &mut pixels,
+                        width,
+                        height,
+                        top_down,
+                        x + step,
+                        y,
+                        palette_index as usize,
+                        palette,
+                    );
+                }
+                offset = offset.saturating_add(literal_count);
+                if literal_count % 2 != 0 {
+                    offset = offset.saturating_add(1);
+                }
+                x = x.saturating_add(literal_count);
+            }
+        }
+    }
+
+    pixels
+}
+
+/// RLE4 압축 DIB를 `0xAARRGGBB` 픽셀 배열로 복원합니다.
+fn decode_rle4_pixels(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    top_down: bool,
+    palette: &[u32],
+) -> Vec<u32> {
+    let mut pixels = vec![0u32; width.saturating_mul(height) as usize];
+    let mut offset = 0usize;
+    let mut x = 0usize;
+    let mut y = 0i32;
+
+    while offset + 1 < raw.len() && y >= 0 && y < height as i32 {
+        let count = raw[offset];
+        let value = raw[offset + 1];
+        offset += 2;
+
+        if count != 0 {
+            let high = (value >> 4) as usize;
+            let low = (value & 0x0F) as usize;
+            for step in 0..count as usize {
+                let palette_index = if step.is_multiple_of(2) { high } else { low };
+                write_rle_palette_pixel(
+                    &mut pixels,
+                    width,
+                    height,
+                    top_down,
+                    x + step,
+                    y,
+                    palette_index,
+                    palette,
+                );
+            }
+            x = x.saturating_add(count as usize);
+            continue;
+        }
+
+        match value {
+            0 => {
+                x = 0;
+                y += 1;
+            }
+            1 => break,
+            2 => {
+                if offset + 1 >= raw.len() {
+                    break;
+                }
+                x = x.saturating_add(raw[offset] as usize);
+                y += raw[offset + 1] as i32;
+                offset += 2;
+            }
+            literal_count => {
+                let literal_count = literal_count as usize;
+                let byte_count = literal_count.div_ceil(2);
+                for step in 0..literal_count {
+                    let Some(&packed) = raw.get(offset + step / 2) else {
+                        break;
+                    };
+                    let palette_index = if step.is_multiple_of(2) {
+                        (packed >> 4) as usize
+                    } else {
+                        (packed & 0x0F) as usize
+                    };
+                    write_rle_palette_pixel(
+                        &mut pixels,
+                        width,
+                        height,
+                        top_down,
+                        x + step,
+                        y,
+                        palette_index,
+                        palette,
+                    );
+                }
+                offset = offset.saturating_add(byte_count);
+                if byte_count % 2 != 0 {
+                    offset = offset.saturating_add(1);
+                }
+                x = x.saturating_add(literal_count);
+            }
+        }
+    }
+
     pixels
 }
 
@@ -858,7 +1075,9 @@ fn write_dib_pixel(
 
 #[cfg(test)]
 mod tests {
-    use super::{GDI32, dib_effective_stride, raw_dib_to_pixels, write_dib_pixel};
+    use super::{
+        BI_RGB, BI_RLE4, BI_RLE8, GDI32, dib_effective_stride, raw_dib_to_pixels, write_dib_pixel,
+    };
 
     #[test]
     fn colorref_zero_alpha_is_treated_as_opaque() {
@@ -881,21 +1100,21 @@ mod tests {
     fn paletted_8bpp_dib_is_decoded_with_palette() {
         let palette = vec![0x000000, 0x00FF0000, 0x0000FF00, 0x000000FF];
         let raw = vec![1u8, 2u8, 3u8, 0u8];
-        let pixels = raw_dib_to_pixels(&raw, 4, 1, 4, 8, true, &palette, 0, 0, 0, 0);
+        let pixels = raw_dib_to_pixels(&raw, 4, 1, 4, 8, BI_RGB, true, &palette, 0, 0, 0, 0);
         assert_eq!(pixels, vec![0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFF000000]);
     }
 
     #[test]
     fn twenty_four_bpp_dib_is_decoded_as_opaque() {
         let raw = vec![0x33, 0x22, 0x11, 0x00];
-        let pixels = raw_dib_to_pixels(&raw, 1, 1, 4, 24, true, &[], 0, 0, 0, 0);
+        let pixels = raw_dib_to_pixels(&raw, 1, 1, 4, 24, BI_RGB, true, &[], 0, 0, 0, 0);
         assert_eq!(pixels, vec![0xFF11_2233]);
     }
 
     #[test]
     fn thirty_two_bpp_dib_preserves_alpha() {
         let raw = vec![0x33, 0x22, 0x11, 0x80];
-        let pixels = raw_dib_to_pixels(&raw, 1, 1, 4, 32, true, &[], 0, 0, 0, 0);
+        let pixels = raw_dib_to_pixels(&raw, 1, 1, 4, 32, BI_RGB, true, &[], 0, 0, 0, 0);
         assert_eq!(pixels, vec![0x8011_2233]);
     }
 
@@ -908,6 +1127,7 @@ mod tests {
             1,
             4,
             32,
+            BI_RGB,
             true,
             &[],
             0x00FF_0000,
@@ -927,6 +1147,7 @@ mod tests {
             1,
             4,
             32,
+            BI_RGB,
             true,
             &[],
             0x00FF_0000,
@@ -945,8 +1166,103 @@ mod tests {
     }
 
     #[test]
+    fn bottom_up_dib_flips_rows() {
+        let raw = vec![
+            3u8, 4u8, 0, 0, // 메모리 첫 행은 화면 하단
+            1u8, 2u8, 0, 0, // 메모리 둘째 행은 화면 상단
+        ];
+        let pixels = raw_dib_to_pixels(&raw, 2, 2, 4, 8, BI_RGB, false, &[], 0, 0, 0, 0);
+
+        assert_eq!(
+            pixels,
+            vec![0xFF01_0101, 0xFF02_0202, 0xFF03_0303, 0xFF04_0404]
+        );
+    }
+
+    #[test]
+    fn top_down_dib_keeps_rows() {
+        let raw = vec![
+            1u8, 2u8, 0, 0, // 메모리 첫 행은 화면 상단
+            3u8, 4u8, 0, 0, // 메모리 둘째 행은 화면 하단
+        ];
+        let pixels = raw_dib_to_pixels(&raw, 2, 2, 4, 8, BI_RGB, true, &[], 0, 0, 0, 0);
+
+        assert_eq!(
+            pixels,
+            vec![0xFF01_0101, 0xFF02_0202, 0xFF03_0303, 0xFF04_0404]
+        );
+    }
+
+    #[test]
+    fn paletted_4bpp_dib_uses_high_nibble_first() {
+        let palette = vec![0x000000, 0x111111, 0x222222, 0x333333, 0x444444, 0x555555];
+        let raw = vec![0x12, 0x34, 0x50, 0x00];
+        let pixels = raw_dib_to_pixels(&raw, 5, 1, 4, 4, BI_RGB, true, &palette, 0, 0, 0, 0);
+
+        assert_eq!(
+            pixels,
+            vec![
+                0xFF11_1111,
+                0xFF22_2222,
+                0xFF33_3333,
+                0xFF44_4444,
+                0xFF55_5555
+            ]
+        );
+    }
+
+    #[test]
     fn stride_uses_actual_bit_count_for_8bpp() {
         assert_eq!(dib_effective_stride(28, 34, 0, 8), 28);
         assert_eq!(dib_effective_stride(29, 34, 0, 8), 32);
+    }
+
+    #[test]
+    fn rle8_dib_decodes_encoded_runs_and_eol() {
+        let palette = vec![0x000000, 0x00112233, 0x00445566, 0x00778899];
+        let raw = vec![
+            2, 1, 2, 2, 0, 0, // 하단 행: 1,1,2,2
+            4, 3, 0, 0, // 상단 행: 3,3,3,3
+            0, 1, // 종료
+        ];
+        let pixels = raw_dib_to_pixels(&raw, 4, 2, 0, 8, BI_RLE8, false, &palette, 0, 0, 0, 0);
+
+        assert_eq!(
+            pixels,
+            vec![
+                0xFF77_8899,
+                0xFF77_8899,
+                0xFF77_8899,
+                0xFF77_8899,
+                0xFF11_2233,
+                0xFF11_2233,
+                0xFF44_5566,
+                0xFF44_5566,
+            ]
+        );
+    }
+
+    #[test]
+    fn rle4_dib_decodes_absolute_mode() {
+        let palette = vec![0x000000, 0x00111111, 0x00222222, 0x00333333, 0x00444444];
+        let raw = vec![
+            0, 4, 0x12, 0x34, 0, 0, // 하단 행: 1,2,3,4
+            0, 0, 0, 1, // 빈 상단 행 + 종료
+        ];
+        let pixels = raw_dib_to_pixels(&raw, 4, 2, 0, 4, BI_RLE4, false, &palette, 0, 0, 0, 0);
+
+        assert_eq!(
+            pixels,
+            vec![
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0x0000_0000,
+                0xFF11_1111,
+                0xFF22_2222,
+                0xFF33_3333,
+                0xFF44_4444,
+            ]
+        );
     }
 }

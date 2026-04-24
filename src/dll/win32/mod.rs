@@ -38,7 +38,7 @@ use crate::{
     ui::{UiCommand, win_event::WinEvent},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
@@ -54,6 +54,42 @@ use unicorn_engine::Unicorn;
 struct HeapBookkeeping {
     allocations: HashMap<u32, u32>,
     free_list: Vec<(u32, u32)>,
+}
+
+#[derive(Default)]
+struct SurfaceBitmapSyncState {
+    needs_full_upload: bool,
+    ops: Vec<GpuSurfaceOp>,
+    has_content: bool,
+    active_dc_count: u32,
+    needs_release_sync: bool,
+}
+
+fn pixels_look_presentable_as_initial_frame(pixels: &[u32]) -> bool {
+    if pixels.is_empty() {
+        return false;
+    }
+
+    let mut opaque_or_translucent = 0usize;
+    let mut non_black_visible = 0usize;
+    for &pixel in pixels {
+        if pixel >> 24 == 0 {
+            continue;
+        }
+        opaque_or_translucent += 1;
+        if pixel & 0x00FF_FFFF != 0 {
+            non_black_visible += 1;
+        }
+    }
+
+    let total = pixels.len();
+    let visible_percent = opaque_or_translucent.saturating_mul(100) / total;
+    let non_black_percent = non_black_visible.saturating_mul(100) / total;
+
+    // Lime은 창 생성 직후 검은 LBuffer나 컬러키가 제거된 테두리만 먼저 올린 뒤
+    // 같은 surface에 실제 client buffer를 이어서 올립니다. 이 중간 프레임을 첫 표시
+    // 대상으로 삼으면 검은 화면이나 구멍처럼 보이는 프레임이 노출됩니다.
+    non_black_percent >= 12 || (visible_percent >= 85 && non_black_visible > 0)
 }
 
 pub struct Win32Context {
@@ -81,10 +117,16 @@ pub struct Win32Context {
     pub sockets: Arc<Mutex<HashMap<u32, SocketState>>>,
     /// 윈도우 이벤트 관리부 (UI와 신호 교환)
     pub win_event: Arc<Mutex<WinEvent>>,
+    /// 스플래시 창 종료를 UI 스레드에 알리는 채널입니다.
+    pub splash_close_tx: Option<Sender<()>>,
     /// 등록된 가상 윈도우 클래스 정보
     pub window_classes: Arc<Mutex<HashMap<String, WindowClass>>>,
     /// 가상 GDI 오브젝트 맵 (핸들 -> 오브젝트)
     pub gdi_objects: Arc<Mutex<HashMap<u32, GdiObject>>>,
+    /// 호스트 창 표면에 직접 연결된 비트맵 핸들 집합입니다.
+    surface_bitmaps: Arc<Mutex<HashSet<u32>>>,
+    /// surface bitmap의 전체/부분 업로드 상태입니다.
+    surface_bitmap_sync: Arc<Mutex<HashMap<u32, SurfaceBitmapSyncState>>>,
     /// 가상 동기화 이벤트 맵
     pub events: Arc<Mutex<HashMap<u32, EventState>>>,
     /// TLS(Thread Local Storage) 슬롯 데이터 (outer key = thread_id, inner = tls_index → value)
@@ -155,6 +197,8 @@ pub struct Win32Context {
     pub main_resume_time: Arc<Mutex<Option<Instant>>>,
     /// 메인 스레드의 재시도형 대기 API 타임아웃 시각
     pub main_wait_deadline: Arc<Mutex<Option<Instant>>>,
+    /// 메인 스레드의 현재 대기 시작 시각
+    pub main_wait_start_time: Arc<Mutex<Option<Instant>>>,
     /// 메인 스레드가 현재 대기 중인 커널 오브젝트 핸들 목록
     pub main_wait_handles: Arc<Mutex<Vec<u32>>>,
     /// 메인 스레드가 현재 대기 중인 소켓 목록
@@ -189,8 +233,11 @@ impl Win32Context {
             tcp_sockets: Arc::new(Mutex::new(HashMap::new())),
             sockets: Arc::new(Mutex::new(HashMap::new())),
             win_event: Arc::new(Mutex::new(WinEvent::new(ui_tx))),
+            splash_close_tx: None,
             window_classes: Arc::new(Mutex::new(HashMap::new())),
             gdi_objects: Arc::new(Mutex::new(HashMap::new())),
+            surface_bitmaps: Arc::new(Mutex::new(HashSet::new())),
+            surface_bitmap_sync: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(HashMap::new())),
             tls_slots: Arc::new(Mutex::new(HashMap::new())),
             tls_counter: AtomicU32::new(1),
@@ -234,6 +281,7 @@ impl Win32Context {
             main_ready: Arc::new(AtomicU32::new(1)),
             main_resume_time: Arc::new(Mutex::new(None)),
             main_wait_deadline: Arc::new(Mutex::new(None)),
+            main_wait_start_time: Arc::new(Mutex::new(None)),
             main_wait_handles: Arc::new(Mutex::new(Vec::new())),
             main_wait_sockets: Arc::new(Mutex::new(Vec::new())),
             emu_depth: Arc::new(AtomicU32::new(0)),
@@ -293,15 +341,18 @@ impl Win32Context {
     /// 가상 힙 블록을 해제하여 재사용 가능 상태로 되돌립니다.
     pub(crate) fn free_heap_block(&self, addr: u32) -> bool {
         if addr < HEAP_BASE as u32 {
+            crate::diagnostics::record_heap_free(addr, None, false);
             return false;
         }
 
         let mut heap_blocks = self.heap_blocks.lock().unwrap();
         let Some(size) = heap_blocks.allocations.remove(&addr) else {
+            crate::diagnostics::record_heap_free(addr, None, false);
             return false;
         };
 
         push_free_block(&mut heap_blocks.free_list, addr, size);
+        crate::diagnostics::record_heap_free(addr, Some(size), true);
         true
     }
 
@@ -313,6 +364,22 @@ impl Win32Context {
             .allocations
             .get(&addr)
             .copied()
+    }
+
+    /// 지정한 메모리 범위를 완전히 포함하는 힙 할당 블록을 반환합니다.
+    pub(crate) fn heap_allocation_for_range(&self, addr: u64, size: usize) -> Option<(u32, u32)> {
+        let start = u32::try_from(addr).ok()?;
+        let len = u32::try_from(size.max(1)).ok()?;
+        let end = start.checked_add(len.saturating_sub(1))?;
+        self.heap_blocks
+            .lock()
+            .unwrap()
+            .allocations
+            .iter()
+            .find_map(|(&block_addr, &block_size)| {
+                let block_end = block_addr.checked_add(block_size.saturating_sub(1))?;
+                (start >= block_addr && end <= block_end).then_some((block_addr, block_size))
+            })
     }
 
     /// 가상 데스크톱 작업 영역 좌표를 갱신합니다.
@@ -360,7 +427,388 @@ impl Win32Context {
                 alpha_mask: 0,
             },
         );
+        self.surface_bitmaps.lock().unwrap().insert(hbmp);
+        self.surface_bitmap_sync.lock().unwrap().insert(
+            hbmp,
+            SurfaceBitmapSyncState {
+                needs_full_upload: true,
+                ops: Vec::new(),
+                has_content: false,
+                active_dc_count: 0,
+                needs_release_sync: false,
+            },
+        );
         hbmp
+    }
+
+    /// 지정한 비트맵이 호스트 창 표면에 직접 연결된 bitmap인지 반환합니다.
+    pub(crate) fn is_surface_bitmap(&self, hbmp: u32) -> bool {
+        self.surface_bitmaps.lock().unwrap().contains(&hbmp)
+    }
+
+    /// 지정한 surface bitmap이 다음 렌더에서 전체 업로드되도록 표시합니다.
+    pub(crate) fn mark_surface_bitmap_dirty(&self, hbmp: u32) {
+        if !self.is_surface_bitmap(hbmp) {
+            return;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(hbmp).or_default();
+        state.needs_full_upload = true;
+        state.needs_release_sync = false;
+        state.ops.clear();
+    }
+
+    /// surface bitmap이 실제 GDI 출력으로 초기화되었음을 표시합니다.
+    pub(crate) fn mark_surface_bitmap_has_content(&self, hbmp: u32) {
+        if !self.is_surface_bitmap(hbmp) {
+            return;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(hbmp).or_default();
+        state.has_content = true;
+    }
+
+    /// surface bitmap의 최종 CPU 스냅샷을 DC 종료 시 한 번 더 동기화해야 함을 표시합니다.
+    pub(crate) fn note_surface_bitmap_release_sync(&self, hbmp: u32) {
+        if !self.is_surface_bitmap(hbmp) {
+            return;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(hbmp).or_default();
+        state.has_content = true;
+        if !state.needs_full_upload {
+            state.needs_release_sync = true;
+        }
+    }
+
+    /// surface bitmap이 아직 빈 초기 버퍼인지 여부를 반환합니다.
+    pub(crate) fn surface_bitmap_has_content(&self, hbmp: u32) -> bool {
+        if !self.is_surface_bitmap(hbmp) {
+            return false;
+        }
+
+        self.surface_bitmap_sync
+            .lock()
+            .unwrap()
+            .get(&hbmp)
+            .is_some_and(|state| state.has_content)
+    }
+
+    /// surface bitmap을 선택한 창 DC가 열렸음을 기록합니다.
+    pub(crate) fn begin_surface_bitmap_dc(&self, hbmp: u32) {
+        if !self.is_surface_bitmap(hbmp) {
+            return;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(hbmp).or_default();
+        state.active_dc_count = state.active_dc_count.saturating_add(1);
+    }
+
+    /// surface bitmap을 선택한 창 DC가 닫혔음을 기록합니다.
+    pub(crate) fn end_surface_bitmap_dc(&self, hbmp: u32) {
+        if !self.is_surface_bitmap(hbmp) {
+            return;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(hbmp).or_default();
+        state.active_dc_count = state.active_dc_count.saturating_sub(1);
+    }
+
+    /// surface bitmap을 선택한 창 DC가 아직 살아 있는지 반환합니다.
+    pub(crate) fn surface_bitmap_dc_active(&self, hbmp: u32) -> bool {
+        if !self.is_surface_bitmap(hbmp) {
+            return false;
+        }
+
+        self.surface_bitmap_sync
+            .lock()
+            .unwrap()
+            .get(&hbmp)
+            .is_some_and(|state| state.active_dc_count > 0)
+    }
+
+    /// GDI DC를 제거하고 surface bitmap DC 생명주기 추적을 정리합니다.
+    pub(crate) fn release_gdi_dc(&self, hdc: u32) -> bool {
+        let removed = self.gdi_objects.lock().unwrap().remove(&hdc);
+        let Some(GdiObject::Dc {
+            selected_bitmap, ..
+        }) = removed
+        else {
+            return false;
+        };
+
+        self.end_surface_bitmap_dc(selected_bitmap);
+        true
+    }
+
+    /// surface bitmap의 전체 업로드 플래그를 소비하고 이전 값을 반환합니다.
+    pub(crate) fn consume_surface_bitmap_full_upload(&self, hbmp: u32) -> bool {
+        if !self.is_surface_bitmap(hbmp) {
+            return false;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(hbmp).or_default();
+        let needs_full_upload = state.needs_full_upload;
+        state.needs_full_upload = false;
+        if needs_full_upload {
+            state.ops.clear();
+        }
+        needs_full_upload
+    }
+
+    /// surface bitmap용 부분 업로드를 큐에 추가합니다.
+    pub(crate) fn queue_surface_bitmap_upload(&self, update: GpuBitmapUpdate) {
+        if !self.is_surface_bitmap(update.surface_bitmap) {
+            return;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(update.surface_bitmap).or_default();
+        if !state.has_content && !pixels_look_presentable_as_initial_frame(&update.pixels) {
+            return;
+        }
+        if !state.has_content {
+            state.has_content = true;
+            state.needs_full_upload = true;
+            state.needs_release_sync = false;
+            state.ops.clear();
+            return;
+        }
+        if state.needs_full_upload {
+            return;
+        }
+        state.needs_release_sync = true;
+        state.ops.push(GpuSurfaceOp::Upload(update));
+    }
+
+    /// surface bitmap용 GPU 직접 그리기 명령을 큐에 추가합니다.
+    pub(crate) fn queue_surface_bitmap_draw_command(&self, command: GpuDrawCommand) {
+        let surface_bitmap = match &command {
+            GpuDrawCommand::FillRect { surface_bitmap, .. } => *surface_bitmap,
+            GpuDrawCommand::Line { surface_bitmap, .. } => *surface_bitmap,
+            GpuDrawCommand::TextMask { surface_bitmap, .. } => *surface_bitmap,
+            GpuDrawCommand::Blit { surface_bitmap, .. } => *surface_bitmap,
+        };
+        if !self.is_surface_bitmap(surface_bitmap) {
+            return;
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(surface_bitmap).or_default();
+        if !state.has_content {
+            state.has_content = true;
+            state.needs_full_upload = false;
+        }
+        if state.needs_full_upload {
+            return;
+        }
+        state.needs_release_sync = true;
+        state.ops.push(GpuSurfaceOp::Draw(command));
+    }
+
+    /// surface bitmap에 단색 채우기 직사각형 명령을 큐에 추가합니다.
+    pub(crate) fn queue_surface_bitmap_fill_rect(
+        &self,
+        surface_bitmap: u32,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        color: u32,
+    ) {
+        self.queue_surface_bitmap_draw_command(GpuDrawCommand::FillRect {
+            surface_bitmap,
+            left,
+            top,
+            right,
+            bottom,
+            color,
+        });
+    }
+
+    /// surface bitmap에 1픽셀 두께 선분 명령을 큐에 추가합니다.
+    pub(crate) fn queue_surface_bitmap_line(
+        &self,
+        surface_bitmap: u32,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: u32,
+    ) {
+        self.queue_surface_bitmap_draw_command(GpuDrawCommand::Line {
+            surface_bitmap,
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+        });
+    }
+
+    /// surface bitmap에 텍스트 알파 마스크 명령을 큐에 추가합니다.
+    pub(crate) fn queue_surface_bitmap_text_mask(
+        &self,
+        surface_bitmap: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        color: u32,
+        alpha: Vec<u8>,
+    ) {
+        self.queue_surface_bitmap_draw_command(GpuDrawCommand::TextMask {
+            surface_bitmap,
+            x,
+            y,
+            width,
+            height,
+            color,
+            alpha,
+        });
+    }
+
+    /// surface bitmap에 GPU blit 명령을 큐에 추가합니다.
+    pub(crate) fn queue_surface_bitmap_blit(
+        &self,
+        surface_bitmap: u32,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        src_width: u32,
+        src_height: u32,
+        uv: [f32; 4],
+        pixels: Vec<u32>,
+    ) {
+        self.queue_surface_bitmap_draw_command(GpuDrawCommand::Blit {
+            surface_bitmap,
+            left,
+            top,
+            right,
+            bottom,
+            src_width,
+            src_height,
+            uv,
+            pixels,
+        });
+    }
+
+    /// 현재 픽셀 버퍼에서 지정한 직사각형만 잘라 surface bitmap 부분 업로드를 큐에 추가합니다.
+    pub(crate) fn queue_surface_bitmap_rect_upload(
+        &self,
+        surface_bitmap: u32,
+        pixels: &[u32],
+        bitmap_width: u32,
+        bitmap_height: u32,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    ) {
+        if !self.is_surface_bitmap(surface_bitmap) {
+            return;
+        }
+
+        let clipped_left = left.max(0).min(bitmap_width as i32);
+        let clipped_top = top.max(0).min(bitmap_height as i32);
+        let clipped_right = right.max(0).min(bitmap_width as i32);
+        let clipped_bottom = bottom.max(0).min(bitmap_height as i32);
+        if clipped_left >= clipped_right || clipped_top >= clipped_bottom {
+            return;
+        }
+
+        let width = (clipped_right - clipped_left) as u32;
+        let height = (clipped_bottom - clipped_top) as u32;
+        let mut rect_pixels = Vec::with_capacity(width.saturating_mul(height) as usize);
+
+        for y in clipped_top..clipped_bottom {
+            let row_start = y as usize * bitmap_width as usize + clipped_left as usize;
+            let row_end = row_start + width as usize;
+            rect_pixels.extend_from_slice(&pixels[row_start..row_end]);
+        }
+
+        self.queue_surface_bitmap_upload(GpuBitmapUpdate {
+            surface_bitmap,
+            x: clipped_left as u32,
+            y: clipped_top as u32,
+            width,
+            height,
+            pixels: rect_pixels,
+        });
+    }
+
+    /// surface bitmap에 쌓인 부분 업로드 목록을 비웁니다.
+    pub(crate) fn take_surface_bitmap_ops(&self, hbmp: u32) -> Vec<GpuSurfaceOp> {
+        if !self.is_surface_bitmap(hbmp) {
+            return Vec::new();
+        }
+
+        let mut sync = self.surface_bitmap_sync.lock().unwrap();
+        let state = sync.entry(hbmp).or_default();
+        std::mem::take(&mut state.ops)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_surface_bitmap_uploads(&self, hbmp: u32) -> Vec<GpuBitmapUpdate> {
+        self.take_surface_bitmap_ops(hbmp)
+            .into_iter()
+            .filter_map(|op| match op {
+                GpuSurfaceOp::Upload(update) => Some(update),
+                GpuSurfaceOp::Draw(_) => None,
+            })
+            .collect()
+    }
+
+    /// surface bitmap에 쌓인 GPU 직접 그리기 명령 목록을 비웁니다.
+    #[cfg(test)]
+    pub(crate) fn take_surface_bitmap_draw_commands(&self, hbmp: u32) -> Vec<GpuDrawCommand> {
+        self.take_surface_bitmap_ops(hbmp)
+            .into_iter()
+            .filter_map(|op| match op {
+                GpuSurfaceOp::Draw(command) => Some(command),
+                GpuSurfaceOp::Upload(_) => None,
+            })
+            .collect()
+    }
+
+    /// 지정한 HWND의 surface bitmap이 DC 종료 시 최종 CPU 스냅샷 동기화가 필요하면 전체 업로드를 예약합니다.
+    pub(crate) fn ensure_window_surface_bitmap_sync(&self, hwnd: u32) {
+        let surface_bitmap = self
+            .win_event
+            .lock()
+            .unwrap()
+            .windows
+            .get(&hwnd)
+            .map(|state| state.surface_bitmap)
+            .unwrap_or(0);
+        if surface_bitmap == 0 {
+            return;
+        }
+
+        let needs_release_sync = {
+            let mut sync = self.surface_bitmap_sync.lock().unwrap();
+            let state = sync.entry(surface_bitmap).or_default();
+            let needs_release_sync = state.needs_release_sync;
+            state.needs_release_sync = false;
+            needs_release_sync
+        };
+
+        if needs_release_sync {
+            self.mark_surface_bitmap_dirty(surface_bitmap);
+        }
+    }
+
+    /// surface bitmap 추적 정보를 제거합니다.
+    pub(crate) fn forget_surface_bitmap(&self, hbmp: u32) {
+        self.surface_bitmaps.lock().unwrap().remove(&hbmp);
+        self.surface_bitmap_sync.lock().unwrap().remove(&hbmp);
     }
 
     /// 게스트에 노출되는 스레드 ID를 내부 메시지 큐 키로 정규화합니다.
@@ -520,6 +968,7 @@ impl Win32Context {
         *width = target_width;
         *height = target_height;
         *stride = aligned_stride(target_width, BPP as u16);
+        self.mark_surface_bitmap_dirty(surface_bitmap);
     }
 
     /// DLL 이름과 함수 이름을 기반으로 적절한 Win32 API 핸들러로 분기합니다.
@@ -586,8 +1035,11 @@ impl Clone for Win32Context {
             tcp_sockets: self.tcp_sockets.clone(),
             sockets: self.sockets.clone(),
             win_event: self.win_event.clone(),
+            splash_close_tx: self.splash_close_tx.clone(),
             window_classes: self.window_classes.clone(),
             gdi_objects: self.gdi_objects.clone(),
+            surface_bitmaps: self.surface_bitmaps.clone(),
+            surface_bitmap_sync: self.surface_bitmap_sync.clone(),
             events: self.events.clone(),
             tls_slots: self.tls_slots.clone(),
             tls_counter: AtomicU32::new(self.tls_counter.load(Ordering::SeqCst)),
@@ -621,6 +1073,7 @@ impl Clone for Win32Context {
             main_ready: self.main_ready.clone(),
             main_resume_time: self.main_resume_time.clone(),
             main_wait_deadline: self.main_wait_deadline.clone(),
+            main_wait_start_time: self.main_wait_start_time.clone(),
             main_wait_handles: self.main_wait_handles.clone(),
             main_wait_sockets: self.main_wait_sockets.clone(),
             emu_depth: self.emu_depth.clone(),
@@ -692,6 +1145,286 @@ mod tests {
 
         let merged = ctx.alloc_heap_block(24).unwrap();
         assert_eq!(merged, first);
+    }
+
+    #[test]
+    fn heap_allocation_range_detects_untracked_writes() {
+        let ctx = Win32Context::new(None);
+        let first = ctx.alloc_heap_block(16).unwrap();
+
+        assert_eq!(
+            ctx.heap_allocation_for_range(first as u64 + 4, 4),
+            Some((first, 16))
+        );
+        assert_eq!(ctx.heap_allocation_for_range(first as u64 + 15, 2), None);
+    }
+
+    #[test]
+    fn surface_bitmap_upload_queue_tracks_full_and_partial_updates() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(4, 4);
+
+        assert!(!ctx.surface_bitmap_has_content(hbmp));
+        assert!(ctx.consume_surface_bitmap_full_upload(hbmp));
+
+        ctx.queue_surface_bitmap_upload(GpuBitmapUpdate {
+            surface_bitmap: hbmp,
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 2,
+            pixels: vec![0xFFFF_FFFF; 4],
+        });
+
+        assert!(ctx.surface_bitmap_has_content(hbmp));
+        assert!(ctx.take_surface_bitmap_uploads(hbmp).is_empty());
+        assert!(ctx.consume_surface_bitmap_full_upload(hbmp));
+
+        ctx.queue_surface_bitmap_upload(GpuBitmapUpdate {
+            surface_bitmap: hbmp,
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 2,
+            pixels: vec![0xFFFF_FFFF; 4],
+        });
+        let updates = ctx.take_surface_bitmap_uploads(hbmp);
+        assert_eq!(updates.len(), 1);
+        assert!(!ctx.consume_surface_bitmap_full_upload(hbmp));
+
+        ctx.mark_surface_bitmap_dirty(hbmp);
+        ctx.queue_surface_bitmap_upload(GpuBitmapUpdate {
+            surface_bitmap: hbmp,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0xFFFF_FFFF],
+        });
+
+        assert!(ctx.consume_surface_bitmap_full_upload(hbmp));
+        assert!(ctx.take_surface_bitmap_uploads(hbmp).is_empty());
+        assert!(ctx.surface_bitmap_has_content(hbmp));
+    }
+
+    // #[test]
+    // fn surface_bitmap_ignores_initial_black_upload() {
+    //     let ctx = Win32Context::new(None);
+    //     let hbmp = ctx.create_surface_bitmap(2, 2);
+    //     let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+
+    //     ctx.queue_surface_bitmap_upload(GpuBitmapUpdate {
+    //         surface_bitmap: hbmp,
+    //         x: 0,
+    //         y: 0,
+    //         width: 2,
+    //         height: 2,
+    //         pixels: vec![0xFF00_0000; 4],
+    //     });
+
+    //     assert!(!ctx.surface_bitmap_has_content(hbmp));
+    //     assert!(ctx.take_surface_bitmap_uploads(hbmp).is_empty());
+    // }
+
+    // #[test]
+    // fn surface_bitmap_ignores_initial_border_only_upload() {
+    //     let ctx = Win32Context::new(None);
+    //     let hbmp = ctx.create_surface_bitmap(10, 10);
+    //     let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+    //     let mut pixels = vec![0; 100];
+    //     pixels[0] = 0xFFFF_FFFF;
+    //     pixels[1] = 0xFF00_0000;
+    //     pixels[2] = 0xFF6E_81D0;
+
+    //     ctx.queue_surface_bitmap_upload(GpuBitmapUpdate {
+    //         surface_bitmap: hbmp,
+    //         x: 0,
+    //         y: 0,
+    //         width: 10,
+    //         height: 10,
+    //         pixels,
+    //     });
+
+    //     assert!(!ctx.surface_bitmap_has_content(hbmp));
+    //     assert!(ctx.take_surface_bitmap_uploads(hbmp).is_empty());
+    // }
+
+    // #[test]
+    // fn surface_bitmap_accepts_first_meaningful_upload() {
+    //     let ctx = Win32Context::new(None);
+    //     let hbmp = ctx.create_surface_bitmap(10, 10);
+    //     let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+    //     let mut pixels = vec![0xFF00_0000; 100];
+    //     pixels[..12].fill(0xFFFF_FFFF);
+
+    //     ctx.queue_surface_bitmap_upload(GpuBitmapUpdate {
+    //         surface_bitmap: hbmp,
+    //         x: 0,
+    //         y: 0,
+    //         width: 10,
+    //         height: 10,
+    //         pixels,
+    //     });
+
+    //     assert!(ctx.surface_bitmap_has_content(hbmp));
+    //     assert_eq!(ctx.take_surface_bitmap_uploads(hbmp).len(), 1);
+    // }
+
+    #[test]
+    fn surface_bitmap_dc_lifetime_tracks_active_state() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(4, 4);
+
+        assert!(!ctx.surface_bitmap_dc_active(hbmp));
+
+        ctx.begin_surface_bitmap_dc(hbmp);
+        assert!(ctx.surface_bitmap_dc_active(hbmp));
+
+        ctx.end_surface_bitmap_dc(hbmp);
+        assert!(!ctx.surface_bitmap_dc_active(hbmp));
+
+        ctx.end_surface_bitmap_dc(hbmp);
+        assert!(!ctx.surface_bitmap_dc_active(hbmp));
+    }
+
+    #[test]
+    fn surface_bitmap_draw_command_marks_content_ready() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(4, 4);
+        let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+
+        ctx.queue_surface_bitmap_line(hbmp, 0, 1, 3, 2, 0xFF11_2233);
+
+        assert!(ctx.surface_bitmap_has_content(hbmp));
+    }
+
+    #[test]
+    fn surface_bitmap_release_sync_flag_is_cleared_by_full_upload() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(4, 4);
+        let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+
+        ctx.note_surface_bitmap_release_sync(hbmp);
+        {
+            let sync = ctx.surface_bitmap_sync.lock().unwrap();
+            let state = sync.get(&hbmp).unwrap();
+            assert!(state.needs_release_sync);
+        }
+
+        ctx.mark_surface_bitmap_dirty(hbmp);
+        {
+            let sync = ctx.surface_bitmap_sync.lock().unwrap();
+            let state = sync.get(&hbmp).unwrap();
+            assert!(!state.needs_release_sync);
+            assert!(state.needs_full_upload);
+        }
+    }
+
+    #[test]
+    fn surface_bitmap_rect_upload_is_clipped_to_bitmap_bounds() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(2, 2);
+        let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+
+        ctx.mark_surface_bitmap_has_content(hbmp);
+        ctx.queue_surface_bitmap_rect_upload(
+            hbmp,
+            &[0xFF00_0001, 0xFF00_0002, 0xFF00_0003, 0xFF00_0004],
+            2,
+            2,
+            -1,
+            -1,
+            2,
+            1,
+        );
+
+        let updates = ctx.take_surface_bitmap_uploads(hbmp);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].x, 0);
+        assert_eq!(updates[0].y, 0);
+        assert_eq!(updates[0].width, 2);
+        assert_eq!(updates[0].height, 1);
+        assert_eq!(updates[0].pixels, vec![0xFF00_0001, 0xFF00_0002]);
+    }
+
+    #[test]
+    fn surface_bitmap_line_command_is_queued() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(4, 4);
+        let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+
+        ctx.queue_surface_bitmap_line(hbmp, 0, 1, 3, 2, 0xFF11_2233);
+
+        let commands = ctx.take_surface_bitmap_draw_commands(hbmp);
+        assert_eq!(
+            commands,
+            vec![GpuDrawCommand::Line {
+                surface_bitmap: hbmp,
+                x1: 0,
+                y1: 1,
+                x2: 3,
+                y2: 2,
+                color: 0xFF11_2233,
+            }]
+        );
+    }
+
+    #[test]
+    fn surface_bitmap_text_mask_command_is_queued() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(4, 4);
+        let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+
+        ctx.queue_surface_bitmap_text_mask(hbmp, 1, 2, 3, 4, 0xFFAA_BBCC, vec![1, 2, 3]);
+
+        let commands = ctx.take_surface_bitmap_draw_commands(hbmp);
+        assert_eq!(
+            commands,
+            vec![GpuDrawCommand::TextMask {
+                surface_bitmap: hbmp,
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+                color: 0xFFAA_BBCC,
+                alpha: vec![1, 2, 3],
+            }]
+        );
+    }
+
+    #[test]
+    fn surface_bitmap_blit_command_is_queued() {
+        let ctx = Win32Context::new(None);
+        let hbmp = ctx.create_surface_bitmap(8, 8);
+        let _ = ctx.consume_surface_bitmap_full_upload(hbmp);
+
+        ctx.queue_surface_bitmap_blit(
+            hbmp,
+            1,
+            2,
+            5,
+            6,
+            4,
+            4,
+            [0.0, 0.0, 1.0, 1.0],
+            vec![0xFFFF_FFFF; 16],
+        );
+
+        let commands = ctx.take_surface_bitmap_draw_commands(hbmp);
+        assert_eq!(
+            commands,
+            vec![GpuDrawCommand::Blit {
+                surface_bitmap: hbmp,
+                left: 1,
+                top: 2,
+                right: 5,
+                bottom: 6,
+                src_width: 4,
+                src_height: 4,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                pixels: vec![0xFFFF_FFFF; 16],
+            }]
+        );
     }
 
     #[test]

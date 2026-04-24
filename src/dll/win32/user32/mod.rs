@@ -105,7 +105,7 @@ impl USER32 {
 
     /// 지정된 스레드 메시지 큐에 `WM_QUIT`를 하나만 유지하며 적재합니다.
     fn queue_thread_quit(ctx: &Win32Context, thread_id: u32, exit_code: u32) {
-        let time = ctx.start_time.elapsed().as_millis() as u32;
+        let time = crate::diagnostics::virtual_millis(ctx.start_time);
         let target_tid = ctx.normalize_queue_thread_id(thread_id);
         ctx.with_thread_message_queue(target_tid, |queue| {
             if !queue.iter().any(|msg| msg[0] == 0 && msg[1] == 0x0012) {
@@ -573,25 +573,30 @@ impl USER32 {
         uc.get_data()
             .emu_depth
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut failed = false;
         if let Err(e) = run_nested_guest_until_exit(uc, wnd_proc as u64) {
+            failed = true;
             let fault_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(wnd_proc as u64) as u32;
             let fault_info = uc.resolve_address(fault_eip);
-            crate::emu_log!(
+            let message = format!(
                 "[USER32] dispatch_to_wndproc: execution failed at {:#x} ({}) while dispatching {:#x} ({}) (msg={:#x}): {:?}",
-                fault_eip,
-                fault_info,
-                wnd_proc,
-                wnd_proc_info,
-                msg,
-                e
+                fault_eip, fault_info, wnd_proc, wnd_proc_info, msg, e
             );
+            if e.starts_with("GIF ") {
+                eprintln!("{message}");
+            }
+            crate::emu_log!("{message}");
         }
         uc.get_data()
             .emu_depth
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         Self::pop_cursor_dispatch_target(uc.get_data());
 
-        let ret = uc.reg_read(RegisterX86::EAX).unwrap() as i32;
+        let ret = if failed {
+            Self::default_wndproc_error_return(msg)
+        } else {
+            uc.reg_read(RegisterX86::EAX).unwrap() as i32
+        };
 
         let _ = uc.reg_write(RegisterX86::ESP, saved_esp);
         let _ = uc.reg_write(RegisterX86::EBX, saved_ebx);
@@ -601,6 +606,14 @@ impl USER32 {
         let _ = uc.reg_write(RegisterX86::EIP, saved_eip);
 
         ret
+    }
+
+    fn default_wndproc_error_return(msg: u32) -> i32 {
+        match msg {
+            Self::WM_NCCREATE => 1,
+            Self::WM_CREATE => 0,
+            _ => 0,
+        }
     }
 
     /// `DispatchMessageA`가 `WM_TIMER`와 함께 `TIMERPROC`를 직접 호출해야 하는 경로를 처리합니다.

@@ -27,6 +27,32 @@ fn intersect_rect(
     normalize_rect((a.0.max(b.0), a.1.max(b.1), a.2.min(b.2), a.3.min(b.3)))
 }
 
+fn queue_fill_rects_for_clip(
+    ctx: &Win32Context,
+    surface_bitmap: u32,
+    clip_rects: &[(i32, i32, i32, i32)],
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    color: u32,
+) {
+    for &clip_rect in clip_rects {
+        if let Some((fill_left, fill_top, fill_right, fill_bottom)) =
+            intersect_rect((left, top, right, bottom), clip_rect)
+        {
+            ctx.queue_surface_bitmap_fill_rect(
+                surface_bitmap,
+                fill_left,
+                fill_top,
+                fill_right,
+                fill_bottom,
+                color,
+            );
+        }
+    }
+}
+
 fn region_complexity(rects: &[(i32, i32, i32, i32)]) -> i32 {
     match rects.len() {
         0 => NULLREGION,
@@ -440,6 +466,7 @@ pub(super) fn select_clip_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     let ctx = uc.get_data();
     let mut result = 0;
     let mut dc_info = None;
+    let mut selected_copy = 0;
     let region_rects;
     {
         let mut gdi_objects = ctx.gdi_objects.lock().unwrap();
@@ -451,6 +478,15 @@ pub(super) fn select_clip_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
         } else {
             None
         };
+        if let Some(rects) = &region_rects {
+            selected_copy = ctx.alloc_handle();
+            gdi_objects.insert(
+                selected_copy,
+                GdiObject::Region {
+                    rects: rects.clone(),
+                },
+            );
+        }
 
         if let Some(GdiObject::Dc {
             associated_window,
@@ -462,16 +498,21 @@ pub(super) fn select_clip_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
             ..
         }) = gdi_objects.get_mut(&hdc)
         {
-            *selected_region = hrgn;
-            result = region_rects
-                .as_deref()
-                .map(region_complexity)
-                .unwrap_or(SIMPLEREGION);
-            dc_info = Some((*associated_window, *width, *height, *origin_x, *origin_y));
+            if hrgn == 0 || selected_copy != 0 {
+                // Win32는 HRGN 자체가 아니라 region 내용을 DC에 복사합니다.
+                *selected_region = selected_copy;
+                result = region_rects
+                    .as_deref()
+                    .map(region_complexity)
+                    .unwrap_or(SIMPLEREGION);
+                dc_info = Some((*associated_window, *width, *height, *origin_x, *origin_y));
+            } else {
+                result = ERROR;
+            }
         }
     }
 
-    if let (Some((hwnd, width, height, 0, 0)), Some(rects)) = (dc_info, region_rects)
+    if let (Some((hwnd, width, height, 0, 0)), Some(rects)) = (dc_info, region_rects.as_ref())
         && hwnd != 0
         && let Some(metrics) = infer_guest_frame_from_clip_rects(width, height, &rects)
     {
@@ -755,6 +796,60 @@ pub(super) fn rectangle(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
             drop(gdi_objects);
             GDI32::flush_dib_pixels_to_memory(uc, hbmp);
             if hwnd != 0 {
+                if let Some(color) = brush_color {
+                    queue_fill_rects_for_clip(
+                        uc.get_data(),
+                        hbmp,
+                        &clip_rects,
+                        left + origin_x,
+                        top + origin_y,
+                        right + origin_x,
+                        bottom + origin_y,
+                        color,
+                    );
+                }
+                if let Some(color) = pen_color {
+                    queue_fill_rects_for_clip(
+                        uc.get_data(),
+                        hbmp,
+                        &clip_rects,
+                        left + origin_x,
+                        top + origin_y,
+                        right + origin_x,
+                        top + origin_y + 1,
+                        color,
+                    );
+                    queue_fill_rects_for_clip(
+                        uc.get_data(),
+                        hbmp,
+                        &clip_rects,
+                        left + origin_x,
+                        bottom + origin_y - 1,
+                        right + origin_x,
+                        bottom + origin_y,
+                        color,
+                    );
+                    queue_fill_rects_for_clip(
+                        uc.get_data(),
+                        hbmp,
+                        &clip_rects,
+                        left + origin_x,
+                        top + origin_y,
+                        left + origin_x + 1,
+                        bottom + origin_y,
+                        color,
+                    );
+                    queue_fill_rects_for_clip(
+                        uc.get_data(),
+                        hbmp,
+                        &clip_rects,
+                        right + origin_x - 1,
+                        top + origin_y,
+                        right + origin_x,
+                        bottom + origin_y,
+                        color,
+                    );
+                }
                 uc.get_data().win_event.lock().unwrap().update_window(hwnd);
             }
         }
@@ -873,6 +968,14 @@ pub(super) fn line_to(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             drop(gdi_objects);
             GDI32::flush_dib_pixels_to_memory(uc, hbmp);
             if hwnd != 0 {
+                uc.get_data().queue_surface_bitmap_line(
+                    hbmp,
+                    x1 + origin_x,
+                    y1 + origin_y,
+                    x + origin_x,
+                    y + origin_y,
+                    color,
+                );
                 uc.get_data().win_event.lock().unwrap().update_window(hwnd);
             }
         }
@@ -1078,6 +1181,14 @@ pub(super) fn set_pixel(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
             drop(gdi);
             GDI32::flush_dib_pixels_to_memory(uc, hbmp);
             if hwnd != 0 {
+                uc.get_data().queue_surface_bitmap_fill_rect(
+                    hbmp,
+                    x,
+                    y,
+                    x + 1,
+                    y + 1,
+                    GDI32::colorref_to_argb(cr),
+                );
                 uc.get_data().win_event.lock().unwrap().update_window(hwnd);
             }
         }
@@ -1191,6 +1302,18 @@ pub(super) fn pat_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                 drop(gdi);
                 GDI32::flush_dib_pixels_to_memory(uc, hbmp);
                 if hwnd != 0 {
+                    let default_clip = vec![(0, 0, width as i32, height as i32)];
+                    let clip_rects = clip_rects.unwrap_or(default_clip);
+                    queue_fill_rects_for_clip(
+                        uc.get_data(),
+                        hbmp,
+                        &clip_rects,
+                        x + origin_x,
+                        y + origin_y,
+                        x + origin_x + w,
+                        y + origin_y + h,
+                        color,
+                    );
                     uc.get_data().win_event.lock().unwrap().update_window(hwnd);
                 }
             }
@@ -1211,7 +1334,9 @@ pub(super) fn pat_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_rects, infer_guest_frame_from_clip_rects, select_clip_rgn};
+    use super::{
+        SIMPLEREGION, canonicalize_rects, infer_guest_frame_from_clip_rects, select_clip_rgn,
+    };
     use crate::dll::win32::{GdiObject, Win32Context, WindowState};
     use crate::helper::UnicornHelper;
     use unicorn_engine::{Arch, Mode, RegisterX86, Unicorn};
@@ -1471,6 +1596,39 @@ mod tests {
         assert_eq!(window.guest_frame_right, 12);
         assert_eq!(window.guest_frame_bottom, 8);
         assert!(window.guest_frame_exact);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_arch = "aarch64",
+        ignore = "cargo test 러너에서 Unicorn 초기화가 SIGILL을 유발함"
+    )]
+    fn select_clip_rgn_copies_region_before_selection() {
+        let mut uc = new_test_uc();
+        let hdc = insert_dc(uc.get_data(), 0, 100, 80, 0, 0);
+        let original_rects = vec![(5, 6, 30, 40)];
+        let hrgn = insert_region(uc.get_data(), original_rects.clone());
+        write_call_frame(&mut uc, &[hdc, hrgn]);
+
+        let result = select_clip_rgn(&mut uc).expect("select_clip_rgn result");
+
+        assert_eq!(result.return_value, Some(SIMPLEREGION));
+        let gdi_objects = uc.get_data().gdi_objects.lock().unwrap();
+        let selected_region = match gdi_objects.get(&hdc).unwrap() {
+            GdiObject::Dc {
+                selected_region, ..
+            } => *selected_region,
+            _ => unreachable!(),
+        };
+        assert_ne!(selected_region, hrgn);
+        assert!(matches!(
+            gdi_objects.get(&hrgn),
+            Some(GdiObject::Region { rects }) if *rects == original_rects
+        ));
+        assert!(matches!(
+            gdi_objects.get(&selected_region),
+            Some(GdiObject::Region { rects }) if *rects == original_rects
+        ));
     }
 
     #[test]

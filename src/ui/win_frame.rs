@@ -1,16 +1,20 @@
 use crate::{
     dll::win32::{GdiObject, Win32Context},
-    ui::{Painter, UiCommand, WindowPositionMode},
+    ui::{
+        Painter, UiCommand, WindowPositionMode,
+        render::{
+            RenderFrameError, RenderOutcome, SurfaceAcquireError, UiGpuContext, WindowRenderTarget,
+        },
+    },
 };
 use rfd::{AsyncMessageDialog, MessageButtons, MessageDialogResult, MessageLevel};
-use softbuffer::{Context as SoftContext, Surface};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    num::NonZeroU32,
     pin::Pin,
     sync::{Arc, mpsc::Receiver},
     task::{Context, Poll, Wake, Waker},
+    time::{Duration, Instant},
 };
 #[cfg(target_os = "windows")]
 use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
@@ -22,16 +26,13 @@ use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, NamedKey},
-    raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle},
+    raw_window_handle::HasWindowHandle,
     window::{Icon, Window, WindowAttributes, WindowButtons, WindowId, WindowLevel},
 };
 
 // Windows 스타일 -> winit 속성 매핑
 const WS_CAPTION: u32 = 0x00C0_0000;
 const WS_CHILD: u32 = 0x4000_0000;
-const WS_POPUP: u32 = 0x8000_0000;
-const WS_DLGFRAME: u32 = 0x0040_0000;
-const WS_BORDER: u32 = 0x0080_0000;
 const WS_SYSMENU: u32 = 0x0008_0000;
 const WS_THICKFRAME: u32 = 0x0004_0000; // WS_SIZEBOX
 const WS_MINIMIZEBOX: u32 = 0x0002_0000;
@@ -43,10 +44,14 @@ const CW_USEDEFAULT: i32 = i32::MIN;
 const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 #[cfg(target_os = "windows")]
 const WS_EX_APPWINDOW: u32 = 0x0004_0000;
-
-type WinSurface = Surface<DisplayHandle<'static>, Window>;
 const WM_CHAR: u32 = 0x0102;
 const WM_IME_CHAR: u32 = 0x0286;
+const GUEST_REDRAW_COALESCE_DELAY: Duration = Duration::from_millis(2);
+const SURFACE_RETRY_DELAY: Duration = Duration::from_millis(16);
+
+fn trace_ui_enabled() -> bool {
+    std::env::var("EMUL_TRACE_UI").ok().as_deref() == Some("1")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HostParentLink {
@@ -75,14 +80,13 @@ struct HostWindowStyle {
 }
 
 impl HostWindowStyle {
-    fn from_guest(style: u32, ex_style: u32, use_native_frame: bool) -> Self {
+    fn from_guest(style: u32, ex_style: u32, use_native_frame: bool, has_window_rgn: bool) -> Self {
         // WS_POPUP 자체가 프레임을 금지하는 것은 아니므로,
         // 실제 장식 여부는 캡션/프레임 비트와 호스트 네이티브 프레임 사용 여부로만 결정합니다.
-        let framing_bits = WS_CAPTION | WS_BORDER | WS_DLGFRAME | WS_THICKFRAME;
-        let is_shaped_popup = (style & WS_POPUP) != 0 && (style & framing_bits) == 0;
         let decorations = use_native_frame && (style & WS_CAPTION) != 0;
         let resizable = (style & WS_THICKFRAME) != 0;
-        let transparent = (ex_style & WS_EX_LAYERED) != 0 || is_shaped_popup;
+        // WS_POPUP 단독은 투명 창이 아니며, 리전이나 layered 스타일이 있을 때만 compositor 투명이 필요합니다.
+        let transparent = (ex_style & WS_EX_LAYERED) != 0 || has_window_rgn;
         let topmost = (ex_style & WS_EX_TOPMOST) != 0;
         #[cfg(target_os = "windows")]
         let skip_taskbar = (ex_style & WS_EX_TOOLWINDOW) != 0 && (ex_style & WS_EX_APPWINDOW) == 0;
@@ -163,15 +167,14 @@ impl Wake for UiEventLoopWake {
     }
 }
 
-/// 윈도우 애플리케이션 핸들러
-/// 모든 winit 윈도우와 Painter를 관리함
+/// 윈도우 애플리케이션 핸들러입니다.
+///
+/// 모든 `winit` 윈도우와 `wgpu` 렌더 타깃을 관리합니다.
 pub struct WinFrame {
     ui_rx: Receiver<UiCommand>,
 
-    /// 윈도우 ID -> softbuffer Surface (내부에 Window를 소유)
-    surfaces: HashMap<WindowId, WinSurface>,
-    /// 윈도우 ID -> Painter (그리기 로직)
-    painters: HashMap<WindowId, Box<dyn Painter>>,
+    /// 윈도우 ID -> `wgpu` 렌더 타깃
+    render_targets: HashMap<WindowId, WindowRenderTarget>,
     /// 가상 HWND -> 윈도우 ID
     hwnd_to_id: HashMap<u32, WindowId>,
     /// 윈도우 ID -> 가상 HWND
@@ -182,13 +185,15 @@ pub struct WinFrame {
     main_guest_hwnd: Option<u32>,
     /// 메인 게스트 창을 이미 한 번이라도 등록했는지 여부
     main_guest_window_registered: bool,
+    /// guest가 ShowWindow를 보내기 전이라도 첫 프레임 렌더 시 메인 창을 노출했는지 여부
+    main_guest_window_forced_visible: bool,
 
-    /// softbuffer 컨텍스트
-    sb_context: Option<SoftContext<DisplayHandle<'static>>>,
+    /// 공유 `wgpu` 장치와 파이프라인 상태
+    gpu_context: Option<UiGpuContext>,
     /// Win32 컨텍스트 (공유 상태)
     pub emu_context: Win32Context,
 
-    /// 초기 페인터 목록 (resumed에서 창 생성 후 painters로 이동)
+    /// 초기 페인터 목록 (resumed에서 창 생성 후 render_targets로 이동)
     initial_painters: Vec<Box<dyn Painter>>,
 
     /// 현재 활성화된 커서 애니메이션 상태 (None이면 정적 커서)
@@ -207,6 +212,8 @@ pub struct WinFrame {
     last_sent_mouse_pos: Option<(u32, u32, u32)>,
     /// UI 스레드에 떠 있는 비동기 메시지 박스 목록
     pending_message_dialogs: Vec<PendingMessageDialog>,
+    /// guest UpdateWindow 요청을 짧게 모아 중간 GDI 프레임 노출을 줄이는 대기 목록
+    pending_dirty_windows: HashMap<WindowId, Instant>,
 }
 
 impl WinFrame {
@@ -247,12 +254,22 @@ impl WinFrame {
             .collect()
     }
 
-    /// guest가 지정한 대상 창 하나에만 실제 호스트 포커스를 요청합니다.
+    fn activation_focus_targets(&self, root_hwnd: u32) -> Vec<u32> {
+        if self.hwnd_to_id.contains_key(&root_hwnd) {
+            vec![root_hwnd]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// 지정된 창 하나에만 호스트 포커스를 요청합니다.
     fn activate_window_tree(&self, root_hwnd: u32) {
-        if let Some(id) = self.hwnd_to_id.get(&root_hwnd)
-            && let Some(window) = self.get_window(id)
-        {
-            window.focus_window();
+        for hwnd in self.activation_focus_targets(root_hwnd) {
+            if let Some(id) = self.hwnd_to_id.get(&hwnd)
+                && let Some(window) = self.get_window(id)
+            {
+                window.focus_window();
+            }
         }
     }
 
@@ -281,21 +298,24 @@ impl WinFrame {
         ex_style: u32,
         use_native_frame: bool,
     ) -> WindowAttributes {
-        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
+        let host_visible = if parent == 0 { true } else { visible };
 
-        let class_icon = {
+        let (class_icon, has_window_rgn) = {
             let win_event = self.emu_context.win_event.lock().unwrap();
             win_event.windows.get(&hwnd).map(|state| {
-                if state.small_icon != 0 {
+                let class_icon = if state.small_icon != 0 {
                     state.small_icon
                 } else if state.big_icon != 0 {
                     state.big_icon
                 } else {
                     state.class_icon
-                }
+                };
+                (class_icon, state.window_rgn != 0)
             })
         }
-        .unwrap_or(0);
+        .unwrap_or((0, false));
+        let host_style =
+            HostWindowStyle::from_guest(style, ex_style, use_native_frame, has_window_rgn);
 
         let mut attributes = Window::default_attributes()
             // 게스트가 다루는 좌표계는 픽셀 기반이므로 backing store 크기와 1:1로 맞춥니다.
@@ -305,7 +325,7 @@ impl WinFrame {
             .with_resizable(host_style.resizable)
             .with_title(title)
             .with_transparent(host_style.transparent)
-            .with_visible(visible)
+            .with_visible(host_visible)
             .with_window_icon(self.host_window_icon(class_icon))
             .with_window_level(host_style.window_level());
 
@@ -323,13 +343,9 @@ impl WinFrame {
             use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
 
             attributes = attributes
-                .with_borderless_game(true)
-                // .with_decorations(false)
-                .with_fullsize_content_view(true)
-                .with_option_as_alt(OptionAsAlt::Both)
-                .with_title_hidden(true)
-                .with_titlebar_buttons_hidden(true)
-                .with_titlebar_transparent(true);
+                .with_decorations(false)
+                .with_has_shadow(false)
+                .with_option_as_alt(OptionAsAlt::Both);
         }
 
         #[cfg(target_os = "windows")]
@@ -378,6 +394,39 @@ impl WinFrame {
         attributes
     }
 
+    fn set_macos_corner_radius(&self, window: &Window, radius: f32) {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::{NSColor, NSView};
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+            let Ok(handle) = window.window_handle() else {
+                return;
+            };
+
+            let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                return;
+            };
+
+            unsafe {
+                let ns_view: &NSView = appkit.ns_view.cast::<NSView>().as_ref();
+                ns_view.setWantsLayer(true);
+
+                if let Some(ns_window) = ns_view.window() {
+                    ns_window.setOpaque(false);
+                    ns_window.setBackgroundColor(Some(&NSColor::clearColor()));
+                    ns_window.setHasShadow(true);
+                }
+
+                if let Some(layer) = ns_view.layer() {
+                    layer.setCornerRadius(radius.into());
+                    layer.setMasksToBounds(true);
+                }
+            }
+        }
+    }
+
+    /// UI 채널과 초기 painter 목록으로 새 프레임 핸들러를 생성합니다.
     pub fn new(
         ui_rx: Receiver<UiCommand>,
         initial_painters: Vec<Box<dyn Painter>>,
@@ -385,14 +434,14 @@ impl WinFrame {
     ) -> Self {
         Self {
             ui_rx,
-            surfaces: HashMap::new(),
-            painters: HashMap::new(),
+            render_targets: HashMap::new(),
             hwnd_to_id: HashMap::new(),
             id_to_hwnd: HashMap::new(),
             hwnd_native_frame: HashMap::new(),
             main_guest_hwnd: None,
             main_guest_window_registered: false,
-            sb_context: None,
+            main_guest_window_forced_visible: false,
+            gpu_context: None,
             emu_context: context,
             initial_painters,
             cursor_anim: None,
@@ -403,11 +452,19 @@ impl WinFrame {
             last_cursor_moved: None,
             last_sent_mouse_pos: None,
             pending_message_dialogs: Vec::new(),
+            pending_dirty_windows: HashMap::new(),
         }
     }
 
+    fn ensure_gpu_context(&mut self) -> Result<&UiGpuContext, String> {
+        if self.gpu_context.is_none() {
+            self.gpu_context = Some(UiGpuContext::new()?);
+        }
+        Ok(self.gpu_context.as_ref().unwrap())
+    }
+
     fn get_window(&self, id: &WindowId) -> Option<&Window> {
-        self.surfaces.get(id).map(|s| s.window())
+        self.render_targets.get(id).map(WindowRenderTarget::window)
     }
 
     /// 첫 번째 게스트 최상위 창을 메인 창으로 기록합니다.
@@ -415,6 +472,7 @@ impl WinFrame {
         if (style & WS_CHILD) == 0 && !self.main_guest_window_registered {
             self.main_guest_hwnd = Some(hwnd);
             self.main_guest_window_registered = true;
+            self.main_guest_window_forced_visible = false;
         }
     }
 
@@ -422,6 +480,7 @@ impl WinFrame {
     fn take_main_guest_window_close(&mut self, hwnd: u32) -> bool {
         if self.main_guest_hwnd == Some(hwnd) {
             self.main_guest_hwnd = None;
+            self.main_guest_window_forced_visible = false;
             true
         } else {
             false
@@ -470,8 +529,8 @@ impl WinFrame {
 
     /// 창을 제거하고 관련 상태(커서 애니메이션 포함)를 정리합니다.
     fn remove_window(&mut self, id: WindowId) {
-        self.surfaces.remove(&id);
-        self.painters.remove(&id);
+        self.render_targets.remove(&id);
+        self.pending_dirty_windows.remove(&id);
         if let Some(hwnd) = self.id_to_hwnd.remove(&id) {
             self.hwnd_to_id.remove(&hwnd);
             self.hwnd_native_frame.remove(&hwnd);
@@ -486,16 +545,6 @@ impl WinFrame {
 
         // 창이 파괴되면 해당 창과 연결된 커서 상태도 정리합니다.
         self.clear_cursor_state_for_window(id);
-    }
-
-    #[allow(dead_code)]
-    pub fn get_painter_mut<T: Painter + 'static>(
-        &mut self,
-        id: winit::window::WindowId,
-    ) -> Option<&mut T> {
-        self.painters
-            .get_mut(&id)
-            .and_then(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
     /// 현재 커서 적용 규칙에 따른 소유 창을 계산합니다.
@@ -735,8 +784,10 @@ impl WinFrame {
         style: u32,
         ex_style: u32,
         use_native_frame: bool,
+        has_window_rgn: bool,
     ) {
-        let host_style = HostWindowStyle::from_guest(style, ex_style, use_native_frame);
+        let host_style =
+            HostWindowStyle::from_guest(style, ex_style, use_native_frame, has_window_rgn);
 
         window.set_decorations(host_style.decorations);
         window.set_resizable(host_style.resizable);
@@ -835,6 +886,7 @@ impl WinFrame {
         let mut dirty_windows = HashSet::new();
 
         while let Ok(cmd) = self.ui_rx.try_recv() {
+            let start = std::time::Instant::now();
             match cmd {
                 UiCommand::CreateWindow {
                     hwnd,
@@ -852,6 +904,9 @@ impl WinFrame {
                     surface_bitmap,
                     ..
                 } => {
+                    if parent == 0 {
+                        self.register_main_guest_window(hwnd, style);
+                    }
                     let attributes = self.generate_window_attributes(
                         hwnd,
                         title,
@@ -866,13 +921,11 @@ impl WinFrame {
                         ex_style,
                         use_native_frame,
                     );
-                    let window = event_loop.create_window(attributes).unwrap();
+                    let window = Arc::new(event_loop.create_window(attributes).unwrap());
                     // IME(한글 등 조합 문자)를 입력받기 위해 활성화합니다.
                     window.set_ime_allowed(true);
+                    self.set_macos_corner_radius(&window, if parent == 0 { 8.0 } else { 10.0 });
                     let id = window.id();
-                    if parent == 0 {
-                        self.register_main_guest_window(hwnd, style);
-                    }
                     crate::emu_log!(
                         "[UI] host window created HWND {:#x} visible={} size={}x{} style={:#x} ex_style={:#x} parent={:#x}",
                         hwnd,
@@ -886,19 +939,18 @@ impl WinFrame {
                     self.hwnd_to_id.insert(hwnd, id);
                     self.id_to_hwnd.insert(id, hwnd);
                     self.hwnd_native_frame.insert(hwnd, use_native_frame);
-
-                    let painter = DefaultEmulatorPainter {
-                        hwnd,
-                        surface_bitmap,
-                        emu_context: self.emu_context.clone(),
+                    if parent == 0 && !self.main_guest_window_forced_visible {
+                        crate::emu_log!("[UI] host eager-show main HWND {:#x}", hwnd);
+                        window.set_visible(true);
+                        self.main_guest_window_forced_visible = true;
+                        dirty_windows.insert(id);
+                    }
+                    self.ensure_gpu_context().unwrap();
+                    let target = {
+                        let gpu = self.gpu_context.as_ref().unwrap();
+                        WindowRenderTarget::new_guest(gpu, window, hwnd, surface_bitmap).unwrap()
                     };
-                    self.painters.insert(id, Box::new(painter));
-                    let context = self
-                        .sb_context
-                        .as_ref()
-                        .expect("Context should be initialized");
-                    let surface = Surface::new(context, window).unwrap();
-                    self.surfaces.insert(id, surface);
+                    self.render_targets.insert(id, target);
                     dirty_windows.insert(id);
                 }
 
@@ -912,8 +964,23 @@ impl WinFrame {
                     {
                         let use_native_frame =
                             self.hwnd_native_frame.get(&hwnd).copied().unwrap_or(true);
+                        let has_window_rgn = self
+                            .emu_context
+                            .win_event
+                            .lock()
+                            .unwrap()
+                            .windows
+                            .get(&hwnd)
+                            .map(|state| state.window_rgn != 0)
+                            .unwrap_or(false);
 
-                        Self::apply_guest_window_style(window, style, ex_style, use_native_frame);
+                        Self::apply_guest_window_style(
+                            window,
+                            style,
+                            ex_style,
+                            use_native_frame,
+                            has_window_rgn,
+                        );
                         dirty_windows.insert(*id);
                     }
                 }
@@ -933,17 +1000,29 @@ impl WinFrame {
                 }
 
                 UiCommand::ShowWindow { hwnd, visible } => {
-                    if let Some(id) = self.hwnd_to_id.get(&hwnd)
-                        && let Some(window) = self.get_window(id)
-                    {
-                        crate::emu_log!(
-                            "[UI] host ShowWindow HWND {:#x} visible={}",
-                            hwnd,
-                            visible
-                        );
-                        window.set_visible(visible);
-                        if visible {
-                            dirty_windows.insert(*id);
+                    if let Some(id) = self.hwnd_to_id.get(&hwnd).copied() {
+                        if self.main_guest_hwnd == Some(hwnd) {
+                            if visible {
+                                self.main_guest_window_forced_visible = false;
+                            } else if self.main_guest_window_forced_visible {
+                                crate::emu_log!(
+                                    "[UI] host keep main HWND {:#x} visible during startup",
+                                    hwnd
+                                );
+                                dirty_windows.insert(id);
+                                continue;
+                            }
+                        }
+                        if let Some(window) = self.get_window(&id) {
+                            crate::emu_log!(
+                                "[UI] host ShowWindow HWND {:#x} visible={}",
+                                hwnd,
+                                visible
+                            );
+                            window.set_visible(visible);
+                            if visible {
+                                dirty_windows.insert(id);
+                            }
                         }
                     } else {
                         crate::emu_log!(
@@ -996,7 +1075,7 @@ impl WinFrame {
                     if let Some(id) = self.hwnd_to_id.get(&hwnd)
                         && let Some(_window) = self.get_window(id)
                     {
-                        dirty_windows.insert(*id);
+                        self.schedule_dirty_window(*id, GUEST_REDRAW_COALESCE_DELAY);
                     }
                 }
 
@@ -1083,6 +1162,11 @@ impl WinFrame {
                     }
                 }
             }
+
+            let elapsed = start.elapsed();
+            if elapsed.as_millis() > 50 {
+                println!("[WATCHDOG] UI Command took {:?} to process", elapsed);
+            }
         }
 
         dirty_windows
@@ -1161,9 +1245,9 @@ impl WinFrame {
 
     fn next_poll_interval(&self) -> Option<std::time::Duration> {
         let painter_interval = self
-            .painters
+            .render_targets
             .values()
-            .filter_map(|painter| painter.poll_interval())
+            .filter_map(WindowRenderTarget::poll_interval)
             .min();
 
         // 커서 애니메이션이 활성화되어 있으면 그 간격도 고려
@@ -1186,19 +1270,125 @@ impl WinFrame {
             (None, None, None) => None,
         }
     }
+
+    /// 지연 시간이 지난 guest redraw 요청을 즉시 처리 목록으로 옮깁니다.
+    fn collect_ready_guest_redraws(
+        &mut self,
+        now: Instant,
+        dirty_windows: &mut HashSet<WindowId>,
+    ) -> Option<Instant> {
+        let mut next_deadline = None;
+        self.pending_dirty_windows.retain(|id, ready_at| {
+            if now >= *ready_at {
+                dirty_windows.insert(*id);
+                false
+            } else {
+                next_deadline = Some(
+                    next_deadline.map_or(*ready_at, |current: Instant| current.min(*ready_at)),
+                );
+                true
+            }
+        });
+        next_deadline
+    }
+
+    /// 즉시 재요청 대신 짧은 지연 뒤 redraw를 다시 시도하도록 예약합니다.
+    fn schedule_dirty_window(&mut self, id: WindowId, delay: Duration) {
+        let ready_at = Instant::now() + delay;
+        self.pending_dirty_windows
+            .entry(id)
+            .and_modify(|current| {
+                if ready_at < *current {
+                    *current = ready_at;
+                }
+            })
+            .or_insert(ready_at);
+    }
+
+    /// 지정된 창의 현재 프레임을 이벤트 대기 없이 즉시 제출합니다.
+    fn render_window(&mut self, id: WindowId) -> bool {
+        if !self.should_render_window(id) {
+            return false;
+        }
+
+        let hwnd = self.id_to_hwnd.get(&id).copied();
+        let Some(gpu) = self.gpu_context.as_ref() else {
+            return false;
+        };
+
+        if trace_ui_enabled() {
+            eprintln!("[TRACE_UI] render_window {:?}", id);
+        }
+
+        let rendered = {
+            let Some(target) = self.render_targets.get_mut(&id) else {
+                return false;
+            };
+            match target.render(gpu, &self.emu_context) {
+                Ok(RenderOutcome::Rendered) => true,
+                Ok(RenderOutcome::Skipped) => false,
+                Err(RenderFrameError::Surface(err)) => {
+                    match err {
+                        SurfaceAcquireError::Lost | SurfaceAcquireError::Outdated => {
+                            target.reconfigure_surface(gpu);
+                            self.schedule_dirty_window(id, SURFACE_RETRY_DELAY);
+                        }
+                        SurfaceAcquireError::Timeout | SurfaceAcquireError::Occluded => {
+                            crate::emu_log!("[UI] wgpu surface timeout for {:?}", id);
+                            self.schedule_dirty_window(id, SURFACE_RETRY_DELAY);
+                        }
+                        SurfaceAcquireError::Validation => {
+                            crate::emu_log!("[UI] wgpu surface error for {:?}", id);
+                            self.schedule_dirty_window(id, SURFACE_RETRY_DELAY);
+                        }
+                    }
+                    true
+                }
+            }
+        };
+
+        if rendered
+            && hwnd.is_some_and(|handle| self.main_guest_hwnd == Some(handle))
+            && !self.main_guest_window_forced_visible
+            && let Some(window) = self.get_window(&id)
+        {
+            crate::emu_log!("[UI] host auto-show main HWND {:#x}", hwnd.unwrap_or(0));
+            window.set_visible(true);
+            self.main_guest_window_forced_visible = true;
+        }
+
+        rendered
+    }
+
+    /// 숨김 상태인 guest 창은 실제로 표시되기 전까지 렌더를 건너뜁니다.
+    fn should_render_window(&self, id: WindowId) -> bool {
+        let Some(hwnd) = self.id_to_hwnd.get(&id).copied() else {
+            return true;
+        };
+
+        if self.main_guest_hwnd == Some(hwnd) {
+            return true;
+        }
+
+        self.emu_context
+            .win_event
+            .lock()
+            .unwrap()
+            .windows
+            .get(&hwnd)
+            .map(|state| state.visible)
+            .unwrap_or(true)
+    }
 }
 
 impl ApplicationHandler<()> for WinFrame {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.sb_context.is_none() {
-            let display_handle = unsafe {
-                std::mem::transmute::<DisplayHandle<'_>, DisplayHandle<'static>>(
-                    event_loop.display_handle().unwrap(),
-                )
-            };
-            self.sb_context = Some(SoftContext::new(display_handle).unwrap());
+        if trace_ui_enabled() {
+            eprintln!(
+                "[TRACE_UI] resumed initial_painters={}",
+                self.initial_painters.len()
+            );
         }
-
         if let Some(monitor) = event_loop.primary_monitor() {
             let position = monitor.position();
             let size = monitor.size();
@@ -1214,20 +1404,29 @@ impl ApplicationHandler<()> for WinFrame {
         // 초기 페인터들을 위한 창 생성
         let mut initial_painters = std::mem::take(&mut self.initial_painters);
         for painter in initial_painters.drain(..) {
-            let window = painter.create_window(event_loop);
+            if trace_ui_enabled() {
+                eprintln!("[TRACE_UI] creating initial painter window");
+            }
+            let window = Arc::new(painter.create_window(event_loop));
             let id = window.id();
-            self.painters.insert(id, painter);
-            let context = self
-                .sb_context
-                .as_ref()
-                .expect("Context should be initialized");
-            let surface = Surface::new(context, window).unwrap();
-            self.surfaces.insert(id, surface);
+            if trace_ui_enabled() {
+                eprintln!("[TRACE_UI] created window {:?}", id);
+            }
+            self.ensure_gpu_context().unwrap();
+            let target = {
+                let gpu = self.gpu_context.as_ref().unwrap();
+                WindowRenderTarget::new_cpu_painter(gpu, window.clone(), painter).unwrap()
+            };
+            self.render_targets.insert(id, target);
+            window.request_redraw();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        crate::UI_HEARTBEAT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut dirty_windows = self.process_ui_commands(event_loop);
+        let next_dirty_deadline =
+            self.collect_ready_guest_redraws(Instant::now(), &mut dirty_windows);
         self.poll_pending_message_dialogs();
 
         // 커서 애니메이션 프레임 전환 체크
@@ -1235,11 +1434,11 @@ impl ApplicationHandler<()> for WinFrame {
 
         // 모든 Painter에게 백그라운드 상태 변경 알림 및 종료 체크
         let mut windows_to_remove = Vec::new();
-        for (id, painter) in self.painters.iter_mut() {
-            if painter.tick() {
+        for (id, target) in self.render_targets.iter_mut() {
+            if target.tick() {
                 dirty_windows.insert(*id);
             }
-            if painter.should_close() {
+            if target.should_close() {
                 windows_to_remove.push(*id);
             }
         }
@@ -1249,14 +1448,26 @@ impl ApplicationHandler<()> for WinFrame {
         }
 
         for id in dirty_windows {
-            if let Some(window) = self.get_window(&id) {
+            if self.should_render_window(id)
+                && !self.render_window(id)
+                && let Some(window) = self.get_window(&id)
+            {
                 window.request_redraw();
             }
         }
 
-        if let Some(interval) = self.next_poll_interval() {
+        let dirty_interval =
+            next_dirty_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let interval = match (self.next_poll_interval(), dirty_interval) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+
+        if let Some(interval) = interval {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                std::time::Instant::now() + interval,
+                Instant::now() + interval,
             ));
         } else {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
@@ -1264,15 +1475,15 @@ impl ApplicationHandler<()> for WinFrame {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if !self.surfaces.contains_key(&id) {
+        if !self.render_targets.contains_key(&id) {
             return;
         }
 
         // 윈도우별 자체 이벤트 처리 위임 및 필요한 정보 추출
-        let (handled, quit_on_close) = if let Some(painter) = self.painters.get_mut(&id) {
+        let (handled, quit_on_close) = if let Some(target) = self.render_targets.get_mut(&id) {
             (
-                painter.handle_event(&event, event_loop),
-                painter.quit_on_close(),
+                target.handle_event(&event, event_loop),
+                target.quit_on_close(),
             )
         } else {
             (false, false)
@@ -1286,26 +1497,7 @@ impl ApplicationHandler<()> for WinFrame {
             WindowEvent::RedrawRequested => {
                 // 호스트 redraw는 현재 guest 표면을 출력만 해야 합니다.
                 // 여기서 다시 WM_PAINT를 만들면 EndPaint/UpdateWindow와 순환해 과도한 redraw가 발생합니다.
-                if let Some(surface) = self.surfaces.get_mut(&id) {
-                    let (width, height) = {
-                        let size = surface.window().inner_size();
-                        (size.width, size.height)
-                    };
-
-                    if let (Some(nw), Some(nh)) = (NonZeroU32::new(width), NonZeroU32::new(height))
-                    {
-                        surface.resize(nw, nh).unwrap();
-
-                        let mut buffer = surface.buffer_mut().unwrap();
-                        buffer.fill(0);
-
-                        if let Some(painter) = self.painters.get_mut(&id)
-                            && painter.paint(&mut buffer, width, height)
-                        {
-                            buffer.present().unwrap();
-                        }
-                    }
-                }
+                self.render_window(id);
             }
 
             WindowEvent::CloseRequested => {
@@ -1353,7 +1545,7 @@ impl ApplicationHandler<()> for WinFrame {
                     self.last_cursor_moved = Some((hwnd, now));
                     self.last_sent_mouse_pos = Some((hwnd, x, y));
 
-                    let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                    let time = crate::diagnostics::virtual_millis(self.emu_context.start_time);
                     let lparam = (y << 16) | (x & 0xFFFF);
                     let capture_hwnd = self
                         .emu_context
@@ -1421,7 +1613,7 @@ impl ApplicationHandler<()> for WinFrame {
                         && track.hwnd != hwnd
                         && (track.flags & 0x00000002 != 0)
                     {
-                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        let time = crate::diagnostics::virtual_millis(self.emu_context.start_time);
                         let track_tid = self.queue_message_for_window(
                             track.hwnd,
                             [track.hwnd, 0x02A3, 0, 0, time, 0, 0],
@@ -1444,7 +1636,7 @@ impl ApplicationHandler<()> for WinFrame {
                         && track.hwnd == hwnd
                         && (track.flags & 0x00000002 != 0)
                     {
-                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        let time = crate::diagnostics::virtual_millis(self.emu_context.start_time);
                         let target_tid = self.queue_message_for_window(
                             track.hwnd,
                             [track.hwnd, 0x02A3, 0, 0, time, 0, 0],
@@ -1470,7 +1662,7 @@ impl ApplicationHandler<()> for WinFrame {
                     // 클릭 직전 현재 위치에 대한 이동 메시지 전송을 보장합니다.
                     let target_tid = self.emu_context.window_owner_thread_id(hwnd);
                     if self.last_sent_mouse_pos != Some((hwnd, x, y)) {
-                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        let time = crate::diagnostics::virtual_millis(self.emu_context.start_time);
                         let lparam = (y << 16) | (x & 0xFFFF);
                         self.emu_context.with_thread_message_queue(target_tid, |q| {
                             q.push_back([hwnd, 0x0200, 0, lparam, time, x, y]);
@@ -1500,7 +1692,7 @@ impl ApplicationHandler<()> for WinFrame {
                     };
 
                     if msg != 0 {
-                        let time = self.emu_context.start_time.elapsed().as_millis() as u32;
+                        let time = crate::diagnostics::virtual_millis(self.emu_context.start_time);
                         self.emu_context.with_thread_message_queue(target_tid, |q| {
                             q.push_back([hwnd, msg, wparam, lparam, time, x, y]);
                         });
@@ -1599,9 +1791,6 @@ impl ApplicationHandler<()> for WinFrame {
                             .active_hwnd
                             .store(hwnd, std::sync::atomic::Ordering::SeqCst);
                     }
-                    if focused {
-                        self.activate_window_tree(hwnd);
-                    }
                     self.wake_emulator(Some(target_tid));
                 }
             }
@@ -1638,12 +1827,20 @@ impl ApplicationHandler<()> for WinFrame {
                         .unwrap()
                         .resize_window(hwnd, width, height);
                     self.emu_context.sync_window_surface_bitmap(hwnd);
+                    if let Some(gpu) = self.gpu_context.as_ref()
+                        && let Some(target) = self.render_targets.get_mut(&id)
+                    {
+                        target.reconfigure_surface(gpu);
+                    }
 
                     let target_tid = self.emu_context.window_owner_thread_id(hwnd);
                     self.emu_context.with_thread_message_queue(target_tid, |q| {
                         enqueue_window_message(q, [hwnd, 0x0005, 0, lparam, 0, 0, 0]); // WM_SIZE (SIZE_RESTORED)
                     });
                     self.wake_emulator(Some(target_tid));
+                    if let Some(window) = self.get_window(&id) {
+                        window.request_redraw();
+                    }
                 }
             }
 
@@ -1652,155 +1849,15 @@ impl ApplicationHandler<()> for WinFrame {
     }
 }
 
-/// 에뮬레이터 윈도우용 기본 페인터
-pub struct DefaultEmulatorPainter {
-    hwnd: u32,
-    surface_bitmap: u32,
-    emu_context: Win32Context,
-}
-
-impl DefaultEmulatorPainter {
-    /// 윈도우 영역(SetWindowRgn) 외부의 픽셀을 0(검정/투명)으로 마스킹합니다.
-    /// 호스트 native frame이 alpha=0을 투명으로 처리하지 못하더라도,
-    /// 최소한 영역 외부에는 그리지 않도록 보장합니다.
-    fn apply_window_rgn_mask(
-        buffer: &mut [u32],
-        width: u32,
-        height: u32,
-        rects: &[(i32, i32, i32, i32)],
-    ) {
-        for y in 0..height as i32 {
-            let row_offset = (y as u32 * width) as usize;
-            for x in 0..width as i32 {
-                if !crate::ui::gdi_renderer::GdiRenderer::point_in_clip_rects(rects, x, y) {
-                    let idx = row_offset + x as usize;
-                    if idx < buffer.len() {
-                        buffer[idx] = 0;
-                    }
-                }
-            }
-        }
-    }
-
-    /// 비트맵 하나를 현재 윈도우 버퍼에 그대로 복사합니다.
-    fn blit_bitmap(
-        buffer: &mut [u32],
-        buffer_width: u32,
-        buffer_height: u32,
-        pixels: &[u32],
-        src_width: u32,
-        src_height: u32,
-    ) {
-        for src_y in 0..src_height as i32 {
-            let dst_y = src_y;
-            if dst_y < 0 || dst_y >= buffer_height as i32 {
-                continue;
-            }
-
-            let src_row_offset = (src_y as u32 * src_width) as usize;
-            let dst_row_offset = (dst_y as u32 * buffer_width) as usize;
-
-            for src_x in 0..src_width as i32 {
-                let dst_x = src_x;
-                if dst_x < 0 || dst_x >= buffer_width as i32 {
-                    continue;
-                }
-
-                let dst_idx = dst_row_offset + dst_x as usize;
-                let src_idx = src_row_offset + src_x as usize;
-                if src_idx < pixels.len() && dst_idx < buffer.len() {
-                    buffer[dst_idx] = pixels[src_idx];
-                }
-            }
-        }
-    }
-}
-
-impl Painter for DefaultEmulatorPainter {
-    fn create_window(
-        &self,
-        _event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> winit::window::Window {
-        panic!("DefaultEmulatorPainter should not be used for initial windows yet");
-    }
-
-    fn quit_on_close(&self) -> bool {
-        false
-    }
-
-    fn paint(&mut self, buffer: &mut [u32], width: u32, height: u32) -> bool {
-        // 윈도우에 SetWindowRgn으로 비직사각형 영역이 설정되어 있으면 해당 rect 목록을 미리 복사한다.
-        // gdi_objects 락과 win_event 락을 동시에 보유하지 않도록 먼저 win_event에서 rect 리스트만 추출.
-        let rgn_handle: u32 = match self.emu_context.win_event.try_lock() {
-            Ok(win_event) => win_event
-                .windows
-                .get(&self.hwnd)
-                .map(|w| w.window_rgn)
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
-
-        let gdi_objects = match self.emu_context.gdi_objects.try_lock() {
-            Ok(g) => g,
-            Err(_) => return false, // 락 획득 실패 시 이번 프레임은 건너뜀 (데드락 방지)
-        };
-
-        let region_rects: Option<Vec<(i32, i32, i32, i32)>> = if rgn_handle != 0 {
-            match gdi_objects.get(&rgn_handle) {
-                Some(GdiObject::Region { rects }) => Some(rects.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        if let Some(GdiObject::Bitmap {
-            pixels: p,
-            width: sw,
-            height: sh,
-            ..
-        }) = gdi_objects.get(&self.surface_bitmap)
-        {
-            let p = p.lock().unwrap();
-            Self::blit_bitmap(buffer, width, height, &p, *sw, *sh);
-        }
-
-        drop(gdi_objects);
-
-        if let Some(rects) = region_rects {
-            Self::apply_window_rgn_mask(buffer, width, height, &rects);
-        }
-
-        true
-    }
-
-    fn handle_event(
-        &mut self,
-        _event: &winit::event::WindowEvent,
-        _event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> bool {
-        false
-    }
-
-    fn tick(&mut self) -> bool {
-        false
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        HostWindowStyle, WS_CAPTION, WS_POPUP, WS_SYSMENU, WinFrame, enqueue_window_message,
+        HostWindowStyle, WS_CAPTION, WS_EX_LAYERED, WS_SYSMENU, WinFrame, enqueue_window_message,
     };
     use crate::dll::win32::{Win32Context, WindowState};
     use winit::window::{WindowButtons, WindowId};
+
+    const WS_POPUP: u32 = 0x8000_0000;
 
     #[test]
     fn duplicated_resize_messages_keep_only_latest_one() {
@@ -1959,9 +2016,36 @@ mod tests {
     }
 
     #[test]
+    fn owned_popups_do_not_expand_host_focus_targets() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let context = Win32Context::new(None);
+        let mut frame = WinFrame::new(rx, Vec::new(), context.clone());
+        let root_id = dummy_window_id(10);
+        let first_popup_id = dummy_window_id(11);
+        let second_popup_id = dummy_window_id(12);
+
+        frame.hwnd_to_id.insert(0x1000, root_id);
+        frame.hwnd_to_id.insert(0x1001, first_popup_id);
+        frame.hwnd_to_id.insert(0x1002, second_popup_id);
+
+        let mut first_popup = sample_window_state(0x1000, 1);
+        first_popup.style = WS_POPUP;
+        let mut second_popup = sample_window_state(0x1000, 2);
+        second_popup.style = WS_POPUP;
+        {
+            let mut win_event = context.win_event.lock().unwrap();
+            win_event.create_window(0x1000, sample_window_state(0, 0));
+            win_event.create_window(0x1001, first_popup);
+            win_event.create_window(0x1002, second_popup);
+        }
+
+        assert_eq!(frame.activation_focus_targets(0x1000), vec![0x1000]);
+    }
+
+    #[test]
     fn framed_popup_keeps_native_decorations() {
         let host_style =
-            HostWindowStyle::from_guest(0x8000_0000 | WS_CAPTION | WS_SYSMENU, 0, true);
+            HostWindowStyle::from_guest(0x8000_0000 | WS_CAPTION | WS_SYSMENU, 0, true, false);
 
         assert!(host_style.decorations);
         assert!(host_style.enabled_buttons.contains(WindowButtons::CLOSE));
@@ -1969,22 +2053,36 @@ mod tests {
 
     #[test]
     fn plain_popup_stays_undecorated() {
-        let host_style = HostWindowStyle::from_guest(0x8000_0000, 0, true);
+        let host_style = HostWindowStyle::from_guest(0x8000_0000, 0, true, false);
 
         assert!(!host_style.decorations);
         assert!(host_style.enabled_buttons.is_empty());
     }
 
     #[test]
-    fn plain_popup_is_transparent_for_region_clipping() {
-        let host_style = HostWindowStyle::from_guest(WS_POPUP, 0, true);
+    fn plain_popup_stays_opaque_without_region() {
+        let host_style = HostWindowStyle::from_guest(WS_POPUP, 0, true, false);
+
+        assert!(!host_style.transparent);
+    }
+
+    #[test]
+    fn layered_popup_is_transparent() {
+        let host_style = HostWindowStyle::from_guest(WS_POPUP, WS_EX_LAYERED, true, false);
+
+        assert!(host_style.transparent);
+    }
+
+    #[test]
+    fn region_popup_is_transparent() {
+        let host_style = HostWindowStyle::from_guest(WS_POPUP, 0, true, true);
 
         assert!(host_style.transparent);
     }
 
     #[test]
     fn framed_popup_stays_opaque() {
-        let host_style = HostWindowStyle::from_guest(WS_POPUP | WS_CAPTION, 0, true);
+        let host_style = HostWindowStyle::from_guest(WS_POPUP | WS_CAPTION, 0, true, false);
 
         assert!(!host_style.transparent);
     }

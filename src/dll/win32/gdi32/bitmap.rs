@@ -22,6 +22,44 @@ fn apply_bitmap_rop(dst_val: u32, src_val: u32, rop: u32) -> u32 {
     dst_alpha | rgb
 }
 
+fn intersect_rect(
+    a: (i32, i32, i32, i32),
+    b: (i32, i32, i32, i32),
+) -> Option<(i32, i32, i32, i32)> {
+    let left = a.0.max(b.0);
+    let top = a.1.max(b.1);
+    let right = a.2.min(b.2);
+    let bottom = a.3.min(b.3);
+    (left < right && top < bottom).then_some((left, top, right, bottom))
+}
+
+fn clipped_rect_uv(
+    rect: (i32, i32, i32, i32),
+    dest_rect: (i32, i32, i32, i32),
+    src_rect: (f32, f32, f32, f32),
+    src_width: u32,
+    src_height: u32,
+) -> [f32; 4] {
+    let dest_width = (dest_rect.2 - dest_rect.0).max(1) as f32;
+    let dest_height = (dest_rect.3 - dest_rect.1).max(1) as f32;
+    let tx0 = (rect.0 - dest_rect.0) as f32 / dest_width;
+    let ty0 = (rect.1 - dest_rect.1) as f32 / dest_height;
+    let tx1 = (rect.2 - dest_rect.0) as f32 / dest_width;
+    let ty1 = (rect.3 - dest_rect.1) as f32 / dest_height;
+    let lerp = |start: f32, end: f32, t: f32| start + (end - start) * t;
+
+    [
+        lerp(src_rect.0, src_rect.2, tx0) / src_width.max(1) as f32,
+        lerp(src_rect.1, src_rect.3, ty0) / src_height.max(1) as f32,
+        lerp(src_rect.0, src_rect.2, tx1) / src_width.max(1) as f32,
+        lerp(src_rect.1, src_rect.3, ty1) / src_height.max(1) as f32,
+    ]
+}
+
+fn rect_covers_bitmap(rect: (i32, i32, i32, i32), width: u32, height: u32) -> bool {
+    rect.0 <= 0 && rect.1 <= 0 && rect.2 >= width as i32 && rect.3 >= height as i32
+}
+
 // API: HBITMAP CreateDIBSection(HDC hdc, const BITMAPINFO *pbmi, UINT usage, VOID **ppvBits, HANDLE hSection, DWORD offset)
 // 역할: 애플리케이션이 직접 쓸 수 있는 DIB(장치 독립적 비트맵)를 생성
 pub(super) fn create_dib_section(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
@@ -38,6 +76,10 @@ pub(super) fn create_dib_section(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
     let top_down = header.top_down;
     let stride = header.stride;
     let bit_count = header.bit_count;
+    let red_mask = header.red_mask;
+    let green_mask = header.green_mask;
+    let blue_mask = header.blue_mask;
+    let alpha_mask = header.alpha_mask;
     let bmp_size = stride * height;
 
     let bits_addr = uc.malloc(bmp_size as usize);
@@ -66,11 +108,20 @@ pub(super) fn create_dib_section(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
             bit_count,
             top_down,
             palette: header.palette,
-            red_mask: header.red_mask,
-            green_mask: header.green_mask,
-            blue_mask: header.blue_mask,
-            alpha_mask: header.alpha_mask,
+            red_mask,
+            green_mask,
+            blue_mask,
+            alpha_mask,
         },
+    );
+    crate::diagnostics::record_dib_section(
+        hbmp,
+        bits_addr as u32,
+        bmp_size,
+        width,
+        height,
+        bit_count,
+        stride,
     );
     crate::emu_log!(
         "[GDI32] CreateDIBSection({:#x}, {:#x}, {}, {:#x}, {:#x}, {}) -> HBITMAP {:#x} ({}x{} stride={} top_down={})",
@@ -164,6 +215,7 @@ pub(super) fn create_bitmap(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
                 height,
                 stride,
                 bpp as u16,
+                super::BI_RGB,
                 false,
                 &[],
                 0,
@@ -286,6 +338,7 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                 let (sw, sh) = (*sw, *sh);
                 let mut dp = dp.lock().unwrap();
                 let sp = sp.lock().unwrap();
+                let mut queued_gpu_blit = false;
                 for y in 0..n_dest_height as i32 {
                     let sy = y_src + y + src_origin_y;
                     let dy = y_dest + y + dst_origin_y;
@@ -308,6 +361,86 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                         let dst_val = dp[dst_idx];
                         dp[dst_idx] = apply_bitmap_rop(dst_val, src_val, rop);
                     }
+                }
+                let dest_rect = (
+                    x_dest + dst_origin_x,
+                    y_dest + dst_origin_y,
+                    x_dest + dst_origin_x + n_dest_width as i32,
+                    y_dest + dst_origin_y + n_dest_height as i32,
+                );
+                if rop == 0x00CC0020 && uc.get_data().is_surface_bitmap(hbmp_dest) {
+                    let src_rect = (
+                        x_src + src_origin_x,
+                        y_src + src_origin_y,
+                        x_src + src_origin_x + n_dest_width as i32,
+                        y_src + src_origin_y + n_dest_height as i32,
+                    );
+                    if let Some((src_w, src_h, src_pixels)) = {
+                        let clipped_left = src_rect.0.max(0).min(sw as i32);
+                        let clipped_top = src_rect.1.max(0).min(sh as i32);
+                        let clipped_right = src_rect.2.max(0).min(sw as i32);
+                        let clipped_bottom = src_rect.3.max(0).min(sh as i32);
+                        if clipped_left >= clipped_right || clipped_top >= clipped_bottom {
+                            None
+                        } else {
+                            let rect_width = (clipped_right - clipped_left) as u32;
+                            let rect_height = (clipped_bottom - clipped_top) as u32;
+                            let mut result =
+                                Vec::with_capacity(rect_width.saturating_mul(rect_height) as usize);
+                            for y in clipped_top..clipped_bottom {
+                                let row_start = y as usize * sw as usize + clipped_left as usize;
+                                let row_end = row_start + rect_width as usize;
+                                result.extend_from_slice(&sp[row_start..row_end]);
+                            }
+                            Some((rect_width, rect_height, result))
+                        }
+                    } {
+                        let dest_bounds = (0, 0, dw as i32, dh as i32);
+                        let clipped_dest = if let Some(clip_rects) = &clip_rects {
+                            clip_rects
+                                .iter()
+                                .filter_map(|&clip| intersect_rect(dest_rect, clip))
+                                .collect::<Vec<_>>()
+                        } else {
+                            intersect_rect(dest_rect, dest_bounds)
+                                .into_iter()
+                                .collect::<Vec<_>>()
+                        };
+                        for rect in clipped_dest {
+                            if let Some(rect) = intersect_rect(rect, dest_bounds) {
+                                let u0 = (rect.0 - dest_rect.0) as f32 / n_dest_width.max(1) as f32;
+                                let v0 =
+                                    (rect.1 - dest_rect.1) as f32 / n_dest_height.max(1) as f32;
+                                let u1 = (rect.2 - dest_rect.0) as f32 / n_dest_width.max(1) as f32;
+                                let v1 =
+                                    (rect.3 - dest_rect.1) as f32 / n_dest_height.max(1) as f32;
+                                uc.get_data().queue_surface_bitmap_blit(
+                                    hbmp_dest,
+                                    rect.0,
+                                    rect.1,
+                                    rect.2,
+                                    rect.3,
+                                    src_w,
+                                    src_h,
+                                    [u0, v0, u1, v1],
+                                    src_pixels.clone(),
+                                );
+                                queued_gpu_blit = true;
+                            }
+                        }
+                    }
+                }
+                if !queued_gpu_blit {
+                    uc.get_data().queue_surface_bitmap_rect_upload(
+                        hbmp_dest,
+                        &dp,
+                        dw,
+                        dh,
+                        dest_rect.0,
+                        dest_rect.1,
+                        dest_rect.2,
+                        dest_rect.3,
+                    );
                 }
                 drop(dp);
                 drop(sp);
@@ -393,6 +526,16 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
                         Some(color),
                     );
                 }
+                uc.get_data().queue_surface_bitmap_rect_upload(
+                    hbmp,
+                    &pixels,
+                    width,
+                    height,
+                    x_dest + origin_x,
+                    y_dest + origin_y,
+                    x_dest + origin_x + n_dest_width as i32,
+                    y_dest + origin_y + n_dest_height as i32,
+                );
                 drop(pixels);
                 drop(gdi);
                 GDI32::flush_dib_pixels_to_memory(uc, hbmp);
@@ -402,7 +545,6 @@ pub(super) fn bit_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             }
         }
     }
-
     crate::emu_log!(
         "[GDI32] BitBlt({:#x}, {}, {}, {}, {}, {:#x}, {}, {}, {:#x}) -> int 1",
         hdc_dest,
@@ -519,6 +661,7 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
             let (dw, dh) = (*dw, *dh);
             let sp = sp.lock().unwrap();
             let mut dp = dp.lock().unwrap();
+            let mut queued_gpu_blit = false;
 
             let abs_dw = n_dest_width.abs();
             let abs_dh = n_dest_height.abs();
@@ -556,6 +699,84 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                         dp[dst_idx] = apply_bitmap_rop(dst_val, src_val, rop);
                     }
                 }
+            }
+            let dest_rect = (
+                x_dest + dst_origin_x,
+                y_dest + dst_origin_y,
+                x_dest + dst_origin_x + n_dest_width.abs(),
+                y_dest + dst_origin_y + n_dest_height.abs(),
+            );
+            if rop == 0x00CC0020 && uc.get_data().is_surface_bitmap(hbmp_dest) {
+                let src_rect = (
+                    x_src + src_origin_x,
+                    y_src + src_origin_y,
+                    x_src + src_origin_x + n_src_width.abs(),
+                    y_src + src_origin_y + n_src_height.abs(),
+                );
+                if let Some((src_w, src_h, src_pixels)) = {
+                    let clipped_left = src_rect.0.max(0).min(sw);
+                    let clipped_top = src_rect.1.max(0).min(sh);
+                    let clipped_right = src_rect.2.max(0).min(sw);
+                    let clipped_bottom = src_rect.3.max(0).min(sh);
+                    if clipped_left >= clipped_right || clipped_top >= clipped_bottom {
+                        None
+                    } else {
+                        let rect_width = (clipped_right - clipped_left) as u32;
+                        let rect_height = (clipped_bottom - clipped_top) as u32;
+                        let mut result =
+                            Vec::with_capacity(rect_width.saturating_mul(rect_height) as usize);
+                        for y in clipped_top..clipped_bottom {
+                            let row_start = y as usize * sw as usize + clipped_left as usize;
+                            let row_end = row_start + rect_width as usize;
+                            result.extend_from_slice(&sp[row_start..row_end]);
+                        }
+                        Some((rect_width, rect_height, result))
+                    }
+                } {
+                    let dest_bounds = (0, 0, dw as i32, dh as i32);
+                    let clipped_dest = if let Some(clip_rects) = &clip_rects {
+                        clip_rects
+                            .iter()
+                            .filter_map(|&clip| intersect_rect(dest_rect, clip))
+                            .collect::<Vec<_>>()
+                    } else {
+                        intersect_rect(dest_rect, dest_bounds)
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                    };
+                    for rect in clipped_dest {
+                        if let Some(rect) = intersect_rect(rect, dest_bounds) {
+                            let u0 = (rect.0 - dest_rect.0) as f32 / abs_dw.max(1) as f32;
+                            let v0 = (rect.1 - dest_rect.1) as f32 / abs_dh.max(1) as f32;
+                            let u1 = (rect.2 - dest_rect.0) as f32 / abs_dw.max(1) as f32;
+                            let v1 = (rect.3 - dest_rect.1) as f32 / abs_dh.max(1) as f32;
+                            uc.get_data().queue_surface_bitmap_blit(
+                                hbmp_dest,
+                                rect.0,
+                                rect.1,
+                                rect.2,
+                                rect.3,
+                                src_w,
+                                src_h,
+                                [u0, v0, u1, v1],
+                                src_pixels.clone(),
+                            );
+                            queued_gpu_blit = true;
+                        }
+                    }
+                }
+            }
+            if !queued_gpu_blit {
+                uc.get_data().queue_surface_bitmap_rect_upload(
+                    hbmp_dest,
+                    &dp,
+                    dw,
+                    dh,
+                    dest_rect.0,
+                    dest_rect.1,
+                    dest_rect.2,
+                    dest_rect.3,
+                );
             }
         }
     } else if rop == 0x00F00021 || rop == 0x00000042 || rop == 0x00FF0062 {
@@ -609,6 +830,16 @@ pub(super) fn stretch_blt(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
                     Some(color),
                 );
             }
+            uc.get_data().queue_surface_bitmap_rect_upload(
+                hbmp_dest,
+                &dp,
+                dw,
+                dh,
+                x_dest + dst_origin_x,
+                y_dest + dst_origin_y,
+                x_dest + dst_origin_x + n_dest_width.abs(),
+                y_dest + dst_origin_y + n_dest_height.abs(),
+            );
         }
     }
 
@@ -663,11 +894,25 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
     // BITMAPINFOHEADER 읽기
     let header = read_dib_header(uc, lp_bits_info);
     let bmi_width = header.width;
+    let bmi_height = header.height;
     let top_down = header.top_down;
     let stride = header.stride;
 
-    let total_bytes = (stride * c_scans) as usize;
-    let offset_bits = lp_bits as u64 + (u_start_scan * stride) as u64;
+    let compressed = matches!(header.compression, super::BI_RLE8 | super::BI_RLE4);
+    let total_bytes = if compressed {
+        if header.size_image != 0 {
+            header.size_image
+        } else {
+            stride.saturating_mul(bmi_height)
+        }
+    } else {
+        stride.saturating_mul(c_scans)
+    } as usize;
+    let offset_bits = if compressed {
+        lp_bits as u64
+    } else {
+        lp_bits as u64 + (u_start_scan * stride) as u64
+    };
     let raw = uc
         .mem_read_as_vec(offset_bits, total_bytes)
         .unwrap_or_default();
@@ -676,12 +921,13 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
     }
 
     // c_scans 개 행을 변환 (bottom-up 기준 uStartScan번째 행부터)
-    let src_pixels = super::raw_dib_to_pixels(
+    let decoded_pixels = super::raw_dib_to_pixels(
         &raw,
         bmi_width,
-        c_scans,
+        if compressed { bmi_height } else { c_scans },
         stride,
         header.bit_count,
+        header.compression,
         top_down,
         &header.palette,
         header.red_mask,
@@ -689,6 +935,20 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
         header.blue_mask,
         header.alpha_mask,
     );
+    let scan_start = u_start_scan.min(bmi_height) as usize;
+    let scan_end = u_start_scan.saturating_add(c_scans).min(bmi_height) as usize;
+    let (src_pixels, src_dh) = if compressed {
+        let mut cropped =
+            Vec::with_capacity(bmi_width as usize * scan_end.saturating_sub(scan_start));
+        for row in scan_start..scan_end {
+            let row_start = row * bmi_width as usize;
+            let row_end = row_start + bmi_width as usize;
+            cropped.extend_from_slice(&decoded_pixels[row_start..row_end]);
+        }
+        (cropped, (scan_end.saturating_sub(scan_start)) as u32)
+    } else {
+        (decoded_pixels, c_scans)
+    };
 
     // 대상 DC → 비트맵 찾기
     let (hbmp_dest, hwnd_dest, origin_x, origin_y) = {
@@ -721,11 +981,11 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
             let dw = *dw;
             let dh = *dh;
             let mut dp = dp.lock().unwrap();
+            let mut queued_gpu_blit = false;
             // SetDIBitsToDevice는 cScans만큼의 scan lines를 복사합니다.
             // uStartScan은 DIB 내에서 시작 scan line index입니다.
             // Win32 GDI coordinates: (xDest, yDest)는 대상의 시작점. uStartScan은 DIB 소스의 시작점.
             let src_dw = bmi_width; // src_pixels의 로우 너비는 bmi_width입니다.
-            let src_dh = c_scans;
 
             // y_src는 DIB 논리 좌표에서의 시작 Y(top-down 변환 후 src_pixels에 그대로 적용).
             // 이전 구현은 y_src를 무시하고 항상 0행부터 읽어 서브-렉트 복사시 잘못된 행을 샘플링했습니다.
@@ -752,6 +1012,68 @@ pub(super) fn set_dib_its_to_device(uc: &mut Unicorn<Win32Context>) -> Option<Ap
                         dp[dst_idx] = GDI32::blend_source_over(dp[dst_idx], src_pixels[src_idx]);
                     }
                 }
+            }
+            let dest_rect = (
+                x_dest + origin_x,
+                y_dest + origin_y,
+                x_dest + origin_x + (dw_width as i32).abs(),
+                y_dest + origin_y + c_scans as i32,
+            );
+            if uc.get_data().is_surface_bitmap(hbmp_dest) && rect_covers_bitmap(dest_rect, dw, dh) {
+                uc.get_data().mark_surface_bitmap_has_content(hbmp_dest);
+                uc.get_data().mark_surface_bitmap_dirty(hbmp_dest);
+            } else if uc.get_data().is_surface_bitmap(hbmp_dest) {
+                let dest_bounds = (0, 0, dw as i32, dh as i32);
+                let clipped_dest = if let Some(clip_rects) = &clip_rects {
+                    clip_rects
+                        .iter()
+                        .filter_map(|&clip| intersect_rect(dest_rect, clip))
+                        .collect::<Vec<_>>()
+                } else {
+                    intersect_rect(dest_rect, dest_bounds)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                };
+                for rect in clipped_dest {
+                    if let Some(rect) = intersect_rect(rect, dest_bounds) {
+                        let [u0, v0, u1, v1] = clipped_rect_uv(
+                            rect,
+                            dest_rect,
+                            (
+                                x_src as f32,
+                                y_src as f32,
+                                x_src as f32 + dw_width.max(1) as f32,
+                                y_src as f32 + src_dh.max(1) as f32,
+                            ),
+                            src_dw,
+                            src_dh,
+                        );
+                        uc.get_data().queue_surface_bitmap_blit(
+                            hbmp_dest,
+                            rect.0,
+                            rect.1,
+                            rect.2,
+                            rect.3,
+                            src_dw,
+                            src_dh,
+                            [u0, v0, u1, v1],
+                            src_pixels.clone(),
+                        );
+                        queued_gpu_blit = true;
+                    }
+                }
+            }
+            if !queued_gpu_blit {
+                uc.get_data().queue_surface_bitmap_rect_upload(
+                    hbmp_dest,
+                    &dp,
+                    dw,
+                    dh,
+                    dest_rect.0,
+                    dest_rect.1,
+                    dest_rect.2,
+                    dest_rect.3,
+                );
             }
         }
         drop(gdi);
@@ -810,7 +1132,13 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
     let top_down = header.top_down;
     let stride = header.stride;
 
-    let total_bytes = (stride * bmi_height) as usize;
+    let total_bytes = if matches!(header.compression, super::BI_RLE8 | super::BI_RLE4)
+        && header.size_image != 0
+    {
+        header.size_image as usize
+    } else {
+        (stride * bmi_height) as usize
+    };
     let raw = uc
         .mem_read_as_vec(lp_bits as u64, total_bytes)
         .unwrap_or_default();
@@ -824,6 +1152,7 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
         bmi_height,
         stride,
         header.bit_count,
+        header.compression,
         top_down,
         &header.palette,
         header.red_mask,
@@ -862,6 +1191,7 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
             let dw = *dw;
             let dh = *dh;
             let mut dp = dp.lock().unwrap();
+            let mut queued_gpu_blit = false;
             // 최근접 이웃(nearest-neighbor) 스케일링
             let _sw = n_src_width as u32;
             let _sh = n_src_height as u32;
@@ -945,6 +1275,89 @@ pub(super) fn stretch_dib_its(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookR
                         );
                     }
                 }
+            }
+            let dest_rect = (
+                x_dest + origin_x,
+                y_dest + origin_y,
+                x_dest + origin_x + n_dest_width.abs(),
+                y_dest + origin_y + n_dest_height.abs(),
+            );
+            if uc.get_data().is_surface_bitmap(hbmp_dest) && rect_covers_bitmap(dest_rect, dw, dh) {
+                uc.get_data().mark_surface_bitmap_has_content(hbmp_dest);
+                uc.get_data().mark_surface_bitmap_dirty(hbmp_dest);
+            } else if rop == 0x00CC0020 && uc.get_data().is_surface_bitmap(hbmp_dest) {
+                let dest_bounds = (0, 0, dw as i32, dh as i32);
+                let clipped_dest = if let Some(clip_rects) = &clip_rects {
+                    clip_rects
+                        .iter()
+                        .filter_map(|&clip| intersect_rect(dest_rect, clip))
+                        .collect::<Vec<_>>()
+                } else {
+                    intersect_rect(dest_rect, dest_bounds)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                };
+                for rect in clipped_dest {
+                    if let Some(rect) = intersect_rect(rect, dest_bounds) {
+                        let src_rect = if n_dest_width >= 0 {
+                            (
+                                x_src as f32,
+                                if n_dest_height >= 0 {
+                                    y_src as f32
+                                } else {
+                                    y_src as f32 + n_src_height as f32
+                                },
+                                x_src as f32 + n_src_width as f32,
+                                if n_dest_height >= 0 {
+                                    y_src as f32 + n_src_height as f32
+                                } else {
+                                    y_src as f32
+                                },
+                            )
+                        } else {
+                            (
+                                x_src as f32 + n_src_width as f32,
+                                if n_dest_height >= 0 {
+                                    y_src as f32
+                                } else {
+                                    y_src as f32 + n_src_height as f32
+                                },
+                                x_src as f32,
+                                if n_dest_height >= 0 {
+                                    y_src as f32 + n_src_height as f32
+                                } else {
+                                    y_src as f32
+                                },
+                            )
+                        };
+                        let [u0, v0, u1, v1] =
+                            clipped_rect_uv(rect, dest_rect, src_rect, bmi_width, bmi_height);
+                        uc.get_data().queue_surface_bitmap_blit(
+                            hbmp_dest,
+                            rect.0,
+                            rect.1,
+                            rect.2,
+                            rect.3,
+                            bmi_width,
+                            bmi_height,
+                            [u0, v0, u1, v1],
+                            src_pixels.clone(),
+                        );
+                        queued_gpu_blit = true;
+                    }
+                }
+            }
+            if !queued_gpu_blit {
+                uc.get_data().queue_surface_bitmap_rect_upload(
+                    hbmp_dest,
+                    &dp,
+                    dw,
+                    dh,
+                    dest_rect.0,
+                    dest_rect.1,
+                    dest_rect.2,
+                    dest_rect.3,
+                );
             }
         }
         drop(gdi);

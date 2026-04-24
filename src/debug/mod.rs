@@ -1,4 +1,5 @@
 pub mod common;
+pub mod diagnostics;
 pub mod logging;
 
 use std::sync::mpsc::{Receiver, Sender};
@@ -26,14 +27,14 @@ pub const fn is_debug_mode() -> bool {
 
 /// 디버그 창을 생성할지 여부를 결정합니다.
 #[inline(always)]
-pub const fn should_create_debug_window() -> bool {
-    is_debug_mode()
+pub fn should_create_debug_window() -> bool {
+    is_debug_mode() && std::env::var("EMUL_DEBUG_WINDOW").ok().as_deref() != Some("0")
 }
 
 /// 디버그 창으로 상태와 로그를 전달할지 여부를 결정합니다.
 #[inline(always)]
-pub const fn should_send_debug_messages() -> bool {
-    should_create_debug_window()
+pub fn should_send_debug_messages() -> bool {
+    should_create_debug_window() || crate::diagnostics::trace_gif_enabled()
 }
 
 struct FrameBuffer<'a> {
@@ -51,8 +52,10 @@ impl<'a> DrawTarget for FrameBuffer<'a> {
             if x >= 0 && x < self.width as i32 {
                 let offset = (y as u32 * self.width + x as u32) as usize;
                 if offset < self.buffer.len() {
-                    self.buffer[offset] =
-                        ((color.r() as u32) << 16) | ((color.g() as u32) << 8) | (color.b() as u32);
+                    self.buffer[offset] = (0xFF << 24)
+                        | ((color.r() as u32) << 16)
+                        | ((color.g() as u32) << 8)
+                        | (color.b() as u32);
                 }
             }
         }

@@ -124,20 +124,27 @@ pub(super) fn fread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     }
 
     let mut data = vec![0u8; total_size];
+    let mut trace_info = None;
     let bytes_read = {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
         if let Some(state) = files.get_mut(&{ stream_handle }) {
+            let path = state.path.clone();
+            let offset_before = state.file.stream_position().ok();
             match state.file.read(&mut data) {
                 Ok(bytes_read) => {
                     state.eof = bytes_read < total_size;
                     if bytes_read > 0 {
                         state.error = false;
                     }
+                    let offset_after = state.file.stream_position().ok();
+                    trace_info = Some((path, offset_before, offset_after, bytes_read));
                     bytes_read
                 }
                 Err(_) => {
                     mark_file_error(state);
+                    let offset_after = state.file.stream_position().ok();
+                    trace_info = Some((path, offset_before, offset_after, 0));
                     0
                 }
             }
@@ -149,6 +156,18 @@ pub(super) fn fread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     if bytes_read > 0 {
         uc.mem_write(buffer_addr as u64, &data[..bytes_read])
             .unwrap();
+    }
+    if let Some((path, offset_before, offset_after, actual)) = trace_info {
+        crate::diagnostics::record_file_io(
+            "fread",
+            stream_handle,
+            &path,
+            offset_before,
+            offset_after,
+            total_size,
+            actual,
+            &data[..actual],
+        );
     }
 
     let actual_count = (bytes_read as u32 / size) as i32;
@@ -226,9 +245,21 @@ pub(super) fn fseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let context = uc.get_data();
     let mut files = context.files.lock().unwrap();
     if let Some(state) = files.get_mut(&{ stream_handle }) {
+        let path = state.path.clone();
+        let offset_before = state.file.stream_position().ok();
         match state.file.seek(pos) {
             Ok(new_pos) => {
                 clear_file_status(state);
+                crate::diagnostics::record_file_io(
+                    "fseek",
+                    stream_handle,
+                    &path,
+                    offset_before,
+                    Some(new_pos),
+                    0,
+                    0,
+                    &[],
+                );
                 crate::emu_log!(
                     "[MSVCRT] fseek({:#x}, {:#x}, {:#x}) -> int {:#x}",
                     stream_handle,
@@ -240,6 +271,17 @@ pub(super) fn fseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             }
             Err(e) => {
                 mark_file_error(state);
+                let offset_after = state.file.stream_position().ok();
+                crate::diagnostics::record_file_io(
+                    "fseek",
+                    stream_handle,
+                    &path,
+                    offset_before,
+                    offset_after,
+                    0,
+                    0,
+                    &[],
+                );
                 crate::emu_log!(
                     "[MSVCRT] fseek({:#x}, {:#x}, {:#x}) -> int -1 {:?}",
                     stream_handle,
@@ -268,6 +310,16 @@ pub(super) fn ftell(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     if let Some(state) = files.get_mut(&{ stream_handle }) {
         match state.file.stream_position() {
             Ok(pos) => {
+                crate::diagnostics::record_file_io(
+                    "ftell",
+                    stream_handle,
+                    &state.path,
+                    Some(pos),
+                    Some(pos),
+                    0,
+                    0,
+                    &[],
+                );
                 crate::emu_log!("[MSVCRT] ftell({:#x}) -> long {:#x}", stream_handle, pos);
                 Some(ApiHookResult::callee(1, Some(pos as i32)))
             }
@@ -402,20 +454,27 @@ pub(super) fn _read(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let count = uc.read_arg(2);
 
     let mut data = vec![0u8; count as usize];
+    let mut trace_info = None;
     let bytes_read = {
         let context = uc.get_data();
         let mut files = context.files.lock().unwrap();
         if let Some(state) = files.get_mut(&fd) {
+            let path = state.path.clone();
+            let offset_before = state.file.stream_position().ok();
             match state.file.read(&mut data) {
                 Ok(bytes_read) => {
                     state.eof = bytes_read < count as usize;
                     if bytes_read > 0 {
                         state.error = false;
                     }
+                    let offset_after = state.file.stream_position().ok();
+                    trace_info = Some((path, offset_before, offset_after, bytes_read));
                     bytes_read
                 }
                 Err(_) => {
                     mark_file_error(state);
+                    let offset_after = state.file.stream_position().ok();
+                    trace_info = Some((path, offset_before, offset_after, 0));
                     0
                 }
             }
@@ -427,6 +486,18 @@ pub(super) fn _read(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     if bytes_read > 0 {
         uc.mem_write(buffer_addr as u64, &data[..bytes_read])
             .unwrap();
+    }
+    if let Some((path, offset_before, offset_after, actual)) = trace_info {
+        crate::diagnostics::record_file_io(
+            "_read",
+            fd,
+            &path,
+            offset_before,
+            offset_after,
+            count as usize,
+            actual,
+            &data[..actual],
+        );
     }
 
     crate::emu_log!(
@@ -496,9 +567,21 @@ pub(super) fn _lseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
     let context = uc.get_data();
     let mut files = context.files.lock().unwrap();
     if let Some(state) = files.get_mut(&fd) {
+        let path = state.path.clone();
+        let offset_before = state.file.stream_position().ok();
         match state.file.seek(pos) {
             Ok(new_pos) => {
                 clear_file_status(state);
+                crate::diagnostics::record_file_io(
+                    "_lseek",
+                    fd,
+                    &path,
+                    offset_before,
+                    Some(new_pos),
+                    0,
+                    0,
+                    &[],
+                );
                 crate::emu_log!(
                     "[MSVCRT] _lseek({:#x}, {}, {}) -> int {:#x}",
                     fd,
@@ -510,6 +593,17 @@ pub(super) fn _lseek(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             }
             Err(_) => {
                 mark_file_error(state);
+                let offset_after = state.file.stream_position().ok();
+                crate::diagnostics::record_file_io(
+                    "_lseek",
+                    fd,
+                    &path,
+                    offset_before,
+                    offset_after,
+                    0,
+                    0,
+                    &[],
+                );
                 Some(ApiHookResult::callee(3, Some(-1)))
             }
         }

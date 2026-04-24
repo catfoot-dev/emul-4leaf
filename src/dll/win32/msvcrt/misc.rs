@@ -239,7 +239,11 @@ pub(super) fn rand(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 // API: void srand(unsigned int seed)
 // 역할: 난수 생성기의 시드를 설정
 pub(super) fn srand(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
-    let seed = uc.read_arg(0);
+    let seed = if crate::diagnostics::deterministic_enabled() {
+        12345
+    } else {
+        uc.read_arg(0)
+    };
     uc.get_data().rand_state.store(seed, Ordering::SeqCst);
     crate::emu_log!("[MSVCRT] srand({:#x}) -> void", seed);
     Some(ApiHookResult::caller(None))
@@ -312,6 +316,7 @@ pub(super) fn _beginthreadex(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         suspended: false,
         resume_time: None,
         wait_deadline: None,
+        wait_start_time: None,
         wait_handles: Vec::new(),
         wait_sockets: Vec::new(),
     });
@@ -399,6 +404,7 @@ pub(super) fn _beginthread(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResu
         suspended: false,
         resume_time: None,
         wait_deadline: None,
+        wait_start_time: None,
         wait_handles: Vec::new(),
         wait_sockets: Vec::new(),
     });

@@ -170,7 +170,7 @@ pub(super) fn post_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
     let msg = uc.read_arg(1);
     let wparam = uc.read_arg(2);
     let lparam = uc.read_arg(3);
-    let time = uc.get_data().start_time.elapsed().as_millis() as u32;
+    let time = crate::diagnostics::virtual_millis(uc.get_data().start_time);
     let ctx = uc.get_data();
     let target_tid = ctx.queue_message_for_window(hwnd, [hwnd, msg, wparam, lparam, time, 0, 0]);
     ctx.wake_thread_message_wait(target_tid);
@@ -455,7 +455,7 @@ pub(super) fn peek_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
 
     let (time, pt_x, pt_y) = {
         let ctx = uc.get_data();
-        let time = ctx.start_time.elapsed().as_millis() as u32;
+        let time = crate::diagnostics::virtual_millis(ctx.start_time);
         let x = ctx.mouse_x.load(std::sync::atomic::Ordering::SeqCst);
         let y = ctx.mouse_y.load(std::sync::atomic::Ordering::SeqCst);
         (time, x, y)
@@ -578,7 +578,7 @@ pub(super) fn get_message_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
                 }
             }
             if paint_hwnd != 0 {
-                let time = ctx.start_time.elapsed().as_millis() as u32;
+                let time = crate::diagnostics::virtual_millis(ctx.start_time);
                 q.push_back([paint_hwnd, 0x000F, 0, 0, time, 0, 0]);
             }
         }
@@ -788,7 +788,7 @@ pub(super) fn post_quit_message(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
     let tid = ctx
         .current_thread_idx
         .load(std::sync::atomic::Ordering::SeqCst);
-    let time = ctx.start_time.elapsed().as_millis() as u32;
+    let time = crate::diagnostics::virtual_millis(ctx.start_time);
     let target_tid = ctx.queue_message_for_thread(tid, [0, 0x0012, n_exit_code, 0, time, 0, 0]);
     ctx.wake_thread_message_wait(target_tid);
     crate::emu_log!("[USER32] PostQuitMessage({}) -> void", n_exit_code);
@@ -802,7 +802,7 @@ pub(super) fn post_thread_message_a(uc: &mut Unicorn<Win32Context>) -> Option<Ap
     let msg = uc.read_arg(1);
     let w_param = uc.read_arg(2);
     let l_param = uc.read_arg(3);
-    let time = uc.get_data().start_time.elapsed().as_millis() as u32;
+    let time = crate::diagnostics::virtual_millis(uc.get_data().start_time);
     let ctx = uc.get_data();
     let target_tid =
         ctx.queue_message_for_thread(thread_id, [0, msg, w_param, l_param, time, 0, 0]);
@@ -1099,7 +1099,7 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
         0x00A2 => {
             // WM_NCLBUTTONUP
             let ctx = uc.get_data();
-            let time = ctx.start_time.elapsed().as_millis() as u32;
+            let time = crate::diagnostics::virtual_millis(ctx.start_time);
             match w_param {
                 20 => {
                     // HTCLOSE
@@ -1132,7 +1132,7 @@ pub(super) fn def_window_proc_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHoo
                 0xF060 => {
                     // SC_CLOSE
                     let ctx = uc.get_data();
-                    let time = ctx.start_time.elapsed().as_millis() as u32;
+                    let time = crate::diagnostics::virtual_millis(ctx.start_time);
                     ctx.queue_message_for_window(hwnd, [hwnd, 0x0010, 0, 0, time, 0, 0]); // WM_CLOSE
                 }
                 0xF020 => {

@@ -20,8 +20,16 @@ pub const LIBLARY_LIME: &str = "Lime.dll";
 pub const LIBLARY_DICE: &str = "Dice.dll";
 
 const RESOURCES_NAME: &str = "Resources";
-const RESOURCES_DIR: &str = "./Resources";
-const APPLICATION_DIR: &str = "../4Leaf";
+
+const APPLICATION_DIR_1: &str = "./";
+const APPLICATION_DIR_2: &str = "../";
+const APPLICATION_DIR_3: &str = "../../../";
+const RESOURCES_DIR_1: &str = "./Resources";
+const RESOURCES_DIR_2: &str = "../Resources";
+const RESOURCES_DIR_3: &str = "../../../Resources";
+const PROGRAM_DIR_1: &str = "./4Leaf";
+const PROGRAM_DIR_2: &str = "../4Leaf";
+const PROGRAM_DIR_3: &str = "../../../4Leaf";
 
 /// 리소스 디렉토리로 인정하기 위해 반드시 존재해야 하는 파일 목록입니다.
 const REQUIRED_RESOURCE_FILES: &[&str] = &[
@@ -32,6 +40,19 @@ const REQUIRED_RESOURCE_FILES: &[&str] = &[
     LIBLARY_DNET,
     LIBLARY_LIME,
     LIBLARY_DICE,
+];
+
+const REQUIRED_RESOURCE_DIRS: &[&str] = &[
+    RESOURCES_NAME,
+    APPLICATION_DIR_1,
+    APPLICATION_DIR_2,
+    APPLICATION_DIR_3,
+    RESOURCES_DIR_1,
+    RESOURCES_DIR_2,
+    RESOURCES_DIR_3,
+    PROGRAM_DIR_1,
+    PROGRAM_DIR_2,
+    PROGRAM_DIR_3,
 ];
 
 /// 리소스 디렉토리를 동적으로 탐색하여 확정합니다.
@@ -52,18 +73,21 @@ pub fn detect_resource_dir() {
             && let Some(exe_dir) = exe.parent()
         {
             v.push(exe_dir.to_path_buf());
-            v.push(exe_dir.join(RESOURCES_NAME));
-            v.push(exe_dir.join(APPLICATION_DIR));
+            for dir in REQUIRED_RESOURCE_DIRS {
+                v.push(exe_dir.join(dir));
+            }
         }
 
         // 현재 작업 디렉토리 기준 후보
         if let Ok(cwd) = env::current_dir() {
             v.push(cwd.clone());
-            v.push(cwd.join(RESOURCES_NAME));
-            v.push(cwd.join(APPLICATION_DIR));
+            for dir in REQUIRED_RESOURCE_DIRS {
+                v.push(cwd.join(dir));
+            }
         } else {
-            v.push(PathBuf::from(RESOURCES_DIR));
-            v.push(PathBuf::from(APPLICATION_DIR));
+            for dir in REQUIRED_RESOURCE_DIRS {
+                v.push(PathBuf::from(dir));
+            }
         }
 
         v
@@ -86,22 +110,7 @@ pub fn detect_resource_dir() {
         }
     }
 
-    // fallback — 필수 파일이 없더라도 기존 동작을 유지
-    let fallback = PathBuf::from(RESOURCES_DIR);
-    let missing: Vec<&str> = REQUIRED_RESOURCE_FILES
-        .iter()
-        .filter(|f| !fallback.join(f).is_file())
-        .copied()
-        .collect();
-    if missing.is_empty() {
-        emu_log!("[BOOT] Resource directory (fallback): ./Resources");
-    } else {
-        emu_log!(
-            "[BOOT] Resource directory not found! Missing files: {}",
-            missing.join(", ")
-        );
-    }
-    let _ = RESOURCE_DIR.set(fallback);
+    panic!("Original application's resources not found!");
 }
 
 /// 확정된 리소스 디렉토리 경로를 반환합니다.
@@ -109,5 +118,5 @@ pub fn resource_dir() -> &'static Path {
     RESOURCE_DIR
         .get()
         .map(|p| p.as_path())
-        .unwrap_or(Path::new(RESOURCES_DIR))
+        .unwrap_or(Path::new(RESOURCES_DIR_1))
 }

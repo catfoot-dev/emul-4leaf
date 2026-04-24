@@ -353,10 +353,50 @@ pub(super) fn text_out_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
                 if bk_mode == 2 { Some(bk_color) } else { None }, // OPAQUE=2
                 &clip_rects,
             );
+            let text_width =
+                GdiRenderer::measure_text_width(&text, font_height.abs().max(1) as f32);
+            let (text_height, _, _) = GdiRenderer::font_metrics(font_height.abs().max(1) as f32);
             drop(pixels);
             drop(gdi_objects);
             GDI32::flush_dib_pixels_to_memory(uc, hbmp);
             if hwnd != 0 {
+                if bk_mode == 2 {
+                    for (fill_left, fill_top, fill_right, fill_bottom) in
+                        GDI32::intersect_rect_with_clip_rects(
+                            &Some(clip_rects.clone()),
+                            n_x_start + origin_x,
+                            n_y_start + origin_y,
+                            n_x_start + origin_x + text_width,
+                            n_y_start + origin_y + text_height,
+                        )
+                    {
+                        uc.get_data().queue_surface_bitmap_fill_rect(
+                            hbmp,
+                            fill_left,
+                            fill_top,
+                            fill_right,
+                            fill_bottom,
+                            bk_color,
+                        );
+                    }
+                }
+                if let Some(mask) = GdiRenderer::rasterize_text_mask_clipped(
+                    &text,
+                    n_x_start + origin_x,
+                    n_y_start + origin_y,
+                    font_height.abs().max(1) as f32,
+                    &clip_rects,
+                ) {
+                    uc.get_data().queue_surface_bitmap_text_mask(
+                        hbmp,
+                        mask.left,
+                        mask.top,
+                        mask.width,
+                        mask.height,
+                        text_color,
+                        mask.alpha,
+                    );
+                }
                 uc.get_data().win_event.lock().unwrap().update_window(hwnd);
             }
         }

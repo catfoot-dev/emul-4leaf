@@ -268,7 +268,7 @@ pub(super) fn mul_div(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
 // API: DWORD GetTickCount(void)
 // 역할: 시스템이 시작된 후 지난 밀리초 시간을 검색
 pub(super) fn get_tick_count(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
-    let elapsed = uc.get_data().start_time.elapsed().as_millis() as u32;
+    let elapsed = crate::diagnostics::virtual_millis(uc.get_data().start_time);
     // crate::emu_log!("[KERNEL32] GetTickCount() -> DWORD {}", elapsed);
     Some(ApiHookResult::callee(0, Some(elapsed as i32)))
 }

@@ -296,6 +296,7 @@ mod tests {
             suspended: false,
             resume_time: None,
             wait_deadline: None,
+            wait_start_time: None,
             wait_handles: Vec::new(),
             wait_sockets: Vec::new(),
         }

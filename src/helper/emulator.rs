@@ -17,6 +17,10 @@ pub(super) const DEBUG_STEP_QUANTUM: usize = 1;
 pub(super) const DEBUG_STATE_SEND_INTERVAL: Duration = Duration::from_millis(250);
 pub(super) const EMULATOR_IDLE_SLEEP_SLICE: Duration = Duration::from_millis(5);
 
+fn trace_boot_enabled() -> bool {
+    std::env::var("EMUL_TRACE_BOOT").ok().as_deref() == Some("1")
+}
+
 pub(crate) fn capture_cpu_context(uc: &mut Unicorn<Win32Context>) -> CpuContext {
     let regs = [
         uc.reg_read(RegisterX86::EAX).unwrap_or(0) as u32,
@@ -69,6 +73,7 @@ pub(crate) fn run_nested_guest_until_exit(
     entry_eip: u64,
 ) -> Result<(), String> {
     let mut next_eip = entry_eip;
+    let mut gif_stall_detector = crate::diagnostics::GifStallDetector::new();
 
     loop {
         if next_eip == EXIT_ADDRESS {
@@ -78,9 +83,11 @@ pub(crate) fn run_nested_guest_until_exit(
             return Err(String::from("execution reached 0x0"));
         }
 
-        if let Err(e) = uc.emu_start(next_eip, EXIT_ADDRESS, 0, DEBUG_AUTO_QUANTUM) {
+        let quantum = crate::diagnostics::emulator_quantum(DEBUG_AUTO_QUANTUM);
+        if let Err(e) = uc.emu_start(next_eip, EXIT_ADDRESS, 0, quantum) {
             return Err(format!("{e:?}"));
         }
+        crate::EMU_HEARTBEAT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let cur_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
         if cur_eip == EXIT_ADDRESS {
@@ -88,6 +95,9 @@ pub(crate) fn run_nested_guest_until_exit(
         }
         if cur_eip == 0 {
             return Err(String::from("execution reached 0x0"));
+        }
+        if let Some(reason) = gif_stall_detector.observe(uc, cur_eip, quantum) {
+            return Err(reason);
         }
 
         KERNEL32::schedule_threads(uc);
@@ -109,16 +119,19 @@ pub(crate) fn setup_impl(
     _state_tx: Option<Sender<CpuContext>>,
     _cmd_rx: Option<Receiver<DebugCommand>>,
 ) -> Result<(), ()> {
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] setup_impl: map stack");
+    }
     // [1] 메모리 맵 설정
-    uc.mem_map(STACK_BASE, STACK_SIZE, Prot::ALL)
+    uc.mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Stack: {:?}", e))?;
     // 스택 오버플로우/경계 읽기 에러 방지 (스택 바로 뒤 4KB 추가 할당)
-    uc.mem_map(STACK_TOP, SIZE_4KB, Prot::ALL)
+    uc.mem_map(STACK_TOP, SIZE_4KB, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Stack Guard: {:?}", e))?;
 
-    uc.mem_map(HEAP_BASE, HEAP_SIZE, Prot::ALL)
+    uc.mem_map(HEAP_BASE, HEAP_SIZE, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Heap: {:?}", e))?;
-    uc.mem_map(SHARED_MEM_BASE, SIZE_4KB, Prot::ALL)
+    uc.mem_map(SHARED_MEM_BASE, SIZE_4KB, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Shared Mem: {:?}", e))?;
 
     // NULL 포인터 접근 방지 (0 ~ 128KB)
@@ -127,8 +140,11 @@ pub(crate) fn setup_impl(
     uc.mem_map(0, 0x2_0000, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Null Page: {:?}", e))?;
 
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] setup_impl: map teb");
+    }
     // [2] TEB (Thread Environment Block) 설정
-    uc.mem_map(TEB_BASE, SIZE_4KB, Prot::ALL)
+    uc.mem_map(TEB_BASE, SIZE_4KB, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map TEB: {:?}", e))?;
     // x86 SEH 체인의 끝은 `-1`이므로 초기 예외 리스트 헤더를 맞춰 둡니다.
     uc.mem_write(TEB_BASE, &0xFFFF_FFFFu32.to_le_bytes())
@@ -149,22 +165,32 @@ pub(crate) fn setup_impl(
             )
         })?;
 
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] setup_impl: map fake import area");
+    }
     // [3] Fake Import Area (API 후킹용 실행 영역)
-    uc.mem_map(FAKE_IMPORT_BASE, 1024 * 1024, Prot::ALL | Prot::EXEC)
+    uc.mem_map(FAKE_IMPORT_BASE, 1024 * 1024, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Fake Import Area: {:?}", e))?;
     // RET (0xC3) 으로 채우기: 코드 훅이 실행된 후 자연스럽게 RET로 복귀
     let ret_fill = vec![0xC3u8; 1024 * 1024];
     uc.mem_write(FAKE_IMPORT_BASE, &ret_fill)
         .map_err(|e| crate::emu_log!("[!] Failed to fill Fake Import Area: {:?}", e))?;
+    uc.mem_protect(FAKE_IMPORT_BASE, 1024 * 1024, Prot::READ | Prot::EXEC)
+        .map_err(|e| crate::emu_log!("[!] Failed to protect Fake Import Area: {:?}", e))?;
 
     // x86 세그먼트 레지스터(SS) 버그 방지를 위해 ESP를 페이지 경계에서 약간 띄움
     uc.reg_write(RegisterX86::ESP, STACK_TOP - 0x1000)
         .map_err(|e| crate::emu_log!("[!] Failed to set initial ESP: {:?}", e))?;
 
     // EXIT_ADDRESS(0xFFFFFFFF)로 return 시의 접근 예외 방용 영역
-    uc.mem_map(0xFFFF_0000, 64 * 1024, Prot::ALL | Prot::EXEC)
+    uc.mem_map(0xFFFF_0000, 64 * 1024, Prot::READ | Prot::WRITE)
         .map_err(|e| crate::emu_log!("[!] Failed to map Exit Area: {:?}", e))?;
+    uc.mem_protect(0xFFFF_0000, 64 * 1024, Prot::READ | Prot::EXEC)
+        .map_err(|e| crate::emu_log!("[!] Failed to protect Exit Area: {:?}", e))?;
 
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] setup_impl: install api hook");
+    }
     // [4] API Call Hook (Fake Address Range)
     // 0xF0000000 대역으로 점프 시 실행되는 훅
     uc.add_code_hook(
@@ -186,6 +212,7 @@ pub(crate) fn setup_impl(
                 let func_name = splits[1];
 
                 let esp_before = uc.reg_read(RegisterX86::ESP).unwrap_or(0);
+                let ret_before = uc.read_u32(esp_before);
 
                 // 1. 이미 로드된 DLL 내부 오프셋에 매핑된 함수가 있는지 확인
                 let func_address = {
@@ -226,6 +253,16 @@ pub(crate) fn setup_impl(
                     // WinCore 내부 메서드가 다시 다른 guest 함수를 호출할 때 상위 프레임이 오염되는
                     // 문제를 막습니다.
                     let _ = uc.reg_write(RegisterX86::EIP, func_address);
+                    crate::diagnostics::record_hook_trace(
+                        &import_func,
+                        crate::dll::win32::StackCleanup::Caller,
+                        None,
+                        esp_before,
+                        uc.reg_read(RegisterX86::ESP).unwrap_or(esp_before),
+                        func_address,
+                        ret_before,
+                        false,
+                    );
                     uc.emu_stop().unwrap_or_default();
                     return;
                 }
@@ -234,6 +271,16 @@ pub(crate) fn setup_impl(
                 if let Some(hook_result) = Win32Context::handle(uc, dll_name, func_name) {
                     if hook_result.retry {
                         // 재시도 요청 시: EIP를 현재 후킹 지점으로 유지하고 실행 중단 (멀티태스킹 양보)
+                        crate::diagnostics::record_hook_trace(
+                            &import_func,
+                            hook_result.cleanup,
+                            hook_result.return_value,
+                            esp_before,
+                            uc.reg_read(RegisterX86::ESP).unwrap_or(esp_before),
+                            uc.reg_read(RegisterX86::EIP).unwrap_or(addr),
+                            ret_before,
+                            true,
+                        );
                         uc.emu_stop().unwrap_or_default();
                         return;
                     }
@@ -256,12 +303,32 @@ pub(crate) fn setup_impl(
                             super::stack_cleanup_final_esp(esp_after, hook_result.cleanup);
                         let _ = uc.reg_write(RegisterX86::ESP, final_esp);
                         let _ = uc.reg_write(RegisterX86::EIP, return_addr as u64);
+                        crate::diagnostics::record_hook_trace(
+                            &import_func,
+                            hook_result.cleanup,
+                            hook_result.return_value,
+                            esp_before,
+                            final_esp,
+                            return_addr as u64,
+                            ret_before,
+                            false,
+                        );
                         uc.emu_stop().unwrap_or_default();
                     } else {
                         // 그 외 DLL은 원래 x86 호출 흐름을 최대한 그대로 두어,
                         // cdecl 호출자 정리 코드(pop ecx; ret 등)가 같은 quantum 안에서
                         // 자연스럽게 이어지도록 합니다.
                         uc.apply_stack_cleanup(hook_result.cleanup);
+                        crate::diagnostics::record_hook_trace(
+                            &import_func,
+                            hook_result.cleanup,
+                            hook_result.return_value,
+                            esp_before,
+                            uc.reg_read(RegisterX86::ESP).unwrap_or(esp_before),
+                            uc.reg_read(RegisterX86::EIP).unwrap_or(addr),
+                            ret_before,
+                            false,
+                        );
                     }
                     return;
                 }
@@ -282,6 +349,9 @@ pub(crate) fn setup_impl(
     )
     .map_err(|e| crate::emu_log!("[!] Failed to install API hook: {:?}", e))?;
 
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] setup_impl: install null-eip hook");
+    }
     // [5] EIP=0 보호를 위한 전용 코드 훅
     // 이전에는 JIT 방지를 위해 전체 주소 범위를 훅했으나, 성능 향상을 위해
     // 실제 문제가 되는 0번지 진입만 차단하는 가벼운 훅으로 대체합니다.
@@ -291,6 +361,9 @@ pub(crate) fn setup_impl(
     })
     .map_err(|e| crate::emu_log!("[!] Failed to install null-eip hook: {:?}", e))?;
 
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] setup_impl: install memory hook");
+    }
     // [6] Unmapped Memory Access Hook
     uc.add_mem_hook(
         HookType::MEM_READ_UNMAPPED
@@ -314,6 +387,29 @@ pub(crate) fn setup_impl(
         },
     )
     .map_err(|e| crate::emu_log!("[!] Failed to install memory hook: {:?}", e))?;
+
+    if crate::diagnostics::trace_gif_enabled() {
+        uc.add_mem_hook(
+            HookType::MEM_WRITE,
+            HEAP_BASE,
+            HEAP_BASE + HEAP_SIZE - 1,
+            |uc, _access, addr, size, value| {
+                if uc
+                    .get_data()
+                    .heap_allocation_for_range(addr, size)
+                    .is_none()
+                {
+                    crate::diagnostics::record_heap_guard_write(addr, size, value);
+                }
+                true
+            },
+        )
+        .map_err(|e| crate::emu_log!("[!] Failed to install heap guard hook: {:?}", e))?;
+    }
+
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] setup_impl: done");
+    }
 
     Ok(())
 }
@@ -356,6 +452,7 @@ pub(crate) fn run_emulator_impl(
     let cmd_rx = cmd_rx;
     let mut debug_auto_run = true;
     let mut debug_last_state_sent = Instant::now();
+    let mut gif_stall_detector = crate::diagnostics::GifStallDetector::new();
 
     // 에뮬레이터 스레드 핸들을 저장하여 UI 스레드에서 unpark로 즉시 깨울 수 있도록 합니다.
     *uc.get_data().emu_thread.lock().unwrap() = Some(std::thread::current());
@@ -367,6 +464,7 @@ pub(crate) fn run_emulator_impl(
     }
 
     loop {
+        crate::EMU_HEARTBEAT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let eip = uc.reg_read(RegisterX86::EIP).unwrap_or(0);
         if eip == EXIT_ADDRESS || eip == 0 {
             break;
@@ -424,7 +522,7 @@ pub(crate) fn run_emulator_impl(
         };
 
         if should_run_main {
-            let quantum = if cmd_rx.is_some() {
+            let base_quantum = if cmd_rx.is_some() {
                 if debug_auto_run {
                     DEBUG_AUTO_QUANTUM
                 } else {
@@ -433,7 +531,14 @@ pub(crate) fn run_emulator_impl(
             } else {
                 200_000
             };
+            let quantum = crate::diagnostics::emulator_quantum(base_quantum);
             let _ = uc.emu_start(eip, EXIT_ADDRESS, 0, quantum);
+            let current_eip = uc.reg_read(RegisterX86::EIP).unwrap_or(eip);
+            if let Some(reason) = gif_stall_detector.observe(uc, current_eip, quantum) {
+                eprintln!("[!] GIF stall detected: {}", reason);
+                crate::emu_log!("[!] GIF stall detected: {}", reason);
+                break;
+            }
         }
 
         // 백그라운드 스레드 스케줄링

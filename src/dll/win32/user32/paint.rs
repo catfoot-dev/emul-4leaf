@@ -223,6 +223,7 @@ pub(super) fn erase_window_background(uc: &mut Unicorn<Win32Context>, hwnd: u32)
         &clip_rects,
     );
     drop(pixels);
+    uc.get_data().note_surface_bitmap_release_sync(hbmp);
     true
 }
 
@@ -281,6 +282,7 @@ pub(super) fn begin_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
             current_y: 0,
         },
     );
+    uc.get_data().begin_surface_bitmap_dc(surface_bitmap);
 
     // PAINTSTRUCT 채우기
     uc.write_u32(lp_paint as u64, hdc); // hdc
@@ -301,7 +303,8 @@ pub(super) fn end_paint(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
     let lp_paint = uc.read_arg(1);
     let hdc = uc.read_u32(lp_paint as u64);
     let ctx = uc.get_data();
-    ctx.gdi_objects.lock().unwrap().remove(&hdc);
+    ctx.release_gdi_dc(hdc);
+    ctx.ensure_window_surface_bitmap_sync(hwnd);
     ctx.win_event.lock().unwrap().update_window(hwnd);
     crate::emu_log!("[USER32] EndPaint({:#x}) -> 1", hwnd);
     Some(ApiHookResult::callee(2, Some(1)))
@@ -604,6 +607,56 @@ pub(super) fn draw_text_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResul
             drop(gdi_objects);
             GDI32::flush_dib_pixels_to_memory(uc, hbmp);
             if hwnd != 0 {
+                for (index, line) in lines.iter().enumerate() {
+                    let line_width = GdiRenderer::measure_text_width(line, font_size);
+                    let draw_x = if (u_format & DT_RIGHT) != 0 {
+                        right - line_width
+                    } else if (u_format & DT_CENTER) != 0 {
+                        left + (rect_width - line_width).max(0) / 2
+                    } else {
+                        left
+                    };
+                    let draw_y = block_y + index as i32 * line_height;
+
+                    if bk_mode == 2 {
+                        for (fill_left, fill_top, fill_right, fill_bottom) in
+                            GDI32::intersect_rect_with_clip_rects(
+                                &Some(clip_rects.clone()),
+                                draw_x + origin_x,
+                                draw_y + origin_y,
+                                draw_x + origin_x + line_width,
+                                draw_y + origin_y + line_height,
+                            )
+                        {
+                            uc.get_data().queue_surface_bitmap_fill_rect(
+                                hbmp,
+                                fill_left,
+                                fill_top,
+                                fill_right,
+                                fill_bottom,
+                                bk_color,
+                            );
+                        }
+                    }
+
+                    if let Some(mask) = GdiRenderer::rasterize_text_mask_clipped(
+                        line,
+                        draw_x + origin_x,
+                        draw_y + origin_y,
+                        font_size,
+                        &clip_rects,
+                    ) {
+                        uc.get_data().queue_surface_bitmap_text_mask(
+                            hbmp,
+                            mask.left,
+                            mask.top,
+                            mask.width,
+                            mask.height,
+                            text_color,
+                            mask.alpha,
+                        );
+                    }
+                }
                 uc.get_data().win_event.lock().unwrap().update_window(hwnd);
             }
         }
@@ -698,6 +751,24 @@ pub(super) fn fill_rect(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult>
             drop(gdi);
             GDI32::flush_dib_pixels_to_memory(uc, hbmp);
             if hwnd != 0 {
+                for (fill_left, fill_top, fill_right, fill_bottom) in
+                    GDI32::intersect_rect_with_clip_rects(
+                        &clip_rects,
+                        left + origin_x,
+                        top + origin_y,
+                        right + origin_x,
+                        bottom + origin_y,
+                    )
+                {
+                    uc.get_data().queue_surface_bitmap_fill_rect(
+                        hbmp,
+                        fill_left,
+                        fill_top,
+                        fill_right,
+                        fill_bottom,
+                        color,
+                    );
+                }
                 uc.get_data().win_event.lock().unwrap().update_window(hwnd);
             }
         }
@@ -759,6 +830,7 @@ pub(super) fn get_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult> {
             current_y: 0,
         },
     );
+    ctx.begin_surface_bitmap_dc(surface_bitmap);
     crate::emu_log!("[USER32] GetDC({:#x}) -> HDC {:#x}", hwnd, hdc);
     Some(ApiHookResult::callee(1, Some(hdc as i32)))
 }
@@ -799,6 +871,7 @@ pub(super) fn get_window_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
             current_y: 0,
         },
     );
+    ctx.begin_surface_bitmap_dc(surface_bitmap);
     crate::emu_log!("[USER32] GetWindowDC({:#x}) -> HDC {:#x}", hwnd, hdc);
     Some(ApiHookResult::callee(1, Some(hdc as i32)))
 }
@@ -809,7 +882,8 @@ pub(super) fn release_dc(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookResult
     let hwnd = uc.read_arg(0);
     let hdc = uc.read_arg(1);
     let ctx = uc.get_data();
-    ctx.gdi_objects.lock().unwrap().remove(&hdc);
+    ctx.release_gdi_dc(hdc);
+    ctx.ensure_window_surface_bitmap_sync(hwnd);
     ctx.win_event.lock().unwrap().update_window(hwnd);
     crate::emu_log!("[USER32] ReleaseDC({:#x}, {:#x}) -> INT 1", hwnd, hdc);
     Some(ApiHookResult::callee(2, Some(1)))

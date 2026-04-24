@@ -5,9 +5,9 @@
 
 #![windows_subsystem = "windows"]
 
-mod boot;
 mod debug;
 mod dll;
+mod resource;
 mod server;
 #[macro_use]
 mod helper;
@@ -19,21 +19,33 @@ pub use debug::logging::{
 };
 
 // 리소스 디렉토리 재수출
-pub use boot::resource_dir;
+pub use resource::resource_dir;
 
 use dll::win32::{LoadedDll, Win32Context};
 use helper::{SHARED_MEM_BASE, UnicornHelper};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::{any::Any, env, thread};
+
+pub static UI_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+pub static EMU_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+pub static EMU_RUNNING: AtomicBool = AtomicBool::new(false);
 use unicorn_engine::{
     Unicorn,
     unicorn_const::{Arch, Mode},
 };
 
-use crate::boot::{LIBLARY_4LEAF, LIBLARY_CORE, LIBLARY_DNET, LIBLARY_LIME, LIBLARY_WINCORE};
-use crate::debug::common::{CpuContext, DebugCommand};
+use crate::debug::{
+    common::{CpuContext, DebugCommand},
+    diagnostics,
+};
+use crate::resource::{LIBLARY_4LEAF, LIBLARY_CORE, LIBLARY_DNET, LIBLARY_LIME, LIBLARY_WINCORE};
 use crate::ui::UiCommand;
+
+fn trace_boot_enabled() -> bool {
+    env::var("EMUL_TRACE_BOOT").ok().as_deref() == Some("1")
+}
 
 /// 에뮬레이션 로그 출력을 위한 매크로입니다.
 /// 호출 시 전역 인덱스를 부여하고 특수 문자(\r, \n)를 이스케이프 처리하여 기록합니다.
@@ -71,7 +83,7 @@ macro_rules! emu_socket_log {
 /// 어플리케이션 메인 진입점입니다.
 /// 하위 시스템(로그, 에뮬레이션, 서버, UI)들을 초기화하고 실행합니다.
 fn main() {
-    boot::detect_resource_dir();
+    resource::detect_resource_dir();
     init_logger();
 
     let headless_mode = env::var("EMUL_HEADLESS").ok().as_deref() == Some("1");
@@ -83,11 +95,37 @@ fn main() {
     let (ui_tx, ui_rx) = channel::<UiCommand>();
     let (splash_tx, splash_rx) = channel::<()>();
 
+    // Watchdog 스레드 실행
+    thread::spawn(|| {
+        let mut last_ui = 0;
+        let mut last_emu = 0;
+        loop {
+            thread::sleep(std::time::Duration::from_secs(5));
+            let ui = UI_HEARTBEAT.load(Ordering::Relaxed);
+            let emu = EMU_HEARTBEAT.load(Ordering::Relaxed);
+
+            if ui == last_ui && ui != 0 {
+                println!("[WATCHDOG] UI thread might be deadlocked! (No heartbeat for 5+ secs)");
+            }
+            if EMU_RUNNING.load(Ordering::Relaxed) && emu == last_emu && emu != 0 {
+                println!(
+                    "[WATCHDOG] Emulator thread might be deadlocked! (No heartbeat for 5+ secs)"
+                );
+            }
+
+            last_ui = ui;
+            last_emu = emu;
+        }
+    });
+
     // 1. Win32 에뮬레이션 상태 컨텍스트 생성 (Arc로 내부 상태 공유 가능)
     let context = Win32Context::new(Some(ui_tx.clone()));
 
     if headless_mode {
-        if let Err(e) = emu_4leaf(None, None, ui_tx, context, splash_tx) {
+        EMU_RUNNING.store(true, Ordering::Relaxed);
+        let result = emu_4leaf(None, None, ui_tx, context, splash_tx);
+        EMU_RUNNING.store(false, Ordering::Relaxed);
+        if let Err(e) = result {
             println!("[4leaf Emulator Error] {:?}", e);
         }
         return;
@@ -96,13 +134,16 @@ fn main() {
     let context_for_emu = context.clone();
     // 1. 에뮬레이션 코어 스레드 실행
     thread::spawn(move || {
-        if let Err(e) = emu_4leaf(
+        EMU_RUNNING.store(true, Ordering::Relaxed);
+        let result = emu_4leaf(
             (!headless_mode && debug_window_enabled).then_some(state_tx),
             (!headless_mode && debug_window_enabled).then_some(cmd_rx),
             ui_tx,
             context_for_emu,
             splash_tx,
-        ) {
+        );
+        EMU_RUNNING.store(false, Ordering::Relaxed);
+        if let Err(e) = result {
             println!("[4leaf Emulator Error] {:?}", e);
         }
     });
@@ -141,16 +182,34 @@ fn emu_4leaf(
     state_tx: Option<Sender<CpuContext>>,
     cmd_rx: Option<Receiver<DebugCommand>>,
     _ui_tx: Sender<UiCommand>,
-    context: Win32Context,
+    mut context: Win32Context,
     splash_tx: Sender<()>,
 ) -> Result<(), ()> {
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] emu_4leaf: begin");
+    }
+    // WS2_32::connect 성공 시점에 스플래시 창을 닫을 수 있도록 채널을 보관합니다.
+    context.splash_close_tx = Some(splash_tx);
+
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] emu_4leaf: before Unicorn::new_with_data");
+    }
     let mut unicorn = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, context)
         .expect("Failed to create the Unicorn instance");
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] emu_4leaf: after Unicorn::new_with_data");
+    }
 
     // 기본 훅 및 상태 전달 설정
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] emu_4leaf: before setup");
+    }
     unicorn.setup(None, None).map_err(|e| {
         crate::emu_log!("[!] Infrastructure setup failed: {:?}", e);
     })?;
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] emu_4leaf: after setup");
+    }
 
     // Rare.dll은 호스트 프록시로 처리하므로 모듈 메타데이터만 선등록합니다.
     unicorn.get_data().dll_modules.lock().unwrap().insert(
@@ -181,6 +240,12 @@ fn emu_4leaf(
     for (i, dll_name) in dll_list.iter().enumerate() {
         let target_base = address_begin + (i as u64 * 0x0200_0000);
         let filename = resource_dir().join(dll_name).to_string_lossy().to_string();
+        if trace_boot_enabled() {
+            eprintln!(
+                "[TRACE] emu_4leaf: loading {} @ {:#x}",
+                dll_name, target_base
+            );
+        }
 
         crate::emu_log!("[*] Loading {} at {:#x}...", dll_name, target_base);
 
@@ -190,24 +255,35 @@ fn emu_4leaf(
             .map_err(|_| {
                 crate::emu_log!("[!] Critical: Failed to load {}", dll_name);
             })?;
+        if trace_boot_enabled() {
+            eprintln!("[TRACE] emu_4leaf: loaded {}", dll_name);
+        }
 
         // 2. IAT(Import Address Table) 해결
         unicorn.resolve_imports(&loaded_dll).map_err(|_| {
             crate::emu_log!("[!] Critical: Failed to resolve imports for {}", dll_name);
         })?;
+        if trace_boot_enabled() {
+            eprintln!("[TRACE] emu_4leaf: resolved imports {}", dll_name);
+        }
 
         // 3. DllMain 실행
         unicorn.run_dll_entry(&loaded_dll).map_err(|_| {
             crate::emu_log!("[!] Critical: DllMain failed for {}", dll_name);
         })?;
+        if trace_boot_enabled() {
+            eprintln!("[TRACE] emu_4leaf: ran entry {}", dll_name);
+        }
     }
 
-    // 모든 자격 증명이 로드되었음을 알리고 스플래시 창 종료 유도
-    let _ = splash_tx.send(());
-    crate::ui::win_event::WinEvent::notify_wakeup();
-
     // 4Leaf 메인 루틴 실행
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] emu_4leaf: before run_4leaf_main");
+    }
     run_4leaf_main(&mut unicorn, state_tx, cmd_rx);
+    if trace_boot_enabled() {
+        eprintln!("[TRACE] emu_4leaf: after run_4leaf_main");
+    }
 
     Ok(())
 }

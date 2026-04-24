@@ -231,7 +231,9 @@ pub(super) fn create_window_ex_a(uc: &mut Unicorn<Win32Context>) -> Option<ApiHo
         guest_frame_right: 0,
         guest_frame_bottom: 0,
         guest_frame_exact: false,
-        needs_paint: true,
+        // Lime은 창 생성 직후 아직 비어 있는 LBuffer를 만든 뒤 컨트롤 내용을 채웁니다.
+        // 여기서 곧바로 합성 WM_PAINT를 예약하면 빈 DIB가 먼저 화면에 올라와 검은 글리치가 보입니다.
+        needs_paint: false,
         last_hittest_lparam: u32::MAX,
         last_hittest_result: 0,
         z_order: 0,
@@ -399,7 +401,7 @@ pub(super) fn update_window(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRes
     };
 
     if needs_paint {
-        let time = ctx.start_time.elapsed().as_millis() as u32;
+        let time = crate::diagnostics::virtual_millis(ctx.start_time);
         let target_tid = ctx.window_owner_thread_id(hwnd);
         ctx.with_thread_message_queue(target_tid, |queue| {
             if !queue.iter().any(|m| m[0] == hwnd && m[1] == 0x000F) {
@@ -1062,6 +1064,7 @@ pub(super) fn set_window_rgn(uc: &mut Unicorn<Win32Context>) -> Option<ApiHookRe
         0
     };
 
+    drop(win_event);
     crate::emu_log!(
         "[USER32] SetWindowRgn({:#x}, {:#x}, {:#x}) -> int {}",
         hwnd,

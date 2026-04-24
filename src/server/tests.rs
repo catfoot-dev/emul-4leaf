@@ -6,8 +6,8 @@ use super::{
     domain::world::{build_provisional_worldmap_stage_payload, build_worldmap_response},
     protocol, run_dnet_handler,
     session::{
-        SessionInfo, build_avatar_detail_data, build_avatar_dialog_bootstrap_payload,
-        build_avatar_dialog_record,
+        AVATAR_DIALOG_FLAG_ALLOW_CREATE, SessionInfo, build_avatar_detail_data,
+        build_avatar_dialog_bootstrap_payload, build_avatar_dialog_record,
     },
 };
 
@@ -138,6 +138,7 @@ fn avatar_detail_data_has_expected_size() {
         gp: 1000,
         fp: 500,
         has_avatar: true,
+        avatar_dialog_flags: 0,
     };
     let data = build_avatar_detail_data(&session);
 
@@ -155,6 +156,7 @@ fn avatar_dialog_record_has_expected_size_and_nickname_slot() {
         gp: 1000,
         fp: 500,
         has_avatar: true,
+        avatar_dialog_flags: 0,
     };
 
     let record = build_avatar_dialog_record(&session);
@@ -173,6 +175,7 @@ fn avatar_dialog_bootstrap_payload_has_expected_layout() {
         gp: 1000,
         fp: 500,
         has_avatar: true,
+        avatar_dialog_flags: 0,
     };
 
     let payload = build_avatar_dialog_bootstrap_payload(&session);
@@ -195,11 +198,13 @@ fn avatar_dialog_bootstrap_payload_supports_empty_avatar_slots() {
         gp: 1000,
         fp: 0,
         has_avatar: false,
+        avatar_dialog_flags: AVATAR_DIALOG_FLAG_ALLOW_CREATE,
     };
 
     let payload = build_avatar_dialog_bootstrap_payload(&session);
 
     assert_eq!(payload.len(), 0x431);
+    assert_eq!(payload[0x38], AVATAR_DIALOG_FLAG_ALLOW_CREATE);
     assert_eq!(payload[0x39], 0);
     assert_eq!(payload[0x3a], 0);
     assert!(
@@ -244,6 +249,7 @@ fn login_response_streams_avatar_bootstrap_then_legacy_login_packet() {
         0
     );
     assert_eq!(first_len, 8 + 0x431);
+    assert_eq!(response_stream[12 + 0x38], AVATAR_DIALOG_FLAG_ALLOW_CREATE);
 
     let second_offset = 4 + first_len;
     assert_eq!(

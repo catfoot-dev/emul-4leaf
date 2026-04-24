@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+/// 아바타 선택 창에서 만들기 버튼 진입을 허용하는 플래그입니다.
+pub(crate) const AVATAR_DIALOG_FLAG_ALLOW_CREATE: u8 = 0x01;
+
 /// 로그인 이후 클라이언트가 참조하는 세션 상태를 나타냅니다.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionInfo {
@@ -10,6 +13,7 @@ pub(crate) struct SessionInfo {
     pub(crate) gp: u32,
     pub(crate) fp: u32,
     pub(crate) has_avatar: bool,
+    pub(crate) avatar_dialog_flags: u8,
 }
 
 /// 서버 에뮬레이터가 유지하는 인메모리 게임 상태입니다.
@@ -50,6 +54,7 @@ pub(crate) fn build_default_session(user_id: &str) -> SessionInfo {
         gp: 1000,
         fp: 0,
         has_avatar: false,
+        avatar_dialog_flags: AVATAR_DIALOG_FLAG_ALLOW_CREATE,
     }
 }
 
@@ -116,7 +121,8 @@ pub(crate) fn build_avatar_dialog_bootstrap_payload(session: &SessionInfo) -> Ve
     const FLAG_LEN: usize = 0x01;
     const BLOCK_LEN: usize = 0x1fc;
     const TOTAL_LEN: usize = HEADER_LEN + SUMMARY_LEN + FLAG_LEN + BLOCK_LEN + BLOCK_LEN;
-    const BLOCK_A_OFFSET: usize = HEADER_LEN + SUMMARY_LEN + FLAG_LEN;
+    const FLAGS_OFFSET: usize = HEADER_LEN + SUMMARY_LEN;
+    const BLOCK_A_OFFSET: usize = FLAGS_OFFSET + FLAG_LEN;
     const BLOCK_B_OFFSET: usize = BLOCK_A_OFFSET + BLOCK_LEN;
     const RECORD_OFFSET: usize = 0x7c;
 
@@ -126,6 +132,9 @@ pub(crate) fn build_avatar_dialog_bootstrap_payload(session: &SessionInfo) -> Ve
     summary[0] = session.character;
     summary[4..8].copy_from_slice(&session.gp.to_le_bytes());
     summary[8..12].copy_from_slice(&session.fp.to_le_bytes());
+
+    // 빈 슬롯만으로는 생성 진입이 막히므로 별도 허용 플래그를 세웁니다.
+    payload[FLAGS_OFFSET] = session.avatar_dialog_flags;
 
     let (prefix, block_b_tail) = payload.split_at_mut(BLOCK_B_OFFSET);
     let block_a = &mut prefix[BLOCK_A_OFFSET..BLOCK_A_OFFSET + BLOCK_LEN];

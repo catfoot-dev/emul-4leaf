@@ -1,4 +1,5 @@
 pub mod gdi_renderer;
+pub mod render;
 pub mod splash;
 pub mod win_event;
 pub mod win_frame;
