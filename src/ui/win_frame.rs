@@ -45,7 +45,10 @@ const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 #[cfg(target_os = "windows")]
 const WS_EX_APPWINDOW: u32 = 0x0004_0000;
 const WM_CHAR: u32 = 0x0102;
-const WM_IME_CHAR: u32 = 0x0286;
+const WM_IME_STARTCOMPOSITION: u32 = 0x010D;
+const WM_IME_ENDCOMPOSITION: u32 = 0x010E;
+const WM_IME_COMPOSITION: u32 = 0x010F;
+const GCS_RESULTSTR: u32 = 0x0800;
 const GUEST_REDRAW_COALESCE_DELAY: Duration = Duration::from_millis(2);
 const SURFACE_RETRY_DELAY: Duration = Duration::from_millis(16);
 
@@ -217,7 +220,7 @@ pub struct WinFrame {
 }
 
 impl WinFrame {
-    fn encode_committed_char_for_ansi(ch: char) -> Vec<u32> {
+    fn encode_committed_char_for_ime_composition(ch: char) -> Vec<u32> {
         if (ch as u32) < 0x80 {
             return vec![ch as u32];
         }
@@ -233,7 +236,7 @@ impl WinFrame {
         let mut index = 0usize;
         while index < bytes.len() {
             if index + 1 < bytes.len() {
-                result.push(bytes[index] as u32 | ((bytes[index + 1] as u32) << 8));
+                result.push(((bytes[index] as u32) << 8) | bytes[index + 1] as u32);
                 index += 2;
             } else {
                 result.push(bytes[index] as u32);
@@ -243,15 +246,25 @@ impl WinFrame {
         result
     }
 
-    fn committed_char_messages(ch: char) -> Vec<(u32, u32)> {
+    fn committed_char_messages(ch: char) -> Vec<(u32, u32, u32)> {
         if (ch as u32) < 0x80 {
-            return vec![(WM_CHAR, ch as u32)];
+            return vec![(WM_CHAR, ch as u32, 0)];
         }
 
-        Self::encode_committed_char_for_ansi(ch)
-            .into_iter()
-            .map(|value| (WM_IME_CHAR, value))
-            .collect()
+        let encoded = Self::encode_committed_char_for_ime_composition(ch);
+        if encoded.is_empty() {
+            return Vec::new();
+        }
+
+        let mut messages = Vec::with_capacity(encoded.len() * 2 + 2);
+        messages.push((WM_IME_STARTCOMPOSITION, 0, 0));
+        for value in encoded {
+            // Lime의 LEdit는 조합 문자열을 먼저 반영한 뒤 결과 문자열로 확정해야 내부 IME 상태를 해제합니다.
+            messages.push((WM_IME_COMPOSITION, value, 0));
+            messages.push((WM_IME_COMPOSITION, value, GCS_RESULTSTR));
+        }
+        messages.push((WM_IME_ENDCOMPOSITION, 0, 0));
+        messages
     }
 
     fn activation_focus_targets(&self, root_hwnd: u32) -> Vec<u32> {
@@ -1749,16 +1762,16 @@ impl ApplicationHandler<()> for WinFrame {
                 }
             }
 
-            // IME로 조합 완성된 문자는 ANSI 앱 기준으로
-            // ASCII는 `WM_CHAR`, DBCS(한글)는 `WM_IME_CHAR`로 전달합니다.
+            // IME로 조합 완성된 문자는 ANSI 앱 기준으로 전달합니다.
+            // Lime의 LEdit는 `WM_IME_CHAR`가 비어 있어 `WM_IME_COMPOSITION` 경로를 사용합니다.
             WindowEvent::Ime(Ime::Commit(s)) => {
                 if let Some(&hwnd) = self.id_to_hwnd.get(&id) {
                     let target_tid = self.emu_context.window_owner_thread_id(hwnd);
                     for ch in s.chars() {
                         let committed_messages = Self::committed_char_messages(ch);
                         self.emu_context.with_thread_message_queue(target_tid, |q| {
-                            for &(message, value) in &committed_messages {
-                                q.push_back([hwnd, message, value, 0, 0, 0, 0]);
+                            for &(message, value, lparam) in &committed_messages {
+                                q.push_back([hwnd, message, value, lparam, 0, 0, 0]);
                             }
                         });
                     }
@@ -2089,13 +2102,30 @@ mod tests {
 
     #[test]
     fn ansi_commit_encoding_keeps_ascii_as_single_byte() {
-        assert_eq!(WinFrame::encode_committed_char_for_ansi('A'), vec![0x41]);
+        assert_eq!(
+            WinFrame::encode_committed_char_for_ime_composition('A'),
+            vec![0x41]
+        );
     }
 
     #[test]
-    fn ansi_commit_encoding_packs_hangul_into_single_wparam() {
-        let packed = WinFrame::encode_committed_char_for_ansi('한');
+    fn ime_composition_encoding_packs_hangul_in_lime_order() {
+        let packed = WinFrame::encode_committed_char_for_ime_composition('한');
         assert_eq!(packed.len(), 1);
-        assert_eq!(packed[0], 0xD1C7);
+        assert_eq!(packed[0], 0xC7D1);
+    }
+
+    #[test]
+    fn hangul_commit_uses_composition_messages() {
+        let messages = WinFrame::committed_char_messages('한');
+        assert_eq!(
+            messages,
+            vec![
+                (0x010D, 0, 0),
+                (0x010F, 0xC7D1, 0),
+                (0x010F, 0xC7D1, 0x0800),
+                (0x010E, 0, 0),
+            ]
+        );
     }
 }
